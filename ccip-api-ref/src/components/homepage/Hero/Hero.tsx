@@ -23,12 +23,12 @@ export function Hero(): React.JSX.Element {
           <Link className={styles.buttonPrimary} to="/cli/">
             CLI Reference
           </Link>
-          <Link
+          {/* <Link
             className={styles.buttonSecondary}
             to="https://github.com/smartcontractkit/ccip-tools-ts"
           >
             GitHub
-          </Link>
+          </Link> */}
         </div>
       </div>
     </header>
