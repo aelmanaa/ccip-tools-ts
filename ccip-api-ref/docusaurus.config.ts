@@ -200,7 +200,7 @@ const config: Config = {
         // Disable debug plugin to prevent build errors
         debug: false,
         theme: {
-          customCss: './src/css/custom.css',
+          customCss: './src/css/custom-nader.css',
         },
       } satisfies Preset.Options,
     ],
