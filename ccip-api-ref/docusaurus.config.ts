@@ -16,8 +16,8 @@ const cliPackage: PackageJson = cliPackageJson as PackageJson
 const sdkPackage: PackageJson = sdkPackageJson as PackageJson
 
 const config: Config = {
-  title: 'CCIP Tools',
-  tagline: 'SDK and CLI for Chainlink Cross-Chain Interoperability Protocol',
+  title: 'CCIP Tools Reference',
+  tagline: 'API, SDK and CLI for Chainlink Cross-Chain Interoperability Protocol',
 
   url: 'https://docs.chain.link',
   baseUrl: '/ccip-tools/',
