@@ -5,9 +5,12 @@
 
 .hero {
   padding: var(--space-16x, 64px) var(--space-4x, 16px);
-  background: linear-gradient(180deg,#f1f5fe,#fff);
-  color: white;
+  background: linear-gradient(180deg, #f1f5fe, #fff);
   text-align: center;
+}
+
+[data-theme='dark'] .hero {
+  background: linear-gradient(180deg, var(--gray-900, #1a1d21), var(--gray-950, #0f1114));
 }
 
 .container {
@@ -19,13 +22,13 @@
   font-size: 3rem;
   font-weight: 600;
   margin-bottom: var(--space-4x, 16px);
-  color: var(--gray-900);
+  color: var(--ifm-heading-color);
 }
 
 .subtitle {
   font-size: 1.25rem;
   margin-bottom: var(--space-8x, 32px);
-  color: var(--gray-900);
+  color: var(--ifm-font-color-secondary);
   max-width: 600px;
   margin-left: auto;
   margin-right: auto;
@@ -58,13 +61,23 @@
   transform: translateY(-2px);
 }
 
+[data-theme='dark'] .buttonPrimary {
+  background-color: var(--ifm-color-primary);
+  color: white;
+}
+
+[data-theme='dark'] .buttonPrimary:hover {
+  background-color: var(--ifm-color-primary-light);
+  color: white;
+}
+
 .buttonSecondary {
   display: inline-flex;
   align-items: center;
   padding: var(--space-3x, 12px) var(--space-6x, 24px);
   background-color: transparent;
-  color: white;
-  border: 2px solid rgba(255, 255, 255, 0.5);
+  color: var(--chainlink-blue, #375bd2);
+  border: 2px solid var(--chainlink-blue, #375bd2);
   border-radius: var(--ifm-border-radius, 4px);
   font-weight: 600;
   text-decoration: none;
@@ -72,10 +85,21 @@
 }
 
 .buttonSecondary:hover {
-  background-color: rgba(255, 255, 255, 0.1);
-  border-color: white;
-  color: white;
+  background-color: rgba(55, 91, 210, 0.1);
+  border-color: var(--chainlink-blue-hover, #1a2b6b);
+  color: var(--chainlink-blue-hover, #1a2b6b);
   text-decoration: none;
+}
+
+[data-theme='dark'] .buttonSecondary {
+  color: var(--ifm-color-primary-light);
+  border-color: var(--ifm-color-primary-light);
+}
+
+[data-theme='dark'] .buttonSecondary:hover {
+  background-color: rgba(90, 141, 238, 0.15);
+  border-color: var(--ifm-color-primary-lighter);
+  color: var(--ifm-color-primary-lighter);
 }
 
 @media (max-width: 768px) {
