@@ -29,6 +29,7 @@
   margin-bottom: var(--space-8x, 32px);
   font-size: 1.1rem;
   line-height: 1.6;
+  max-width: 100%;
 }
 
 .installCards {

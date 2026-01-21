@@ -200,7 +200,7 @@ const config: Config = {
         // Disable debug plugin to prevent build errors
         debug: false,
         theme: {
-          customCss: './src/css/custom-nader.css',
+          customCss: './src/css/custom.css',
         },
       } satisfies Preset.Options,
     ],
@@ -326,8 +326,8 @@ const config: Config = {
               href: 'https://github.com/smartcontractkit/ccip-tools-ts',
             },
             {
-              label: 'Twitter',
-              href: 'https://twitter.com/chainlink',
+              label: 'X',
+              href: 'https://x.com/chainlink',
             },
           ],
         },
