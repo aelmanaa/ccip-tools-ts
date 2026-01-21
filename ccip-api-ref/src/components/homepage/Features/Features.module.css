@@ -108,7 +108,7 @@
 
 .cardLink:hover {
   color: var(--chainlink-blue-hover, #1a2b6b);
-  text-decoration: underline;
+  text-decoration: none;
 }
 
 [data-theme='dark'] .cardLink {
