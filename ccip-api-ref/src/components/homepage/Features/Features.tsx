@@ -59,10 +59,10 @@ function FeatureCard({
 }: FeatureCardProps): React.JSX.Element {
   return (
     <div className={styles.card}>
-      <div className={styles.cardIconWrapper}>{icon}</div>
-      <h3 className={styles.cardTitle}>{title}</h3>
-      <p className={styles.cardDescription}>{description}</p>
       <Link className={styles.cardLink} to={link}>
+        <div className={styles.cardIconWrapper}>{icon}</div>
+        <h3 className={styles.cardTitle}>{title}</h3>
+        <p className={styles.cardDescription}>{description}</p>
         {linkText} →
       </Link>
     </div>
@@ -74,10 +74,6 @@ export function Features(): React.JSX.Element {
   return (
     <section className={styles.features}>
       <div className={styles.container}>
-        <h2 className={styles.title}>Documentation</h2>
-        <p className={styles.subtitle}>
-          Comprehensive references for building cross-chain applications with CCIP
-        </p>
         <div className={styles.grid}>
           <FeatureCard
             icon={<ApiIcon />}
