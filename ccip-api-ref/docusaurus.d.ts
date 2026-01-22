@@ -82,6 +82,45 @@ declare module 'postman-collection' {
   export default Request
 }
 
+declare module '@docusaurus/plugin-content-docs/lib/sidebars/types' {
+  export interface SidebarItemDoc {
+    type: 'doc'
+    id: string
+    label?: string
+  }
+
+  export interface SidebarItemCategory {
+    type: 'category'
+    label: string
+    items: SidebarItem[]
+    collapsed?: boolean
+  }
+
+  export interface SidebarItemLink {
+    type: 'link'
+    label: string
+    href: string
+  }
+
+  export type SidebarItem = SidebarItemDoc | SidebarItemCategory | SidebarItemLink
+
+  // Additional exports needed by docusaurus-plugin-openapi-docs
+  export interface PropSidebarItemCategory {
+    type: 'category'
+    label: string
+    items: PropSidebarItem[]
+    collapsed?: boolean
+    collapsible?: boolean
+  }
+
+  export interface PropSidebar {
+    name: string
+    items: PropSidebarItem[]
+  }
+
+  export type PropSidebarItem = PropSidebarItemCategory | SidebarItemDoc | SidebarItemLink
+}
+
 declare module '@docusaurus/plugin-content-docs/src/sidebars/types' {
   export interface SidebarItemDoc {
     type: 'doc'
