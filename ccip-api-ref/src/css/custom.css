@@ -560,6 +560,10 @@ button[class*='copyButton']:hover {
   display: none !important;
 }
 
+.openapi-explorer__code-block-code-line-content .token.plain {
+  color: var(--gray-100) !important;
+}
+
 /* Fix code block overflow - enable horizontal scrolling */
 /* Target the outer container that constrains width */
 .openapi-tabs__code-container,
