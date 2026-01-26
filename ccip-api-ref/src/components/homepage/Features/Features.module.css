@@ -2,7 +2,7 @@
  * Features section styles
  */
 
- .features {
+.features {
   padding: var(--space-16x, 64px) var(--space-4x, 16px);
   background-color: var(--ifm-background-color);
 }
