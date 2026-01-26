@@ -2,7 +2,7 @@
  * Features section styles
  */
 
-.features {
+ .features {
   padding: var(--space-16x, 64px) var(--space-4x, 16px);
   background-color: var(--ifm-background-color);
 }
@@ -64,7 +64,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, var(--chainlink-blue, #375bd2) 0%, #5a8dee 100%);
+  background: var(--chainlink-blue);
+  /* background: linear-gradient(135deg, var(--chainlink-blue, #375bd2) 0%, #5a8dee 100%); */
   border-radius: 12px;
   margin-bottom: var(--space-4x, 16px);
 }

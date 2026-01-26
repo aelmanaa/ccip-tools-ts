@@ -122,8 +122,10 @@
   --card-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   --card-shadow-hover: 0 8px 24px rgba(0, 0, 0, 0.4);
 
+
   /* h1, h2, h3, ... colors */
   --ifm-heading-color: rgb(99, 112, 131);
+
 }
 
 /* === NAVBAR STYLING (consistent with main docs) === */
@@ -558,6 +560,10 @@ button[class*='copyButton']:hover {
   display: none !important;
 }
 
+.openapi-explorer__code-block-code-line-content .token.plain {
+  color: var(--gray-100) !important;
+}
+
 /* Fix code block overflow - enable horizontal scrolling */
 /* Target the outer container that constrains width */
 .openapi-tabs__code-container,
@@ -651,6 +657,8 @@ article > div:last-of-type:not(.theme-doc-markdown):has(p:first-child):has(butto
   display: none !important;
 }
 
+
+
 /* === GITHUB/DISCORD NAVBAR ICONS === */
 .header-github-link,
 .header-discord-link {
@@ -717,6 +725,7 @@ article > div:last-of-type:not(.theme-doc-markdown):has(p:first-child):has(butto
 .navbar__link--active {
   font-weight: 600;
 }
+
 
 /* === BREADCRUMBS STYLING === */
 .breadcrumbs {
