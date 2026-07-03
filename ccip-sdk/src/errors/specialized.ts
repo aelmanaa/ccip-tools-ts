@@ -3150,6 +3150,43 @@ export class CCIPTokenNotFoundError extends CCIPError {
   }
 }
 
+/**
+ * Thrown when the ERC20 `_balances` storage slot for a token cannot be located, so
+ * {@link estimateExecGas}'s post-mint balance state-override cannot be constructed.
+ *
+ * This surfaces instead of a raw `CALL_EXCEPTION` for tokens whose balances are not at a
+ * low-integer storage slot and whose slot could not be discovered dynamically (e.g. an
+ * ERC-1967 proxy with ERC-7201 namespaced storage on a provider that does not support
+ * `eth_createAccessList`).
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await estimateExecGas({ provider, router, message })
+ * } catch (error) {
+ *   if (error instanceof CCIPBalancesSlotNotFoundError) {
+ *     console.log(`Could not locate balances slot for ${error.context.token}`)
+ *   }
+ * }
+ * ```
+ */
+export class CCIPBalancesSlotNotFoundError extends CCIPError {
+  override readonly name = 'CCIPBalancesSlotNotFoundError'
+  /** Creates a balances-slot-not-found error. */
+  constructor(token: string, options?: CCIPErrorOptions) {
+    super(
+      CCIPErrorCode.BALANCES_SLOT_NOT_FOUND,
+      `Could not locate ERC20 _balances storage slot for token ${token}; ` +
+        `cannot construct post-mint balance override for gas estimation`,
+      {
+        ...options,
+        isTransient: false,
+        context: { ...options?.context, token },
+      },
+    )
+  }
+}
+
 /** Thrown when account has insufficient balance for operation. */
 export class CCIPInsufficientBalanceError extends CCIPError {
   override readonly name = 'CCIPInsufficientBalanceError'

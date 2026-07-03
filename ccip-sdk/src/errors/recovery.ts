@@ -197,6 +197,9 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
   BORSH_TYPE_UNKNOWN: 'Unknown Borsh type in schema.',
   BORSH_METHOD_UNKNOWN: 'Unknown Borsh method.',
 
+  BALANCES_SLOT_NOT_FOUND:
+    'Could not locate the token _balances storage slot for the post-mint balance override. Use an RPC that supports eth_createAccessList, or pass a known balances slot override.',
+
   ARGUMENT_INVALID: 'Check the command-line argument format and requirements.',
   INSUFFICIENT_BALANCE: 'Fund the wallet to cover the transaction fee.',
   INTERACTIVE_REQUIRED:

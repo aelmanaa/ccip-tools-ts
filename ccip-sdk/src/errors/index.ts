@@ -74,6 +74,9 @@ export {
   CCIPExtraArgsParseError,
 } from './specialized.ts'
 
+// Specialized errors - Gas Estimation
+export { CCIPBalancesSlotNotFoundError } from './specialized.ts'
+
 // Specialized errors - Token & Registry
 export {
   CCIPLegacyTokenPoolsUnsupportedError,
