@@ -24,6 +24,7 @@ import updateNotifier from 'update-notifier'
 import yargs, { type ArgumentsCamelCase, type InferredOptionTypes } from 'yargs'
 import { hideBin } from 'yargs/helpers'
 
+import { FORMATS, coerceFormat, lastIfRepeated, preprocessArgv } from './argv.ts'
 import { Format } from './commands/index.ts'
 
 util.inspect.defaultOptions.depth = 6 // print down to tokenAmounts in requests
@@ -84,8 +85,9 @@ const globalOpts = {
     describe:
       "Output to console format: pretty tables, node's console.log or JSON " +
       '(large ints are plain JSON numbers; parse with jsonParse from @chainlink/ccip-sdk, not JSON.parse)',
-    choices: Object.values(Format),
+    choices: FORMATS,
     default: Format.pretty,
+    coerce: coerceFormat,
   },
   verbose: {
     alias: 'v',
@@ -96,10 +98,11 @@ const globalOpts = {
     type: 'string',
     describe: 'CCIP API URL (use --no-api to disable, enabled by default)',
     defaultDescription: 'true',
-    coerce: (arg: string | undefined): string | boolean => {
-      if (arg === 'false' || arg === 'no') return false
-      if (arg == null || arg === 'true' || arg === 'yes') return true
-      return arg // it's a URL string
+    coerce: (arg: string | string[] | undefined): string | boolean => {
+      const value = lastIfRepeated(arg)
+      if (value === 'false' || value === 'no') return false
+      if (value == null || value === 'true' || value === 'yes') return true
+      return value // it's a URL string
     },
   },
   interactive: {
@@ -123,17 +126,6 @@ const globalOpts = {
 
 /** Type for global CLI options. */
 export type GlobalOpts = ArgumentsCamelCase<InferredOptionTypes<typeof globalOpts>>
-
-function preprocessArgv(argv: string[]): string[] {
-  const result = argv.flatMap((arg) => {
-    if (arg === '--no-api') return '--api=false'
-    if (arg === '--json') return ['--format=json']
-    if (arg === '--no-estimate-gas-limit') return '--estimate-gas-limit=-100'
-    return arg
-  })
-  if (!process.stdin.isTTY && !result.includes('--no-interactive')) result.push('--no-interactive')
-  return result
-}
 
 async function main() {
   await yargs(preprocessArgv(hideBin(process.argv)))

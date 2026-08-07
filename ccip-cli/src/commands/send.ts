@@ -39,6 +39,7 @@ import {
 import { type BytesLike, AbiCoder, formatUnits, randomBytes, toUtf8Bytes } from 'ethers'
 import type { Argv } from 'yargs'
 
+import { lastIfRepeated } from '../argv.ts'
 import type { GlobalOpts } from '../index.ts'
 import { showRequests } from './show.ts'
 import { type Ctx, Format } from './types.ts'
@@ -93,6 +94,9 @@ export const builder = (yargs: Argv) =>
         type: 'number',
         describe: 'Estimate gas limit with % margin (e.g., 10 for +10%)',
         conflicts: 'gas-limit',
+        // A repeat would parse into an array, which fails the `> -100` gate below and silently
+        // skips gas estimation. See lastIfRepeated.
+        coerce: lastIfRepeated<number>,
       },
       'allow-out-of-order-exec': {
         alias: 'ooo',

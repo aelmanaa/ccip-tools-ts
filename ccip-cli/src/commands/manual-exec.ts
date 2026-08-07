@@ -35,6 +35,7 @@ import {
 import { hexlify, isHexString } from 'ethers'
 import type { Argv } from 'yargs'
 
+import { lastIfRepeated } from '../argv.ts'
 import type { GlobalOpts } from '../index.ts'
 import { type Ctx, Format } from './types.ts'
 import {
@@ -93,6 +94,9 @@ export const builder = (yargs: Argv) =>
           'Estimate gas limit for receivers callback; argument is a % margin to add to the estimate',
         example: '10',
         conflicts: 'gas-limit',
+        // A repeat would parse into an array, which fails the `> -100` gate below and silently
+        // skips gas estimation. See lastIfRepeated.
+        coerce: lastIfRepeated<number>,
       },
       'only-estimate': {
         type: 'boolean',
