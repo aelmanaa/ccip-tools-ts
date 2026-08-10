@@ -122,6 +122,8 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
   WALLET_NOT_SIGNER: 'Provide a wallet with signing capability (Signer interface).',
   WALLET_INVALID: 'Provide a valid Wallet instance.',
 
+  SEND_TX_STATUS_UNKNOWN:
+    'The tx is already broadcast. Do NOT re-run send — look the tx up instead.',
   EXEC_TX_NOT_CONFIRMED: 'Transaction was not confirmed. Check status and retry.',
   EXEC_TX_REVERTED: 'Transaction reverted. Check the receiver contract.',
   EXECUTION_STATE_INVALID: 'Invalid execution state returned from contract.',

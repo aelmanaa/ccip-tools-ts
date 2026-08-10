@@ -24,6 +24,7 @@ import {
   type MessageInput,
   CCIPArgumentInvalidError,
   CCIPDestSimulationUnavailableError,
+  CCIPExecTxRevertedError,
   CCIPInsufficientBalanceError,
   CCIPMethodUnsupportedError,
   CCIPTokenNotFoundError,
@@ -532,15 +533,30 @@ async function sendMessage(
     ', messageId =>',
     request.message.messageId,
   )
-  await showRequests(
-    ctx,
-    {
-      ...argv,
-      txHashOrId: request.tx.hash,
-      'tx-hash-or-id': request.tx.hash,
-      'log-index': undefined,
-      logIndex: undefined,
-    },
-    { request },
-  )
+  try {
+    await showRequests(
+      ctx,
+      {
+        ...argv,
+        txHashOrId: request.tx.hash,
+        'tx-hash-or-id': request.tx.hash,
+        'log-index': undefined,
+        logIndex: undefined,
+      },
+      { request },
+    )
+  } catch (err) {
+    // The send already happened, so failing to *watch* the destination is not a send failure:
+    // exiting non-zero here reads as "nothing was broadcast" and invites a re-send. Report it and
+    // leave the exit code alone. Scoped to this call site — `show` still exits non-zero.
+    //
+    // A reverted execution is a verdict, not a watch failure: the destination was reached and it
+    // failed, which the caller must still see as a non-zero exit.
+    if (err instanceof CCIPExecTxRevertedError) throw err
+    logger.error(
+      'Message sent, but watching the destination failed — do NOT re-run send. Track it with:',
+      `ccip-cli show ${request.message.messageId}`,
+    )
+    if (!logParsedError.call(ctx, err)) logger.error(err)
+  }
 }

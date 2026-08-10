@@ -979,6 +979,42 @@ export class CCIPWalletNotSignerError extends CCIPError {
 // Execution
 
 /**
+ * Thrown when a ccipSend tx was broadcast but reading back its outcome failed.
+ *
+ * @remarks
+ * NOT transient, unlike {@link CCIPExecTxNotConfirmedError}: the tx is already broadcast, so
+ * re-running send pays the fee and transfers the tokens a second time. Only reading the outcome
+ * failed — carries the `txHash` so the caller can look it up instead of re-sending.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await chain.sendMessage({ router, message, wallet })
+ * } catch (error) {
+ *   if (error instanceof CCIPSendTxStatusUnknownError) {
+ *     console.error('already broadcast, look it up:', error.context.txHash)
+ *   }
+ * }
+ * ```
+ */
+export class CCIPSendTxStatusUnknownError extends CCIPError {
+  override readonly name = 'CCIPSendTxStatusUnknownError'
+  /** Creates a send-tx-status-unknown error. */
+  constructor(txHash: string, options?: CCIPErrorOptions) {
+    super(
+      CCIPErrorCode.SEND_TX_STATUS_UNKNOWN,
+      `ccipSend was broadcast, but reading its outcome failed: ${txHash}`,
+      {
+        ...options,
+        isTransient: false,
+        recovery: `The tx is already broadcast — do NOT re-run send, it would send a second message. Look it up with: ccip-cli show ${txHash}`,
+        context: { ...options?.context, txHash },
+      },
+    )
+  }
+}
+
+/**
  * Thrown when exec tx not confirmed. Transient: may need more time.
  *
  * @example

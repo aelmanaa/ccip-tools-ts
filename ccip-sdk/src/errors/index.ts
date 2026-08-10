@@ -97,6 +97,7 @@ export {
   CCIPExecTxNotConfirmedError,
   CCIPExecTxRevertedError,
   CCIPReceiptNotFoundError,
+  CCIPSendTxStatusUnknownError,
 } from './specialized.ts'
 
 // Specialized errors - Attestation (USDC/LBTC)

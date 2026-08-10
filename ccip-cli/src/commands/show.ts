@@ -25,6 +25,7 @@ import {
   type ChainGetter,
   type ChainTransaction,
   CCIPAPIClient,
+  CCIPError,
   CCIPExecTxRevertedError,
   CCIPMessageIdNotFoundError,
   CCIPTransactionNotFoundError,
@@ -107,296 +108,337 @@ export async function showRequests(
   // In JSON mode, accumulate all output into a single envelope so JSON.parse(stdout) works.
   // Fields are added as they become available; omitted if not applicable.
   const jsonEnvelope:
-    | { request?: unknown; attestations?: unknown; verifications?: unknown; receipts?: unknown[] }
+    | {
+        request?: unknown
+        attestations?: unknown
+        verifications?: unknown
+        receipts?: unknown[]
+        error?: unknown
+      }
     | undefined = argv.format === Format.json ? {} : undefined
+  /**
+   * `request` present means the send happened; `error` present means this command didn't finish.
+   *
+   * Projected field by field rather than via `CCIPError.toJSON()`, which also carries `stack` —
+   * stdout is the machine-readable channel, and a stack trace there is noise a consumer has to
+   * skip. `isTransient` is the field callers branch on to decide whether a retry is safe.
+   */
+  const setEnvelopeError = (err: unknown) => {
+    if (!jsonEnvelope) return
+    jsonEnvelope.error = CCIPError.isCCIPError(err)
+      ? {
+          code: err.code,
+          message: err.message,
+          context: err.context,
+          recovery: err.recovery,
+          isTransient: err.isTransient,
+        }
+      : { message: err instanceof Error ? err.message : String(err) }
+  }
+  let envelopeEmitted = false
+  /**
+   * Idempotent: the `finally` below guarantees one envelope on every exit path, so the call sites
+   * that emit early (and then return) don't produce a second one.
+   */
   const emitJsonEnvelope = () => {
-    if (jsonEnvelope) {
+    if (jsonEnvelope && !envelopeEmitted) {
+      envelopeEmitted = true
       output.write(jsonStringify(jsonEnvelope, 2))
     }
   }
-
-  let getChain: ChainGetter
-  let tx$: Promise<[Chain, ChainTransaction]> | undefined
-  if (opts?.request) {
-    getChain = fetchChainsFromRpcs(ctx, argv)
-  } else {
-    const chainsResult = fetchChainsFromRpcs(ctx, argv, argv.txHashOrId)
-    getChain = chainsResult[0]
-    tx$ = chainsResult[1]
-  }
-
-  let source: Chain | undefined, offRamp
-  // Track if we displayed all messages in non-interactive multi-message path
-  let displayedAllMessages = false as boolean
-
-  let request$ = opts?.request
-    ? (async () => {
-        try {
-          source = await getChain(opts.request!.lane.sourceChainSelector)
-        } catch (err) {
-          logger.debug('Failed to resolve source chain for prebuilt request:', err)
-        }
-        return opts.request!
-      })()
-    : (async () => {
-        const [source_, tx] = await tx$!
-        source = source_
-        const messages = await source_.getMessagesInTx(tx)
-
-        // Non-interactive multi-message path: display all messages and signal early return
-        if (argv.interactive === false && argv.logIndex == null && messages.length > 1) {
-          switch (argv.format) {
-            case Format.log:
-              for (const req of messages) {
-                output.write(`message ${req.log.index} =`, withDateTimestamp(req))
-              }
-              break
-            case Format.pretty:
-              for (const req of messages) {
-                await prettyRequest.call(ctx, req, source)
-              }
-              break
-            case Format.json:
-              output.write(jsonStringify({ requests: messages }, 2))
-              break
-          }
-          logger.info('Use --log-index N for full details on a specific message.')
-          displayedAllMessages = true
-          return messages[0]! // return first to satisfy type; caller checks displayedAllMessages
-        }
-
-        return selectRequest(messages, 'to know more', argv)
-      })()
-
-  if (argv.api !== false && isHexString(argv.txHashOrId, 32)) {
-    const apiClient = CCIPAPIClient.fromUrl(
-      typeof argv.api === 'string' ? argv.api : undefined,
-      ctx,
-    )
-    request$ = Promise.any([request$, apiClient.getMessageById(argv.txHashOrId)])
-  }
-
-  let request
   try {
-    request = await request$
-    if (displayedAllMessages) return // already displayed all messages in non-interactive path
-    if ('offRampAddress' in request.message) {
-      offRamp = request.message.offRampAddress
+    let getChain: ChainGetter
+    let tx$: Promise<[Chain, ChainTransaction]> | undefined
+    if (opts?.request) {
+      getChain = fetchChainsFromRpcs(ctx, argv)
     } else {
-      offRamp = request.metadata?.offRamp
-    }
-  } catch (err) {
-    if (err instanceof AggregateError && err.errors.length === 2) {
-      if (!(err.errors[0] instanceof CCIPTransactionNotFoundError)) throw err.errors[0] as Error
-      else if (!(err.errors[1] instanceof CCIPMessageIdNotFoundError)) throw err.errors[1] as Error
-    }
-    throw err
-  }
-  if (!source) {
-    // source isn't strictly needed when fetching messageId from API, but it may be useful to print
-    // more information, e.g. request's token symbols
-    try {
-      source = await getChain(request.lane.sourceChainSelector)
-    } catch (err) {
-      logger.debug(
-        'Fetched messageId from API, but failed find a source',
-        request.lane.sourceChainSelector,
-        'RPC endpoint:',
-        err,
-      )
-    }
-  }
-
-  switch (argv.format) {
-    case Format.log: {
-      output.write(`message ${request.log.index} =`, withDateTimestamp(request))
-      break
-    }
-    case Format.pretty:
-      await prettyRequest.call(ctx, request, source)
-      break
-    case Format.json:
-      jsonEnvelope!.request = request
-      break
-  }
-  if (request.tx.error)
-    throw new CCIPExecTxRevertedError(request.log.transactionHash, {
-      context: { error: request.tx.error },
-    })
-
-  if (argv.wait === false) {
-    emitJsonEnvelope()
-    return // `false` used by call at end of `send` command without `--wait`
-  }
-
-  let cancelWaitFinalized: (() => void) | undefined
-  const finalized$ = (async () => {
-    if (argv.wait) {
-      logger.info(`[${MessageStatus.Sent}] Waiting for source chain finalization...`)
-      if (!source) return
-      const finalizedAc = new AbortController()
-      cancelWaitFinalized = finalizedAc.abort.bind(finalizedAc)
-      const finalized = await source.waitFinalized({
-        log: request.log,
-        abort: finalizedAc.signal,
-      })
-      // undefined => cancelled (e.g. execution already found, FTF message); don't claim finalization
-      if (finalized) logger.info(`[${MessageStatus.SourceFinalized}] Source chain finalized`)
+      const chainsResult = fetchChainsFromRpcs(ctx, argv, argv.txHashOrId)
+      getChain = chainsResult[0]
+      tx$ = chainsResult[1]
     }
 
-    const offchainTokenData = await source?.getOffchainTokenData(request)
-    if (offchainTokenData?.length && offchainTokenData.some((d) => !!d)) {
-      switch (argv.format) {
-        case Format.log: {
-          output.write('attestations =', offchainTokenData)
-          break
-        }
-        case Format.pretty:
-          output.write('Attestations:')
-          for (const attestation of offchainTokenData) {
-            const { _tag: type, ...rest } = attestation!
-            prettyTable.call(ctx, { type, ...rest })
+    let source: Chain | undefined, offRamp
+    // Track if we displayed all messages in non-interactive multi-message path
+    let displayedAllMessages = false as boolean
+
+    let request$ = opts?.request
+      ? (async () => {
+          try {
+            source = await getChain(opts.request!.lane.sourceChainSelector)
+          } catch (err) {
+            logger.debug('Failed to resolve source chain for prebuilt request:', err)
           }
-          break
-        case Format.json:
-          jsonEnvelope!.attestations = offchainTokenData
-          break
+          return opts.request!
+        })()
+      : (async () => {
+          const [source_, tx] = await tx$!
+          source = source_
+          const messages = await source_.getMessagesInTx(tx)
+
+          // Non-interactive multi-message path: display all messages and signal early return
+          if (argv.interactive === false && argv.logIndex == null && messages.length > 1) {
+            switch (argv.format) {
+              case Format.log:
+                for (const req of messages) {
+                  output.write(`message ${req.log.index} =`, withDateTimestamp(req))
+                }
+                break
+              case Format.pretty:
+                for (const req of messages) {
+                  await prettyRequest.call(ctx, req, source)
+                }
+                break
+              case Format.json:
+                output.write(jsonStringify({ requests: messages }, 2))
+                break
+            }
+            logger.info('Use --log-index N for full details on a specific message.')
+            displayedAllMessages = true
+            return messages[0]! // return first to satisfy type; caller checks displayedAllMessages
+          }
+
+          return selectRequest(messages, 'to know more', argv)
+        })()
+
+    if (argv.api !== false && isHexString(argv.txHashOrId, 32)) {
+      const apiClient = CCIPAPIClient.fromUrl(
+        typeof argv.api === 'string' ? argv.api : undefined,
+        ctx,
+      )
+      request$ = Promise.any([request$, apiClient.getMessageById(argv.txHashOrId)])
+    }
+
+    let request
+    try {
+      request = await request$
+      if (displayedAllMessages) return // already displayed all messages in non-interactive path
+      if ('offRampAddress' in request.message) {
+        offRamp = request.message.offRampAddress
+      } else {
+        offRamp = request.metadata?.offRamp
+      }
+    } catch (err) {
+      if (err instanceof AggregateError && err.errors.length === 2) {
+        if (!(err.errors[0] instanceof CCIPTransactionNotFoundError)) throw err.errors[0] as Error
+        else if (!(err.errors[1] instanceof CCIPMessageIdNotFoundError))
+          throw err.errors[1] as Error
+      }
+      throw err
+    }
+    if (!source) {
+      // source isn't strictly needed when fetching messageId from API, but it may be useful to print
+      // more information, e.g. request's token symbols
+      try {
+        source = await getChain(request.lane.sourceChainSelector)
+      } catch (err) {
+        logger.debug(
+          'Fetched messageId from API, but failed find a source',
+          request.lane.sourceChainSelector,
+          'RPC endpoint:',
+          err,
+        )
       }
     }
 
-    if (argv.wait)
-      logger.info(`[${MessageStatus.SourceFinalized}] Waiting for commit on destination chain...`)
-    else if (
-      !request.metadata?.receiptTransactionHash &&
-      argv.format !== Format.json &&
-      !ctx.abort.aborted
-    )
-      output.write('Commit (dest):')
-  })()
-
-  let dest!: Chain
-  try {
-    dest = await getChain(request.lane.destChainSelector)
-  } catch (err) {
-    logger.debug(
-      'No dest RPC available for',
-      request.lane.destChainSelector,
-      '— emitting partial result:',
-      err,
-    )
-    emitJsonEnvelope()
-    throw err
-  }
-
-  let execs$, cancelWaitVerifications: (() => void) | undefined, verifications$
-  let receiptsHeaderPrinted = false
-  const printReceiptsHeader = () => {
-    if (!receiptsHeaderPrinted && argv.format !== Format.json) {
-      output.write('Receipts (dest):')
-      receiptsHeaderPrinted = true
+    switch (argv.format) {
+      case Format.log: {
+        output.write(`message ${request.log.index} =`, withDateTimestamp(request))
+        break
+      }
+      case Format.pretty:
+        await prettyRequest.call(ctx, request, source)
+        break
+      case Format.json:
+        jsonEnvelope!.request = request
+        break
     }
-  }
+    if (request.tx.error)
+      throw new CCIPExecTxRevertedError(request.log.transactionHash, {
+        context: { error: request.tx.error },
+      })
 
-  if (request.metadata?.receiptTransactionHash) {
-    // if we got last receipt metadata from api, just fetch it instead of scanning (faster)
-    execs$ = await dest.getExecutionReceiptsInTx(request.metadata.receiptTransactionHash, {
-      offRamp,
-      messageId: request.message.messageId,
-      sourceChainSelector: request.message.sourceChainSelector,
-      sequenceNumber: request.message.sequenceNumber,
-    })
-    cancelWaitFinalized?.()
-    await finalized$
-  } else {
-    offRamp ??= await discoverOffRamp(source!, dest, request.lane.onRamp, source)
-
-    let watch
-    if (argv.wait) {
-      const ac = new AbortController()
-      watch = ac.signal
-      cancelWaitVerifications = ac.abort.bind(ac)
+    if (argv.wait === false) {
+      emitJsonEnvelope()
+      return // `false` used by call at end of `send` command without `--wait`
     }
-    verifications$ = (async () => {
-      const indexer = resolveIndexer(argv, dest, logger, source)
-      const verifications = await dest.getVerifications({
+
+    let cancelWaitFinalized: (() => void) | undefined
+    const finalized$ = (async () => {
+      if (argv.wait) {
+        logger.info(`[${MessageStatus.Sent}] Waiting for source chain finalization...`)
+        if (!source) return
+        const finalizedAc = new AbortController()
+        cancelWaitFinalized = finalizedAc.abort.bind(finalizedAc)
+        const finalized = await source.waitFinalized({
+          log: request.log,
+          abort: finalizedAc.signal,
+        })
+        // undefined => cancelled (e.g. execution already found, FTF message); don't claim finalization
+        if (finalized) logger.info(`[${MessageStatus.SourceFinalized}] Source chain finalized`)
+      }
+
+      const offchainTokenData = await source?.getOffchainTokenData(request)
+      if (offchainTokenData?.length && offchainTokenData.some((d) => !!d)) {
+        switch (argv.format) {
+          case Format.log: {
+            output.write('attestations =', offchainTokenData)
+            break
+          }
+          case Format.pretty:
+            output.write('Attestations:')
+            for (const attestation of offchainTokenData) {
+              const { _tag: type, ...rest } = attestation!
+              prettyTable.call(ctx, { type, ...rest })
+            }
+            break
+          case Format.json:
+            jsonEnvelope!.attestations = offchainTokenData
+            break
+        }
+      }
+
+      if (argv.wait)
+        logger.info(`[${MessageStatus.SourceFinalized}] Waiting for commit on destination chain...`)
+      else if (
+        !request.metadata?.receiptTransactionHash &&
+        argv.format !== Format.json &&
+        !ctx.abort.aborted
+      )
+        output.write('Commit (dest):')
+    })()
+
+    let dest!: Chain
+    try {
+      dest = await getChain(request.lane.destChainSelector)
+    } catch (err) {
+      logger.debug(
+        'No dest RPC available for',
+        request.lane.destChainSelector,
+        '— emitting partial result:',
+        err,
+      )
+      setEnvelopeError(err)
+      emitJsonEnvelope()
+      throw err
+    }
+
+    let execs$, cancelWaitVerifications: (() => void) | undefined, verifications$
+    let receiptsHeaderPrinted = false
+    const printReceiptsHeader = () => {
+      if (!receiptsHeaderPrinted && argv.format !== Format.json) {
+        output.write('Receipts (dest):')
+        receiptsHeaderPrinted = true
+      }
+    }
+
+    if (request.metadata?.receiptTransactionHash) {
+      // if we got last receipt metadata from api, just fetch it instead of scanning (faster)
+      execs$ = await dest.getExecutionReceiptsInTx(request.metadata.receiptTransactionHash, {
         offRamp,
-        request,
-        ...argv,
-        indexer,
-        watch,
+        messageId: request.message.messageId,
+        sourceChainSelector: request.message.sourceChainSelector,
+        sequenceNumber: request.message.sequenceNumber,
       })
       cancelWaitFinalized?.()
       await finalized$
-      if (argv.wait)
-        logger.info(`[${MessageStatus.Committed}] Commit report accepted on destination chain`)
+    } else {
+      offRamp ??= await discoverOffRamp(source!, dest, request.lane.onRamp, source)
+
+      let watch
+      if (argv.wait) {
+        const ac = new AbortController()
+        watch = ac.signal
+        cancelWaitVerifications = ac.abort.bind(ac)
+      }
+      verifications$ = (async () => {
+        const indexer = resolveIndexer(argv, dest, logger, source)
+        const verifications = await dest.getVerifications({
+          offRamp,
+          request,
+          ...argv,
+          indexer,
+          watch,
+        })
+        cancelWaitFinalized?.()
+        await finalized$
+        if (argv.wait)
+          logger.info(`[${MessageStatus.Committed}] Commit report accepted on destination chain`)
+        switch (argv.format) {
+          case Format.log:
+            output.write('commit =', verifications)
+            break
+          case Format.pretty:
+            await prettyVerifications.call(ctx, dest, verifications, request)
+            break
+          case Format.json:
+            jsonEnvelope!.verifications = verifications
+            break
+        }
+        if (argv.wait)
+          logger.info(`[${MessageStatus.Blessed}] Waiting for execution on destination chain...`)
+        else printReceiptsHeader()
+        return verifications
+      })().catch((err) => {
+        logger.warn(
+          'Verifications unavailable',
+          err instanceof Error && !argv.verbose ? err.message : err,
+        )
+        if (!argv.wait) printReceiptsHeader()
+        return undefined
+      })
+      execs$ = dest.getExecutionReceipts({
+        ...argv,
+        offRamp,
+        messageId: request.message.messageId,
+        sourceChainSelector: request.message.sourceChainSelector,
+        startTime: request.log.blockTimestamp,
+        verifications: !argv.wait ? await verifications$ : undefined,
+        watch: argv.wait && ctx.abort,
+      })
+    }
+
+    let found = false
+    for await (const exec of execs$) {
+      await verifications$
+      const status =
+        exec.receipt.state === ExecutionState.Success ? MessageStatus.Success : MessageStatus.Failed
+      const statusMessage =
+        exec.receipt.state === ExecutionState.Success
+          ? 'Message executed on destination chain'
+          : 'Message execution failed on destination chain'
+      logger.info(`[${status}] ${statusMessage}`)
       switch (argv.format) {
         case Format.log:
-          output.write('commit =', verifications)
+          output.write('receipt =', withDateTimestamp(exec))
           break
         case Format.pretty:
-          await prettyVerifications.call(ctx, dest, verifications, request)
+          prettyReceipt.call(
+            ctx,
+            exec,
+            request,
+            exec.log.tx?.from ??
+              (await dest.getTransaction(exec.log.transactionHash).catch(() => null))?.from,
+          )
           break
         case Format.json:
-          jsonEnvelope!.verifications = verifications
+          jsonEnvelope!.receipts ??= []
+          jsonEnvelope!.receipts.push(exec)
           break
       }
-      if (argv.wait)
-        logger.info(`[${MessageStatus.Blessed}] Waiting for execution on destination chain...`)
-      else printReceiptsHeader()
-      return verifications
-    })().catch((err) => {
-      logger.warn(
-        'Verifications unavailable',
-        err instanceof Error && !argv.verbose ? err.message : err,
-      )
-      if (!argv.wait) printReceiptsHeader()
-      return undefined
-    })
-    execs$ = dest.getExecutionReceipts({
-      ...argv,
-      offRamp,
-      messageId: request.message.messageId,
-      sourceChainSelector: request.message.sourceChainSelector,
-      startTime: request.log.blockTimestamp,
-      verifications: !argv.wait ? await verifications$ : undefined,
-      watch: argv.wait && ctx.abort,
-    })
-  }
-
-  let found = false
-  for await (const exec of execs$) {
-    await verifications$
-    const status =
-      exec.receipt.state === ExecutionState.Success ? MessageStatus.Success : MessageStatus.Failed
-    const statusMessage =
-      exec.receipt.state === ExecutionState.Success
-        ? 'Message executed on destination chain'
-        : 'Message execution failed on destination chain'
-    logger.info(`[${status}] ${statusMessage}`)
-    switch (argv.format) {
-      case Format.log:
-        output.write('receipt =', withDateTimestamp(exec))
-        break
-      case Format.pretty:
-        prettyReceipt.call(
-          ctx,
-          exec,
-          request,
-          exec.log.tx?.from ??
-            (await dest.getTransaction(exec.log.transactionHash).catch(() => null))?.from,
-        )
-        break
-      case Format.json:
-        jsonEnvelope!.receipts ??= []
-        jsonEnvelope!.receipts.push(exec)
-        break
+      found = true
+      if (argv.wait) break
     }
-    found = true
-    if (argv.wait) break
+    if (!found) {
+      cancelWaitVerifications?.()
+      logger.warn(`No execution receipt found for request`)
+    }
+    emitJsonEnvelope()
+  } catch (err) {
+    // Any escape from here still owes the caller an envelope: in JSON mode stdout is the only
+    // channel, and an empty stdout with a non-zero exit is indistinguishable from "no output".
+    setEnvelopeError(err)
+    throw err
+  } finally {
+    emitJsonEnvelope()
   }
-  if (!found) {
-    cancelWaitVerifications?.()
-    logger.warn(`No execution receipt found for request`)
-  }
-  emitJsonEnvelope()
 }

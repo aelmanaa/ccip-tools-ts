@@ -62,6 +62,7 @@ import {
   CCIPInsufficientBalanceError,
   CCIPLogDataInvalidError,
   CCIPRateLimitExceededError,
+  CCIPSendTxStatusUnknownError,
   CCIPSourceChainUnsupportedError,
   CCIPSourcePoolRevertError,
   CCIPTokenNotConfiguredError,
@@ -1720,7 +1721,17 @@ export class EVMChain extends Chain<typeof ChainFamily.EVM> {
       throw err
     }
     this.logger.debug('ccipSend =>', response.hash)
-    const tx = (await response.wait(1, 60_000))!
+    // past this point the send is on-chain and irreversible: never let a confirmation failure
+    // surface without the hash, or the caller cannot tell it from a send that never happened
+    let tx
+    try {
+      tx = await response.wait(1, 60_000)
+    } catch (err) {
+      throw new CCIPSendTxStatusUnknownError(response.hash, {
+        cause: err instanceof Error ? err : undefined,
+      })
+    }
+    if (!tx?.hash) throw new CCIPSendTxStatusUnknownError(response.hash)
     return (await this.getMessagesInTx(await this.getTransaction(tx)))[0]!
   }
 
