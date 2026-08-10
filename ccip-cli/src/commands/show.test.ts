@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+import { CCIPVersion } from '@chainlink/ccip-sdk/src/index.ts'
+
 import { RPCS, spawnCLI } from './e2e-helpers.test.ts'
+import { attestationWording } from './show.ts'
 
 function buildShowArgs(txHash: string, ...additionalArgs: string[]): string[] {
   return [
@@ -623,5 +626,31 @@ describe.skip('e2e command show TON', () => {
     const successMatches = receiptsSection.match(/success/gi) || []
     // assert.ok(failedMatches.length >= 1, 'Should have at least one failed execution')
     assert.ok(successMatches.length >= 1, 'Should have at least one successful execution')
+  })
+})
+
+describe('attestationWording', () => {
+  it('v1.x lanes keep commit-report vocabulary', () => {
+    for (const version of [CCIPVersion.V1_2, CCIPVersion.V1_5, CCIPVersion.V1_6]) {
+      const w = attestationWording(version)
+      assert.equal(w.isV2, false, version)
+      assert.equal(w.phase, 'commit report', version)
+      assert.equal(w.header, 'Commit (dest):', version)
+      assert.equal(w.logKey, 'commit =', version)
+      assert.match(w.accepted, /^\[COMMITTED\] /, version)
+      assert.match(w.awaitingExecution, /^\[BLESSED\] /, version)
+    }
+  })
+
+  it('v2.0 lanes drop the commit and blessing phases', () => {
+    const w = attestationWording(CCIPVersion.V2_0)
+    assert.equal(w.isV2, true)
+    assert.equal(w.phase, 'verification')
+    assert.equal(w.header, 'Verifications (dest):')
+    assert.equal(w.logKey, 'verifications =')
+    assert.equal(w.accepted, 'Verified on destination chain')
+    assert.equal(w.awaitingExecution, 'Waiting for execution on destination chain...')
+    assert.doesNotMatch(w.accepted, /COMMITTED|commit/i)
+    assert.doesNotMatch(w.awaitingExecution, /BLESSED|bless/i)
   })
 })

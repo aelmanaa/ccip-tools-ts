@@ -1,8 +1,9 @@
 /**
  * CCIP CLI Show Command
  *
- * Displays detailed information about a CCIP message, including its status,
- * commit report, and execution receipts across source and destination chains.
+ * Displays detailed information about a CCIP message, including its status, its destination
+ * attestation (a commit report on v1.x lanes, CCV verifications on v2.0), and execution
+ * receipts across source and destination chains.
  *
  * @example
  * ```bash
@@ -28,6 +29,7 @@ import {
   CCIPExecTxRevertedError,
   CCIPMessageIdNotFoundError,
   CCIPTransactionNotFoundError,
+  CCIPVersion,
   ExecutionState,
   MessageStatus,
   discoverOffRamp,
@@ -91,6 +93,35 @@ export async function handler(argv: Awaited<ReturnType<typeof builder>['argv']> 
       if (!logParsedError.call(ctx, err)) ctx.logger.error(err)
     })
     .finally(destroy)
+}
+
+/**
+ * Names the destination attestation phase for a lane's protocol version.
+ *
+ * v1.x lanes are attested by a DON commit report and then RMN-blessed; v2.0 lanes by CCV
+ * verifications, with neither phase. `getVerifications` returns both, so only the user-facing
+ * wording differs — each generation is named as its own docs name it.
+ *
+ * @param version - The lane's CCIP version.
+ * @returns The strings to print for that version.
+ */
+export function attestationWording(version: CCIPVersion) {
+  const isV2 = version >= CCIPVersion.V2_0
+  return {
+    isV2,
+    phase: isV2 ? 'verification' : 'commit report',
+    /** `pretty` section header. */
+    header: isV2 ? 'Verifications (dest):' : 'Commit (dest):',
+    logKey: isV2 ? 'verifications =' : 'commit =',
+    /** Progress line once the attestation lands. */
+    accepted: isV2
+      ? 'Verified on destination chain'
+      : `[${MessageStatus.Committed}] Commit report accepted on destination chain`,
+    /** Progress line while awaiting execution. */
+    awaitingExecution: isV2
+      ? 'Waiting for execution on destination chain...'
+      : `[${MessageStatus.Blessed}] Waiting for execution on destination chain...`,
+  }
 }
 
 /**
@@ -207,6 +238,8 @@ export async function showRequests(
     }
   }
 
+  const wording = attestationWording(request.lane.version)
+
   switch (argv.format) {
     case Format.log: {
       output.write(`message ${request.log.index} =`, withDateTimestamp(request))
@@ -265,13 +298,15 @@ export async function showRequests(
     }
 
     if (argv.wait)
-      logger.info(`[${MessageStatus.SourceFinalized}] Waiting for commit on destination chain...`)
+      logger.info(
+        `[${MessageStatus.SourceFinalized}] Waiting for ${wording.phase} on destination chain...`,
+      )
     else if (
       !request.metadata?.receiptTransactionHash &&
       argv.format !== Format.json &&
       !ctx.abort.aborted
     )
-      output.write('Commit (dest):')
+      output.write(wording.header)
   })()
 
   let dest!: Chain
@@ -327,11 +362,10 @@ export async function showRequests(
       })
       cancelWaitFinalized?.()
       await finalized$
-      if (argv.wait)
-        logger.info(`[${MessageStatus.Committed}] Commit report accepted on destination chain`)
+      if (argv.wait) logger.info(wording.accepted)
       switch (argv.format) {
         case Format.log:
-          output.write('commit =', verifications)
+          output.write(wording.logKey, verifications)
           break
         case Format.pretty:
           await prettyVerifications.call(ctx, dest, verifications, request)
@@ -340,8 +374,7 @@ export async function showRequests(
           jsonEnvelope!.verifications = verifications
           break
       }
-      if (argv.wait)
-        logger.info(`[${MessageStatus.Blessed}] Waiting for execution on destination chain...`)
+      if (argv.wait) logger.info(wording.awaitingExecution)
       else printReceiptsHeader()
       return verifications
     })().catch((err) => {
