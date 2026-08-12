@@ -508,6 +508,15 @@ export type TokenPoolRemote = {
   /** Address of the remote token on the destination chain. */
   remoteToken: string
   /**
+   * Decimals of the remote token, as recorded in this chain's config for the lane.
+   *
+   * @remarks
+   * Only families whose chain config stores decimals populate this — SVM does, EVM does not
+   * (`TokenPool.applyChainUpdates` carries no per-update decimals). Undefined means "this family
+   * does not track it", never "zero": a rebuild that writes back a config MUST NOT default it.
+   */
+  remoteTokenDecimals?: number
+  /**
    * Addresses of remote token pools on the destination chain.
    *
    * @remarks

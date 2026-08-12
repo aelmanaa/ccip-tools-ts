@@ -1730,6 +1730,8 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
 
         remotes[remoteNetwork.name] = {
           remoteToken,
+          // the OffRamp scales incoming amounts by this; a rebuild that drops it over-mints
+          remoteTokenDecimals: base.remote.decimals,
           remotePools,
           inboundRateLimiterState,
           outboundRateLimiterState,

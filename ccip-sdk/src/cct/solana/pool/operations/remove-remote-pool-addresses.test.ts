@@ -21,15 +21,25 @@ const EVM_TOKEN = '0xa42BA090720aEE0602aD4381FAdcC9380aD3d888'
 const POOL_A = '0xd7BF0d8E6C242b6Dde4490Ab3aFc8C1e811ec9aD'
 const POOL_B = '0x1111111111111111111111111111111111111111'
 
-function remotesWith(pools: string[]) {
+const REMOTE_DECIMALS = 18
+
+function remotesWith(pools: string[], remoteTokenDecimals = REMOTE_DECIMALS) {
   return {
     'some-remote': {
       remoteToken: EVM_TOKEN,
+      remoteTokenDecimals,
       remotePools: pools,
       inboundRateLimiterState: null,
       outboundRateLimiterState: { tokens: 10n, capacity: 1000n, rate: 5n },
     },
   }
+}
+
+/** A config whose decimals could not be read — the shape a lossy read produces. */
+function remotesWithoutDecimals(pools: string[]) {
+  const remotes = remotesWith(pools)
+  delete (remotes['some-remote'] as { remoteTokenDecimals?: number }).remoteTokenDecimals
+  return remotes
 }
 
 describe('Solana token-pool removeRemotePoolAddresses', () => {
@@ -65,6 +75,50 @@ describe('Solana token-pool removeRemotePoolAddresses', () => {
     const appendData = unsigned.instructions[2]!.data
     assert.ok(appendData.includes(Buffer.from(encodeRemotePoolAddressBytes(POOL_B))))
     assert.ok(!appendData.includes(Buffer.from(encodeRemotePoolAddressBytes(POOL_A))))
+  })
+
+  it('preserves the remote token decimals across the delete + re-init', async () => {
+    const chain = stubChain({ remotes: remotesWith([POOL_A, POOL_B]) })
+    const unsigned = await new RemoveRemotePoolAddresses().generate(chain, {
+      poolAddress: POOL_STATE.toBase58(),
+      remoteChainSelector: SELECTOR,
+      remotePoolAddresses: [POOL_A],
+      payer: PAYER,
+    })
+
+    // `decimals` is the last field of RemoteConfig, the last arg of init_chain_remote_config,
+    // so it is the final byte of that instruction's data. A dropped value shows up as 0 here and
+    // over-mints by 10^decimals on the next inbound transfer.
+    const initData = unsigned.instructions[1]!.data
+    assert.equal(initData[initData.length - 1], REMOTE_DECIMALS)
+  })
+
+  it('refuses to rebuild when the decimals could not be read', async () => {
+    // guards the read: writing this config would silently reset decimals to 0
+    const chain = stubChain({ remotes: remotesWithoutDecimals([POOL_A, POOL_B]) })
+    await assert.rejects(
+      () =>
+        new RemoveRemotePoolAddresses().generate(chain, {
+          poolAddress: POOL_STATE.toBase58(),
+          remoteChainSelector: SELECTOR,
+          remotePoolAddresses: [POOL_A],
+          payer: PAYER,
+        }),
+      CCTParamsInvalidError,
+    )
+  })
+
+  it('preserves decimals of 0 rather than treating them as missing', async () => {
+    // 0-decimal tokens are legal; the guard must key on absence, not falsiness
+    const chain = stubChain({ remotes: remotesWith([POOL_A, POOL_B], 0) })
+    const unsigned = await new RemoveRemotePoolAddresses().generate(chain, {
+      poolAddress: POOL_STATE.toBase58(),
+      remoteChainSelector: SELECTOR,
+      remotePoolAddresses: [POOL_A],
+      payer: PAYER,
+    })
+    const initData = unsigned.instructions[1]!.data
+    assert.equal(initData[initData.length - 1], 0)
   })
 
   it('rejects when none of the addresses match the current config', async () => {

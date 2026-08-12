@@ -115,6 +115,20 @@ export class RemoveRemotePoolAddresses extends SolanaOperation<RemoveRemotePoolA
       )
     }
 
+    // The rebuild below deletes the chain config and re-creates it, so every field has to survive
+    // the round trip. Decimals are the dangerous one: initChainRemoteConfig defaults them to 0 and
+    // the OffRamp scales incoming amounts by them, so a dropped value over-mints by 10^decimals
+    // while every status surface still reports SUCCESS. Refuse to write rather than write a zero.
+    const { remoteTokenDecimals } = remoteConfig
+    if (remoteTokenDecimals == null) {
+      throw new CCTParamsInvalidError(
+        this.name,
+        'remoteChainSelector',
+        `could not read remote token decimals for selector ${opts.remoteChainSelector}; refusing to ` +
+          'rebuild the chain config, which would reset decimals to 0 and over-mint on the next transfer',
+      )
+    }
+
     const { instructions, poolProgramId } = await buildApplyChainUpdatesInstructions(chain, {
       operation: this.name,
       poolAddress: opts.poolAddress,
@@ -125,6 +139,7 @@ export class RemoveRemotePoolAddresses extends SolanaOperation<RemoveRemotePoolA
           remoteChainSelector: opts.remoteChainSelector,
           remotePoolAddresses: remainingPools,
           remoteTokenAddress: remoteConfig.remoteToken,
+          remoteTokenDecimals,
           outboundRateLimiterConfig: toRateLimiterConfig(remoteConfig.outboundRateLimiterState),
           inboundRateLimiterConfig: toRateLimiterConfig(remoteConfig.inboundRateLimiterState),
         },
