@@ -18,6 +18,8 @@ const OFFRAMP = getAddress(hexlify(randomBytes(20)))
 const POOL = getAddress(hexlify(randomBytes(20)))
 const TOKEN = getAddress(hexlify(randomBytes(20)))
 const TOKEN2 = getAddress(hexlify(randomBytes(20)))
+/** liquidity holder distinct from the pool — EVM LockBox, or Solana's `pool_signer` PDA */
+const LOCK_BOX = getAddress(hexlify(randomBytes(20)))
 
 /** A dest chain built straight on `Chain.prototype` — no family override. */
 function makeChain(opts: {
@@ -25,6 +27,9 @@ function makeChain(opts: {
   decimals?: Record<string, number>
   poolTypeAndVersion?: string
   balance?: bigint
+  /** per-holder balances; anything not listed falls back to `balance` */
+  balances?: Record<string, bigint>
+  lockBox?: string
   inboundRateLimiterState?: { tokens: bigint; capacity: bigint; rate: bigint }
 }) {
   const decimals = opts.decimals ?? { [TOKEN]: 9 }
@@ -33,6 +38,15 @@ function makeChain(opts: {
   )
   const getTokenAdminRegistryFor = mock.fn(() =>
     Promise.resolve(getAddress(hexlify(randomBytes(20)))),
+  )
+  const getTokenPoolConfig = mock.fn(() =>
+    Promise.resolve({
+      typeAndVersion: opts.poolTypeAndVersion ?? 'BurnMintTokenPool 1.6.1',
+      lockBox: opts.lockBox,
+    }),
+  )
+  const getBalance = mock.fn(({ holder }: { holder: string }) =>
+    Promise.resolve(opts.balances?.[holder] ?? opts.balance ?? 10n ** 24n),
   )
   const chain = Object.create(Chain.prototype) as Chain
   Object.assign(chain, {
@@ -46,12 +60,7 @@ function makeChain(opts: {
     },
     getTokenAdminRegistryFor,
     getRegistryTokenConfig: mock.fn(() => Promise.resolve({ tokenPool: POOL })),
-    getTokenPoolConfig: mock.fn(() =>
-      Promise.resolve({
-        typeAndVersion: opts.poolTypeAndVersion ?? 'BurnMintTokenPool 1.6.1',
-        lockBox: undefined,
-      }),
-    ),
+    getTokenPoolConfig,
     getTokenPoolRemote: mock.fn(() =>
       Promise.resolve({
         remoteToken: TOKEN,
@@ -60,10 +69,10 @@ function makeChain(opts: {
         outboundRateLimiterState: undefined,
       }),
     ),
-    getBalance: mock.fn(() => Promise.resolve(opts.balance ?? 10n ** 24n)),
+    getBalance,
     getTokenInfo,
   })
-  return { chain, getTokenInfo, getTokenAdminRegistryFor }
+  return { chain, getTokenInfo, getTokenAdminRegistryFor, getBalance }
 }
 
 const check = (
@@ -256,5 +265,45 @@ void describe('Chain.checkExecute — amount denomination', () => {
         return true
       },
     )
+  })
+
+  // Solana's pool crate reports its DIRECTORY name — `lockrelease`, one word, kebab-cased —
+  // which parseTypeAndVersion's kebabToPascal leaves as `lockreleaseTokenPool`. The liquidity
+  // it holds lives in the ATA of the `pool_signer` PDA, reported as `lockBox`, NOT in the
+  // state PDA that `tokenPool` points at.
+  void it('Solana lockrelease-token-pool with liquidity in its lockBox passes', async () => {
+    const { chain, getBalance } = makeChain({
+      poolTypeAndVersion: 'lockrelease-token-pool 1.6.2',
+      lockBox: LOCK_BOX,
+      balances: { [LOCK_BOX]: 10n ** 14n },
+      balance: 0n, // the state PDA holds nothing: reading it would fail the transfer
+    })
+    assert.equal(await check(chain, [{ amount: 10n ** 9n }]), true)
+    assert.equal(getBalance.mock.callCount(), 1)
+    assert.equal(getBalance.mock.calls[0]!.arguments[0].holder, LOCK_BOX)
+  })
+
+  void it('Solana lockrelease-token-pool short of liquidity throws', async () => {
+    const { chain } = makeChain({
+      poolTypeAndVersion: 'lockrelease-token-pool 1.6.2',
+      lockBox: LOCK_BOX,
+      balances: { [LOCK_BOX]: 1n },
+      balance: 10n ** 24n, // the state PDA is irrelevant, even if it looks funded
+    })
+    await assert.rejects(
+      () => check(chain, [{ amount: 10n ** 9n }]),
+      (err: unknown) => {
+        assert.ok(err instanceof CCIPInsufficientBalanceError)
+        assert.equal(err.context['have'], '1')
+        assert.equal(err.context['need'], (10n ** 9n).toString())
+        return true
+      },
+    )
+  })
+
+  void it('a Solana burn/mint pool never reads a balance', async () => {
+    const { chain, getBalance } = makeChain({ poolTypeAndVersion: 'burnmint-token-pool 1.6.2' })
+    assert.equal(await check(chain, [{ amount: 10n ** 9n }]), true)
+    assert.equal(getBalance.mock.callCount(), 0)
   })
 })

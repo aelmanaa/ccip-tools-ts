@@ -113,6 +113,7 @@ import {
   getAddressBytes,
   getDataBytes,
   getSomeBlockNumberBefore,
+  isLockReleasePoolType,
   parseTypeAndVersion,
 } from '../utils.ts'
 import type Token_ABI from './abi/BurnMintERC677Token.ts'
@@ -2065,7 +2066,7 @@ export class EVMChain extends Chain<typeof ChainFamily.EVM> {
       ) as unknown as TypedContract<typeof TokenPool_2_0_ABI>
       token = contract.getToken()
       router = contract.getDynamicConfig().then(([router]) => router)
-      if (type.includes('LockRelease')) {
+      if (isLockReleasePoolType(type)) {
         const lockBox_ = await resultToObject(contract.getLockBox().catch(() => null))
         if (lockBox_ && !lockBox_.match(/^(0x)?0*$/)) lockBox = lockBox_
       }

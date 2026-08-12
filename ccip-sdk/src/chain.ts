@@ -67,6 +67,7 @@ import {
 import {
   getDataBytes,
   getSourceDecimalsFromExtraData,
+  isLockReleasePoolType,
   parseTypeAndVersion,
   scaleDecimals,
   util,
@@ -573,7 +574,9 @@ export type TokenPoolConfig = {
    */
   previousPoolTypeAndVersion?: string
   /**
-   * For LockReleaseTokenPool v2+, the address of the associated LockBox contract.
+   * For LockRelease pools whose liquidity is held outside the pool account itself, the holder of
+   * that liquidity: the LockBox contract on EVM v2+ TPs, the `pool_signer` PDA on Solana (whose
+   * ATA is the pool's `pool_token_account`). Balance checks read this instead of the pool.
    */
   lockBox?: string
   /**
@@ -1409,9 +1412,9 @@ export abstract class Chain<F extends ChainFamily = ChainFamily> {
       // Convert for the comparisons below, but never touch `ta.amount`: EVMChain's override
       // forwards it to releaseOrMint as sourceDenominatedAmount.
       // `typeAndVersion` is the raw string from getTokenPoolConfig and may be kebab-case
-      // (e.g. Solana's `foo-lock-release 1.5.0`); normalize via parseTypeAndVersion first.
+      // (e.g. Solana's `lockrelease-token-pool 1.6.2`); normalize via parseTypeAndVersion first.
       const [poolType, poolVersion] = typeAndVersion ? parseTypeAndVersion(typeAndVersion) : []
-      const isLockRelease = Boolean(poolType?.includes('LockRelease'))
+      const isLockRelease = isLockReleasePoolType(poolType)
       const sourceDecimals = getSourceDecimalsFromExtraData(ta.extraData)
       const tokenInfo =
         sourceDecimals != null || isLockRelease ? await this.getTokenInfo(token) : undefined

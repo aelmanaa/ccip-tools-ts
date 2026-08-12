@@ -116,6 +116,7 @@ import {
   decodeOnRampAddress,
   getAddressBytes,
   getDataBytes,
+  isLockReleasePoolType,
   leToBigInt,
   parseTypeAndVersion,
   toLeArray,
@@ -1861,6 +1862,7 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
     router: string
     tokenPoolProgram: string
     typeAndVersion?: string
+    lockBox?: string
   }> {
     // `tokenPool` is actually a State PDA in the tokenPoolProgram
     const tokenPoolState = await this.connection.getAccountInfo(new PublicKey(tokenPool))
@@ -1868,9 +1870,9 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
       throw new CCIPTokenPoolStateNotFoundError(tokenPool)
     const tokenPoolProgram = tokenPoolState.owner.toBase58()
 
-    let typeAndVersion
+    let poolType, typeAndVersion
     try {
-      ;[, , typeAndVersion] = await this.typeAndVersion(tokenPoolProgram)
+      ;[poolType, , typeAndVersion] = await this.typeAndVersion(tokenPoolProgram)
     } catch (_) {
       // TokenPool may not have a typeAndVersion
     }
@@ -1880,11 +1882,17 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
     const mint = new PublicKey(tokenPoolState.data.subarray(41, 41 + 32))
     const router = new PublicKey(tokenPoolState.data.subarray(266, 266 + 32))
 
+    // BaseConfig.pool_signer: State = 8B discriminator + version:u8 + BaseConfig, whose fields are
+    // token_program(32) mint(32) decimals(1) pool_signer(32) — so 8+1+32+32+1 = 74.
+    // A lock/release pool's liquidity sits in its ATA (`pool_token_account`), not in the state PDA.
+    const poolSigner = new PublicKey(tokenPoolState.data.subarray(74, 74 + 32))
+
     return {
       token: mint.toBase58(),
       router: router.toBase58(),
       tokenPoolProgram,
       typeAndVersion,
+      ...(isLockReleasePoolType(poolType) && { lockBox: poolSigner.toBase58() }),
     }
   }
 

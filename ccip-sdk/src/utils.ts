@@ -493,6 +493,18 @@ export async function withRetry<T>(
 }
 
 /**
+ * Whether a pool type name denotes a lock/release pool (which holds liquidity, unlike burn/mint).
+ *
+ * @param poolType - pool type name, raw or as normalized by {@link parseTypeAndVersion}
+ * @returns true for EVM/Aptos `LockReleaseTokenPool` and its variants, and for Solana's crate
+ *   name `lockrelease-token-pool` — kebabToPascal leaves that one as `lockreleaseTokenPool`,
+ *   since it never uppercases the first character
+ */
+export function isLockReleasePoolType(poolType: string | undefined): boolean {
+  return /lock-?release/i.test(poolType ?? '')
+}
+
+/**
  * Parses a typeAndVersion string into its components.
  * @param typeAndVersion - String in format "TypeName vX.Y.Z".
  * @returns Tuple of `[normalizedType, normalizedVersion, original, suffix?]` where

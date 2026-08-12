@@ -18,6 +18,7 @@ import {
   getSomeBlockNumberBefore,
   getSourceDecimalsFromExtraData,
   isBase64,
+  isLockReleasePoolType,
   jsonParse,
   jsonStringify,
   leToBigInt,
@@ -1006,6 +1007,32 @@ describe('parseTypeAndVersion', () => {
     const result = parseTypeAndVersion('Router  v1.0.0')
     assert.equal(result[0], 'Router')
     assert.equal(result[1], '1.0.0')
+  })
+})
+
+describe('isLockReleasePoolType', () => {
+  it('matches every family spelling, through parseTypeAndVersion', () => {
+    for (const tv of [
+      'LockReleaseTokenPool 1.5.1', // EVM
+      'LockReleaseTokenPool 1.6.0', // Aptos
+      'LockReleaseTokenPoolAndProxy 1.5.0',
+      'HybridLockReleaseUSDCTokenPool 1.6.2',
+      'SiloedLockReleaseTokenPool 2.0.0',
+      'lockrelease-token-pool 1.6.2', // Solana: crate dir name, `lockrelease` as one word
+      'lock-release-token-pool 1.5.0',
+    ])
+      assert.ok(isLockReleasePoolType(parseTypeAndVersion(tv)[0]), tv)
+  })
+
+  it('does not match burn/mint or other pools', () => {
+    for (const tv of [
+      'BurnMintTokenPool 1.5.1',
+      'burnmint-token-pool 1.6.2',
+      'cctp-token-pool 1.6.2',
+      'USDCTokenPool 1.5.1',
+    ])
+      assert.ok(!isLockReleasePoolType(parseTypeAndVersion(tv)[0]), tv)
+    assert.ok(!isLockReleasePoolType(undefined))
   })
 })
 
