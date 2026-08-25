@@ -17,7 +17,7 @@ import type { UnsignedEVMTx } from '../../evm/types.ts'
 import { ChainFamily } from '../../networks.ts'
 import { CCTParamsInvalidError, CCTTxFailedError } from '../errors.ts'
 import { type ExecuteParams, type TransactionResult, Operation } from '../operation.ts'
-import { submit } from './submit.ts'
+import { submit, submitForReceipt } from './submit.ts'
 import { validateAddress } from './validate.ts'
 
 /** Assembles a contract-deployment tx (no `to`): creation bytecode + ABI-encoded ctor args. */
@@ -132,15 +132,20 @@ export abstract class EVMOperation<P extends { sender?: string }> extends Operat
     return sender
   }
 
-  /** {@link generate}, then sign and submit; returns the confirmed tx hash. */
+  /**
+   * {@link generate}, then sign and submit **every** transaction in the built bundle (in order),
+   * returning the last confirmed tx hash. Multi-tx ops (e.g. `appendRemotePoolAddresses`,
+   * `removeRemotePoolAddresses`, `setChainRateLimiterConfig` on v1.5/v1.6 pools build one tx per
+   * item) rely on this; single-tx ops run a one-element loop. Deploy ops override `execute`.
+   */
   async execute(chain: EVMChain, params: EVMExecuteParams<P>): Promise<TransactionResult> {
-    const { response } = await submit(
+    const { hash } = await submitForReceipt(
       chain,
       params.wallet,
       await this.generate(chain, params),
       this.name,
     )
-    return { hash: response.hash }
+    return { hash }
   }
 }
 
