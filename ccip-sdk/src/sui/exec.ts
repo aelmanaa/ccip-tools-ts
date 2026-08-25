@@ -1,4 +1,4 @@
-import type { Keypair } from '@mysten/sui/cryptography'
+import type { Signer } from '@mysten/sui/cryptography'
 import type { SuiJsonRpcClient } from '@mysten/sui/jsonRpc'
 import { Transaction } from '@mysten/sui/transactions'
 
@@ -15,7 +15,12 @@ import {
   type TokenConfig,
   buildManualExecutionPTB,
 } from './manuallyExec/index.ts'
-import { fetchTokenConfigs, getObjectRef, getReceiverModule } from './objects.ts'
+import {
+  fetchTokenConfigs,
+  getLatestPackageId,
+  getObjectRef,
+  getReceiverModule,
+} from './objects.ts'
 import type { CCIPMessage_V1_6_Sui, UnsignedSuiTx } from './types.ts'
 import { ChainFamily } from '../networks.ts'
 
@@ -38,23 +43,32 @@ export async function generateUnsignedExecutePTB(
     throw new CCIPExecutionReportChainMismatchError('Sui')
   }
 
-  const ccip = await getCcipStateAddress(offRamp, client)
+  // Move calls must target the latest packages (old versions are version-gated
+  // and revert); state pointers/object refs are resolved from the originals
+  const latestOffRamp = await getLatestPackageId(offRamp, client)
+  const ccip = await getCcipStateAddress(latestOffRamp, client)
+  const latestCcip = await getLatestPackageId(ccip, client)
 
   const ccipObjectRef = await getObjectRef(ccip, client)
   const [offrampStateObject, receiverConfig] = await Promise.all([
     getObjectRef(offRamp, client),
-    getReceiverModule(client, ccip, ccipObjectRef, input.message.receiver),
+    getReceiverModule(client, latestCcip, ccipObjectRef, input.message.receiver),
   ])
 
   let tokenConfigs: TokenConfig[] = []
   if (input.message.tokenAmounts.length !== 0) {
-    tokenConfigs = await fetchTokenConfigs(client, ccip, ccipObjectRef, input.message.tokenAmounts)
+    tokenConfigs = await fetchTokenConfigs(
+      client,
+      latestCcip,
+      ccipObjectRef,
+      input.message.tokenAmounts,
+    )
   }
 
   const suiInput: SuiManuallyExecuteInput = {
     executionReport: input,
-    offrampAddress: offRamp,
-    ccipAddress: ccip,
+    offrampAddress: latestOffRamp,
+    ccipAddress: latestCcip,
     ccipObjectRef,
     offrampStateObject,
     receiverConfig,
@@ -78,14 +92,14 @@ export async function generateUnsignedExecutePTB(
  * Signs and executes a pre-built {@link UnsignedSuiTx} using the provided keypair.
  *
  * @param client - Sui RPC client.
- * @param wallet - Keypair used to sign the transaction.
+ * @param wallet - Signer used to sign the transaction.
  * @param unsignedTx - The unsigned Sui transaction to execute.
  * @param logger - Optional logger.
  * @returns The finalized transaction digest string.
  */
 export async function signAndExecuteSuiTx(
   client: SuiJsonRpcClient,
-  wallet: Keypair,
+  wallet: Signer,
   unsignedTx: UnsignedSuiTx,
   logger?: { info: (...args: unknown[]) => void },
 ): Promise<string> {
@@ -112,9 +126,16 @@ export async function signAndExecuteSuiTx(
     digest = result.digest
   } catch (e) {
     if (e instanceof CCIPExecTxRevertedError) throw e
+    // The node aborts pre-execution with MoveAbort before producing effects;
+    // translate the offramp's well-known gates into actionable messages.
+    const abortCode = (e as Error).message.match(/abort code: (\d+)/)?.[1]
+    const gate =
+      abortCode === '9'
+        ? ' (offramp abort 9: EManualExecutionNotYetEnabled - the commit must age past permissionlessExecutionThresholdSeconds before manual execution)'
+        : ''
     throw new CCIPError(
       CCIPErrorCode.TRANSACTION_NOT_FINALIZED,
-      `Failed to send Sui execute transaction: ${(e as Error).message}`,
+      `Failed to send Sui execute transaction: ${(e as Error).message}${gate}`,
     )
   }
 

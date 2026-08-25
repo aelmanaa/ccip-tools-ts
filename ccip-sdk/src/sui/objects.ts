@@ -11,6 +11,7 @@ import { memoize } from 'micro-memoize'
 import { CCIPDataFormatUnsupportedError } from '../errors/index.ts'
 import type { CCIPMessage, CCIPVersion } from '../types.ts'
 import { toLeArray } from '../utils.ts'
+import { withLookupRetry } from './events.ts'
 
 const bcsBytes = (bytes: Uint8Array) => bcs.vector(bcs.u8()).serialize(bytes).toBytes()
 
@@ -63,37 +64,160 @@ export function deriveObjectID(parentAddress: string, keyBytes: Uint8Array): str
  */
 export const getObjectRef = memoize(
   async function getPackageIds_(address: string, client: SuiJsonRpcClient): Promise<string> {
-    let stateObjectName
-    if (address.endsWith('::onramp')) stateObjectName = 'OnRampState'
-    else if (address.endsWith('::offramp')) stateObjectName = 'OffRampState'
-    else stateObjectName = 'CCIPObjectRef'
-
-    const fullStatePointerType = `${address}::${stateObjectName}Pointer`
-
-    const ownedObjects = await client.getOwnedObjects({
-      owner: address.split('::')[0]!,
-      filter: { StructType: fullStatePointerType },
-      options: { showContent: true },
-    })
-
-    const pointer = ownedObjects.data[0]?.data
-    if (!pointer?.objectId || pointer.content!.dataType !== 'moveObject')
-      throw new CCIPDataFormatUnsupportedError(
-        'No CCIP ObjectRef Pointer found for the given packageId',
-        { context: { fullStatePointerType, pointer } },
-      )
-    // const statePointerObjectId = pointer.objectId
-    const parentObjectId = Object.entries(pointer.content!.fields).find(([key]) =>
-      key.endsWith('_object_id'),
-    )?.[1]
-    if (typeof parentObjectId !== 'string')
-      throw new CCIPDataFormatUnsupportedError('No parent object id found inthe given pointer', {
-        context: { fullStatePointerType, pointer },
-      })
-    return deriveObjectID(parentObjectId, toUtf8Bytes(stateObjectName))
+    return withLookupRetry(() => getObjectRef_(address, client))
   },
   { maxArgs: 1, expires: 300e3, async: true },
 )
+
+/**
+ * Reads a package's disassembled module sources, keyed by module name.
+ *
+ * The disassembly is the deterministic source of truth for a package's module
+ * list, struct definitions, and - most importantly - its import table with
+ * real dependency package addresses (compiled bytecode only carries compressed
+ * address indices). Used for dependency discovery (e.g. the ccip package a
+ * token pool is registered with) where transaction scanning is undesirable.
+ */
+export const getPackageDisassembly = memoize(
+  async function getPackageDisassembly_(
+    packageId: string,
+    client: SuiJsonRpcClient,
+  ): Promise<Record<string, string>> {
+    const obj = await withLookupRetry(() =>
+      client.getObject({ id: normalizeSuiAddress(packageId), options: { showContent: true } }),
+    )
+    const content = obj.data?.content
+    if (content?.dataType !== 'package') {
+      throw new CCIPDataFormatUnsupportedError(`Not a Move package: ${packageId}`, {
+        context: { id: packageId, error: obj.error },
+      })
+    }
+    return content.disassembled as Record<string, string>
+  },
+  { maxArgs: 1, async: true, expires: 3600e3 },
+)
+
+async function getObjectRef_(address: string, client: SuiJsonRpcClient): Promise<string> {
+  // addresses may come unpadded (e.g. from Move module metadata); normalize
+  const packageId = normalizeSuiAddress(address.split('::')[0]!)
+  const suffix = address.split('::').slice(1).join('::')
+  address = suffix ? `${packageId}::${suffix}` : packageId
+
+  let stateObjectName
+  if (address.endsWith('::onramp')) stateObjectName = 'OnRampState'
+  else if (address.endsWith('::offramp')) stateObjectName = 'OffRampState'
+  else stateObjectName = 'CCIPObjectRef'
+
+  const fullStatePointerType = `${address}::${stateObjectName}Pointer`
+
+  const ownedObjects = await client.getOwnedObjects({
+    owner: packageId,
+    filter: { StructType: fullStatePointerType },
+    options: { showContent: true },
+  })
+
+  const pointer = ownedObjects.data[0]?.data
+  if (!pointer?.objectId || pointer.content!.dataType !== 'moveObject')
+    throw new CCIPDataFormatUnsupportedError(
+      'No CCIP ObjectRef Pointer found for the given packageId',
+      { context: { fullStatePointerType, pointer } },
+    )
+  // const statePointerObjectId = pointer.objectId
+  const parentObjectId = Object.entries(pointer.content!.fields).find(([key]) =>
+    key.endsWith('_object_id'),
+  )?.[1]
+  if (typeof parentObjectId !== 'string')
+    throw new CCIPDataFormatUnsupportedError('No parent object id found inthe given pointer', {
+      context: { fullStatePointerType, pointer },
+    })
+  return deriveObjectID(parentObjectId, toUtf8Bytes(stateObjectName))
+}
+
+/**
+ * Maps an object's dynamic (object) field types to their object ids.
+ *
+ * Memoized: the CCIPObjectRef's field set is the ccip package's module states,
+ * which only changes when a module is initialized, and callers look several up
+ * per config read.
+ *
+ * @param parentId - object holding the dynamic fields
+ * @param client - sui client
+ * @returns type string of each dynamic field, to its object id
+ */
+export const getDynamicFieldIds = memoize(
+  async (parentId: string, client: SuiJsonRpcClient): Promise<Record<string, string>> => {
+    const fields = await withLookupRetry(() => client.getDynamicFields({ parentId }))
+    return Object.fromEntries(fields.data.map((field) => [field.objectType, field.objectId]))
+  },
+  { maxArgs: 1, async: true, expires: 300e3 },
+)
+
+/**
+ * Reads a Move object's `content.fields`.
+ *
+ * Config structs are read straight off the state objects rather than through
+ * `devInspect` view calls: one request returns every field of the struct (and, for
+ * `VecMap` fields, every entry) as JSON, with no BCS layout to track.
+ *
+ * @param id - object id
+ * @param client - sui client
+ * @returns the object's fields
+ * @throws {@link CCIPDataFormatUnsupportedError} if the object is missing or is not a Move object
+ */
+export async function getObjectFields(
+  id: string,
+  client: SuiJsonRpcClient,
+): Promise<Record<string, unknown>> {
+  const obj = await withLookupRetry(() => client.getObject({ id, options: { showContent: true } }))
+  const content = obj.data?.content
+  if (content?.dataType !== 'moveObject')
+    throw new CCIPDataFormatUnsupportedError(`Not a Move object: ${id}`, {
+      context: { id, error: obj.error },
+    })
+  return content.fields as Record<string, unknown>
+}
+
+/**
+ * Reads the value fields of a `Table<u64, T>` entry.
+ *
+ * @param table - the table's `id.id`, as found on the struct holding it
+ * @param key - entry key
+ * @param client - sui client
+ * @returns the entry's value fields, or undefined when the table has no such key
+ */
+export async function getTableEntryFields(
+  table: string,
+  key: bigint,
+  client: SuiJsonRpcClient,
+): Promise<Record<string, unknown> | undefined> {
+  const entry = await client
+    .getDynamicFieldObject({ parentId: table, name: { type: 'u64', value: key.toString() } })
+    .catch(() => null)
+  const content = entry?.data?.content
+  if (content?.dataType !== 'moveObject') return
+  const value = (content.fields as { value?: { fields?: Record<string, unknown> } }).value
+  return value?.fields
+}
+
+/**
+ * Turns decimal-string leaves into bigints, recursively.
+ *
+ * Sui's JSON-RPC renders `u64`/`u128`/`u256` as decimal strings (smaller widths
+ * come through as numbers); the rest of the SDK expects bigints for those. Hex
+ * strings (addresses) and byte vectors are left alone for `normalizeDeep`.
+ *
+ * @param value - decoded JSON value
+ * @returns the same shape with decimal strings replaced by bigints
+ */
+export function parseSuiNumbers<T>(value: T): T {
+  if (typeof value === 'string') return (/^\d+$/.test(value) ? BigInt(value) : value) as T
+  if (Array.isArray(value)) return value.map(parseSuiNumbers) as T
+  if (value && typeof value === 'object')
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, parseSuiNumbers(v)]),
+    ) as unknown as T
+  return value
+}
 
 /**
  * Finds the StatePointer object owned by a package.
@@ -134,7 +258,7 @@ export async function getReceiverModule(
   ccipPackageId: string,
   ccipObjectRef: string,
   receiverPackageId: string,
-) {
+): Promise<{ moduleName: string; packageId: string } | undefined> {
   const ccipBarePackageId = ccipPackageId.split('::')[0]!
   // Call get_receiver_config from receiver_registry contract
   const tx = new Transaction()
@@ -150,6 +274,11 @@ export async function getReceiverModule(
   })
 
   if (result.error) {
+    // EUnknownReceiver: a plain-address receiver (tokens only, no ccip_receive
+    // callback) retrieves no config — report undefined instead of failing, so
+    // the manual-execution PTB skips the receiver call
+    const unknownReceiver = /get_receiver_config[\s\S]*?},\s*3\)/.test(String(result.error))
+    if (unknownReceiver) return undefined
     throw new CCIPDataFormatUnsupportedError(`Failed to call get_receiver_config: ${result.error}`)
   }
 

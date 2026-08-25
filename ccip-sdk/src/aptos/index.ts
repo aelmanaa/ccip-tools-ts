@@ -47,6 +47,7 @@ import {
   type EVMExtraArgsV2,
   type ExtraArgs,
   type SVMExtraArgsV1,
+  type SuiExtraArgsV1,
   EVMExtraArgsV2Tag,
   SVMExtraArgsV1Tag,
 } from '../extra-args.ts'
@@ -173,6 +174,7 @@ export class AptosChain extends Chain<typeof ChainFamily.Aptos> {
     this.provider = provider
 
     this.typeAndVersion = memoize(this.typeAndVersion.bind(this), {
+      async: true,
       maxSize: 100,
       maxArgs: 1,
       expires: 60e3, // 1min
@@ -373,10 +375,12 @@ export class AptosChain extends Chain<typeof ChainFamily.Aptos> {
 
   /** {@inheritDoc Chain.typeAndVersion} */
   async typeAndVersion(address: string) {
-    // requires address with `::<module>` suffix
+    // needs a `::<module>` suffix; a bare package address defaults to `::router`, like the
+    // router entrypoints in send.ts do — every CCIP module shares the package's address
+    const module = address.includes('::') ? address : `${address}::router`
     const [typeAndVersion] = await this.provider.view<[string]>({
       payload: {
-        function: `${address}::type_and_version` as `${string}::${string}::type_and_version`,
+        function: `${module}::type_and_version` as `${string}::${string}::type_and_version`,
       },
     })
     return parseTypeAndVersion(typeAndVersion)
@@ -441,7 +445,10 @@ export class AptosChain extends Chain<typeof ChainFamily.Aptos> {
         functionArguments: [sourceChainSelector],
       },
     })
-    const onRamp = decodeAddress(sourceChainConfig.on_ramp, networkInfo(sourceChainSelector).family)
+    const onRamp = decodeOnRampAddress(
+      sourceChainConfig.on_ramp,
+      networkInfo(sourceChainSelector).family,
+    )
     return normalizeDeep(
       {
         sourceChainSelector,
@@ -530,6 +537,7 @@ export class AptosChain extends Chain<typeof ChainFamily.Aptos> {
   ):
     | (EVMExtraArgsV2 & { _tag: 'EVMExtraArgsV2' })
     | (SVMExtraArgsV1 & { _tag: 'SVMExtraArgsV1' })
+    | (SuiExtraArgsV1 & { _tag: 'SuiExtraArgsV1' })
     | undefined {
     return decodeMoveExtraArgs(extraArgs)
   }
@@ -614,7 +622,8 @@ export class AptosChain extends Chain<typeof ChainFamily.Aptos> {
   /**
    * Converts bytes to an Aptos address.
    * @param bytes - Bytes to convert.
-   * @returns Aptos address (0x-prefixed hex, 32 bytes padded).
+   * @returns Aptos address in canonical short form (0x-prefixed hex, leading
+   * zero nibbles stripped).
    * @throws {@link CCIPDataFormatUnsupportedError} if bytes length exceeds 32
    */
   static getAddress(bytes: BytesLike | readonly number[]): string {

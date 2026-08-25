@@ -7,11 +7,23 @@ import {
   endpointKey,
   fetchProfileForUrl,
   getEndpointLogRange,
+  getEndpointTopicLimit,
   parseLogRangeError,
   parseRateLimitHeaders,
   parseRetryAfter,
+  parseTopicLimitError,
   setEndpointLogRange,
+  setEndpointTopicLimit,
 } from './fetch.ts'
+
+function withMockedPerformanceNow<T>(now: number, fn: () => T): T {
+  const performanceNow = mock.method(performance, 'now', () => now)
+  try {
+    return fn()
+  } finally {
+    performanceNow.mock.restore()
+  }
+}
 
 // ---------------------------------------------------------------------------
 // parseRetryAfter
@@ -23,21 +35,17 @@ describe('parseRetryAfter', () => {
   })
 
   it('handles delta-seconds integer', () => {
-    const before = Date.now()
-    const result = parseRetryAfter('30')
-    const after = Date.now()
-    assert.ok(result !== null)
-    assert.ok(result >= before + 30_000)
-    assert.ok(result <= after + 30_000)
+    withMockedPerformanceNow(1_000, () => {
+      const result = parseRetryAfter('30')
+      assert.equal(result, 31_000)
+    })
   })
 
   it('handles delta-seconds zero', () => {
-    const before = Date.now()
-    const result = parseRetryAfter('0')
-    const after = Date.now()
-    assert.ok(result !== null)
-    assert.ok(result >= before)
-    assert.ok(result <= after)
+    withMockedPerformanceNow(1_000, () => {
+      const result = parseRetryAfter('0')
+      assert.equal(result, 1_000)
+    })
   })
 
   it('handles HTTP-date format', () => {
@@ -71,52 +79,51 @@ describe('parseRateLimitHeaders', () => {
   })
 
   it('parses Retry-After delta-seconds', () => {
-    const before = Date.now()
-    const result = parseRateLimitHeaders(makeHeaders({ 'Retry-After': '10' }))
-    assert.ok(result.retryAfterAt !== undefined)
-    assert.ok(result.retryAfterAt >= before + 10_000)
+    withMockedPerformanceNow(1_000, () => {
+      const result = parseRateLimitHeaders(makeHeaders({ 'Retry-After': '10' }))
+      assert.equal(result.retryAfterAt, 11_000)
+    })
   })
 
   it('parses IETF draft individual headers (reset = delta-seconds)', () => {
-    const before = Date.now()
-    const result = parseRateLimitHeaders(
-      makeHeaders({
-        'RateLimit-Limit': '100',
-        'RateLimit-Remaining': '50',
-        'RateLimit-Reset': '60',
-      }),
-    )
-    assert.equal(result.limit, 100)
-    assert.equal(result.remaining, 50)
-    assert.ok(result.resetAt !== undefined)
-    assert.ok(result.resetAt >= before + 60_000)
-    assert.ok(result.resetAt <= Date.now() + 60_001)
+    withMockedPerformanceNow(1_000, () => {
+      const result = parseRateLimitHeaders(
+        makeHeaders({
+          'RateLimit-Limit': '100',
+          'RateLimit-Remaining': '50',
+          'RateLimit-Reset': '60',
+        }),
+      )
+      assert.equal(result.limit, 100)
+      assert.equal(result.remaining, 50)
+      assert.equal(result.resetAt, 61_000)
+    })
   })
 
   it('parses combined RateLimit header', () => {
-    const before = Date.now()
-    const result = parseRateLimitHeaders(
-      makeHeaders({ RateLimit: 'limit=100, remaining=20, reset=30' }),
-    )
-    assert.equal(result.limit, 100)
-    assert.equal(result.remaining, 20)
-    assert.ok(result.resetAt !== undefined)
-    assert.ok(result.resetAt >= before + 30_000)
+    withMockedPerformanceNow(1_000, () => {
+      const result = parseRateLimitHeaders(
+        makeHeaders({ RateLimit: 'limit=100, remaining=20, reset=30' }),
+      )
+      assert.equal(result.limit, 100)
+      assert.equal(result.remaining, 20)
+      assert.equal(result.resetAt, 31_000)
+    })
   })
 
   it('parses X-RateLimit-* de-facto headers (reset as delta-seconds)', () => {
-    const before = Date.now()
-    const result = parseRateLimitHeaders(
-      makeHeaders({
-        'X-RateLimit-Limit': '200',
-        'X-RateLimit-Remaining': '100',
-        'X-RateLimit-Reset': '45',
-      }),
-    )
-    assert.equal(result.limit, 200)
-    assert.equal(result.remaining, 100)
-    assert.ok(result.resetAt !== undefined)
-    assert.ok(result.resetAt >= before + 45_000)
+    withMockedPerformanceNow(1_000, () => {
+      const result = parseRateLimitHeaders(
+        makeHeaders({
+          'X-RateLimit-Limit': '200',
+          'X-RateLimit-Remaining': '100',
+          'X-RateLimit-Reset': '45',
+        }),
+      )
+      assert.equal(result.limit, 200)
+      assert.equal(result.remaining, 100)
+      assert.equal(result.resetAt, 46_000)
+    })
   })
 
   it('parses X-RateLimit-Reset as epoch-seconds when > 1e9', () => {
@@ -367,7 +374,7 @@ describe('parseLogRangeError', () => {
       code: 'SERVER_ERROR',
       message: 'server response 413 Request Entity Too Large',
       info: {
-        requestUrl: 'https://rpcs.cldev.sh/hyperliquid/testnet',
+        requestUrl: 'https://rpcs.chain.link/hyperevm/testnet',
         responseStatus: '413 Request Entity Too Large',
         responseBody: JSON.stringify({
           jsonrpc: '2.0',
@@ -415,7 +422,7 @@ describe('parseLogRangeError', () => {
       message:
         'server response 413 Request Entity Too Large (request={}, response={}, error=null, info={"responseBody":"{\\"error\\":{\\"code\\":-32012,\\"message\\":\\"query exceeds max block range 1000\\"}}","responseStatus":"413 Request Entity Too Large"})',
       info: {
-        requestUrl: 'https://rpcs.cldev.sh/hyperliquid/testnet',
+        requestUrl: 'https://rpcs.chain.link/hyperevm/testnet',
         responseStatus: '413 Request Entity Too Large',
         responseBody: JSON.stringify({
           error: { code: -32012, message: 'query exceeds max block range 1000' },
@@ -559,6 +566,44 @@ describe('createRateLimitedFetch', () => {
   it('should use default parameters when none provided', () => {
     const rateLimitedFetch = createRateLimitedFetch()
     assert.equal(typeof rateLimitedFetch, 'function')
+  })
+
+  it('should retry transient network aborts (slow RPC) unless caller cancelled', async () => {
+    const abortError = Object.assign(
+      new Error(
+        'Request was aborted. This is usually intentional (e.g. user cancellation or component unmount).',
+      ),
+      { name: 'AbortError' },
+    )
+
+    // A slow RPC that aborts once, then responds → retried to success.
+    let callCount = 0
+    globalThis.fetch = mockedFetch = mock.fn(() => {
+      callCount++
+      if (callCount === 1) return Promise.reject(abortError)
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(),
+      } as Response)
+    })
+    const result = await createRateLimitedFetch({ maxRetries: 3 })(
+      'https://rl-test-abort.example.com',
+    )
+    assert.equal(result.ok, true)
+    assert.equal(mockedFetch.mock.calls.length, 2)
+
+    // A caller-aborted signal must NOT be retried.
+    const aborted = AbortSignal.abort()
+    globalThis.fetch = mockedFetch = mock.fn(() => Promise.reject(abortError))
+    await assert.rejects(
+      createRateLimitedFetch({ maxRetries: 3 })('https://rl-test-abort2.example.com', {
+        signal: aborted,
+      }),
+      /aborted/i,
+    )
+    assert.equal(mockedFetch.mock.calls.length, 1)
   })
 
   it('should handle network errors with retry logic', async () => {
@@ -772,6 +817,30 @@ describe('adaptive limiting', () => {
     assert.ok(Date.now() - t0 < 4000, `expected burst+retry (no pacing), took ${Date.now() - t0}ms`)
   })
 
+  it('drains an over-cap pacing backlog instead of failing the requests', async () => {
+    let calls = 0
+    globalThis.fetch = mock.fn(async () => {
+      calls++
+      return ok()
+    })
+    // 1 request per 250ms pacer with a small (test-only) backlog ceiling: the
+    // concurrent burst reserves ~750ms of slots, so the tail requests exceed
+    // the cap and fail fast in acquire(). They must then sleep off the
+    // already-reserved backlog and still go out — no hard failure, no retry
+    // storm (calls stays at the request count).
+    const f = createRateLimitedFetch({
+      seed: { limit: 1, windowMs: 250 },
+      maxPacingBacklogMs: 300,
+    })
+    const url = 'https://drain-backlog.example.com/rpc'
+    const t0 = Date.now()
+    await Promise.all(Array.from({ length: 4 }, (_, i) => f(url, rpc('m', i))))
+    const elapsed = Date.now() - t0
+    assert.equal(calls, 4)
+    assert.ok(elapsed >= 500, `expected paced drain across ~4 slots, took ${elapsed}ms`)
+    assert.ok(elapsed < 10_000, `took suspiciously long: ${elapsed}ms`)
+  })
+
   it('seeded (TON-like) limiter doubles window on consecutive header-less 429s', async () => {
     let calls = 0
     globalThis.fetch = mock.fn(() => {
@@ -873,5 +942,71 @@ describe('createAxiosFetchAdapter', () => {
     const adapter2 = createAxiosFetchAdapter(globalThis.fetch)
     assert.equal(typeof adapter1, 'function')
     assert.equal(typeof adapter2, 'function')
+  })
+})
+
+describe('parseTopicLimitError', () => {
+  it('recognises common phrasings and extracts the cap when stated', () => {
+    for (const [msg, want] of [
+      ['too many topics in filter', undefined],
+      ['requested too many topics', undefined],
+      ['eth_getLogs is limited to 5 topics', 5],
+      ['limited to a maximum of 4 topics', 4],
+      ['maximum number of topics is 5', 5],
+      ['max topics: 3', 3],
+      ['topics limit exceeded', undefined],
+    ] as const) {
+      const info = parseTopicLimitError({ code: -32602, message: msg })
+      assert.notEqual(info, null, `should match: ${msg}`)
+      assert.equal(info?.maxTopics, want, `cap for: ${msg}`)
+    }
+  })
+
+  it('does NOT match a block-range error', () => {
+    // Confusing the two would shrink the wrong dimension forever: a range error
+    // would teach a bogus topic cap and split every filter for no reason.
+    for (const msg of [
+      'query returned more than 10000 results',
+      'block range too large (maximum 2000)',
+      'up to a 10000 block range',
+      'Exceeded maximum block range: 1000',
+    ]) {
+      assert.equal(parseTopicLimitError({ code: -32005, message: msg }), null, msg)
+      assert.notEqual(parseLogRangeError({ code: -32005, message: msg }), null, msg)
+    }
+  })
+
+  it('returns null for unrelated errors and nullish input', () => {
+    assert.equal(parseTopicLimitError(null), null)
+    assert.equal(parseTopicLimitError(undefined), null)
+    assert.equal(parseTopicLimitError(new Error('execution reverted')), null)
+    assert.equal(parseTopicLimitError({ code: -32000, message: 'header not found' }), null)
+  })
+
+  it('finds the message nested in a JSON-RPC error body', () => {
+    const info = parseTopicLimitError({
+      code: 'SERVER_ERROR',
+      info: { error: { code: -32602, message: 'eth_getLogs is limited to 5 topics' } },
+    })
+    assert.deepEqual(info, { maxTopics: 5 })
+  })
+})
+
+describe('endpoint topic limit', () => {
+  it('stores and reads back per endpoint, keyed like the log range', () => {
+    const a = 'https://topiclimit-a.example/rpc'
+    const b = 'https://topiclimit-b.example/rpc'
+    assert.equal(getEndpointTopicLimit(a), undefined)
+
+    setEndpointTopicLimit(a, 5, 'error')
+    assert.equal(getEndpointTopicLimit(a), 5)
+    // A cap learned for one provider must not leak to another: the whole point of
+    // storing it per endpoint is that a round-robin spans several providers.
+    assert.equal(getEndpointTopicLimit(b), undefined)
+
+    // Independent of the log-range slot on the same endpoint.
+    setEndpointLogRange(a, 1000, 'error')
+    assert.equal(getEndpointTopicLimit(a), 5)
+    assert.equal(getEndpointLogRange(a), 1000)
   })
 })

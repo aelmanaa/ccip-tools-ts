@@ -36,6 +36,7 @@ function createMockChains(onRamp: string, offRamp: string) {
     getTokenForTokenPool: mock.fn(async () => getAddress(hexlify(randomBytes(20)))),
     getTokenInfo: mock.fn(async () => ({ decimals: 18 })),
     getRouterForOnRamp: mock.fn(async () => sourceRouter),
+    getOnRampConfig: mock.fn(async () => ({ typeAndVersion: 'EVM2EVMOnRamp 1.5.0' })),
     getOnRampForRouter: mock.fn(async (_router: string, _destChainSelector: bigint) => onRamp),
     getOffRampsForRouter: mock.fn(async () => [offRamp]),
     getOnRampsForOffRamp: mock.fn(async () => [destOnRamp]),
@@ -530,7 +531,7 @@ describe('EVMChain.estimateReceiveExecution({ messageId })', () => {
 
     const result = await chain.estimateReceiveExecution({ messageId })
 
-    assert.equal(result, 23700)
+    assert.equal(result, 0) // empty data + no receive gas: the OffRamp never calls the receiver
     assert.equal(chain.apiClient.getExecutionInput.mock.calls.length, 1)
   })
 
@@ -565,7 +566,9 @@ describe('EVMChain.estimateReceiveExecution({ messageId })', () => {
         sender,
         receiver,
         sourceChainSelector: 16015286601757825753n,
-        data: '0x',
+        // non-empty data keeps the receiver in play; a token-only message short-circuits to 0
+        // before any estimate, so it could not exercise the state override this test asserts
+        data: '0xdeadbeef',
         tokenAmounts: [
           {
             destTokenAddress,

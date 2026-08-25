@@ -5,17 +5,16 @@
  * @packageDocumentation
  */
 
-import { interfaces } from '../../../../evm/const.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
-import { ChainFamily } from '../../../../networks.ts'
-import { EVMOperation } from '../../operation.ts'
+import { EVMOperation, callTx } from '../../operation.ts'
 import { validateAddress } from '../../validate.ts'
+import { getTokenAdminRegistryInterface } from '../contracts.ts'
 
 /** Parameters for `setPool`. Zero `poolAddress` delists the token. */
 export type SetPoolParams = {
   tokenAddress: string
-  /** A zero/empty `poolAddress` delists the token from the registry. */
+  /** The zero address as `poolAddress` delists the token from the registry. */
   poolAddress: string
   /**
    * Contract to resolve the TokenAdminRegistry from. Pass the registry itself for a
@@ -41,10 +40,10 @@ export class SetPool extends EVMOperation<SetPoolParams> {
   protected async buildUnsigned(chain: EVMChain, p: SetPoolParams): Promise<UnsignedEVMTx> {
     const to = await chain.getTokenAdminRegistryFor(p.address)
     // TAR.setPool encoding is version-stable across v1.5–v2.0; no version dispatch needed.
-    const data = interfaces.TokenAdminRegistry.encodeFunctionData('setPool', [
+    const data = getTokenAdminRegistryInterface().encodeFunctionData('setPool', [
       p.tokenAddress,
       p.poolAddress,
     ])
-    return { family: ChainFamily.EVM, transactions: [{ to, data }] }
+    return callTx(to, data)
   }
 }

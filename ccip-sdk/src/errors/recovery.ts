@@ -48,8 +48,10 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
     'Upgrade to a supported lane version. Check version compatibility: https://docs.chain.link/ccip/directory',
   LANE_NOT_FOUND:
     'This lane may not exist or is not yet supported by CCIP. Check the CCIP Directory for supported lanes: https://docs.chain.link/ccip/directory',
+  LANE_LATENCY_INSUFFICIENT_DATA:
+    'The lane exists but has too little history for this estimate. If a source token was requested, retry without it to get the lane-wide latency.',
 
-  COMMIT_NOT_FOUND: 'Wait for the commit report. A DON commit typically takes a few minutes.',
+  COMMIT_NOT_FOUND: 'Wait for the commit report. DON commit typically takes a few minutes.',
   MERKLE_ROOT_MISMATCH:
     'The computed merkle root does not match the committed root. Ensure all messages in the batch are included and ordered correctly.',
   MERKLE_TREE_EMPTY: 'Provide at least one leaf hash.',
@@ -71,8 +73,7 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
   VERSION_FEATURE_UNAVAILABLE: 'This feature requires CCIP v1.6 or later.',
   VERSION_REQUIRES_LANE: 'Decoding commits from CCIP <= v1.5 requires lane information.',
 
-  EXTRA_ARGS_PARSE_FAILED:
-    'Verify the extraArgs bytes are properly encoded. Use EVMExtraArgsV1/V2 for EVM sources, SVMExtraArgsV1 for Solana sources. Check the source chain family.',
+  EXTRA_ARGS_PARSE_FAILED: 'Verify the format matches the source chain family.',
   EXTRA_ARGS_UNKNOWN: 'Use EVMExtraArgsV1/V2, SVMExtraArgsV1, or SuiExtraArgsV1.',
   EXTRA_ARGS_INVALID_EVM: 'ExtraArgs must be EVMExtraArgsV1 or EVMExtraArgsV2 format.',
   EXTRA_ARGS_INVALID_SVM: 'ExtraArgs must be SVMExtraArgsV1 format for Solana.',
@@ -110,7 +111,8 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
   TOKEN_MINT_INVALID:
     'The address is not a valid SPL token mint. Ensure the address is owned by TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID.',
   TOKEN_AMOUNT_INVALID: 'Token amount must have a valid address and positive amount.',
-  TOKEN_POOL_STATE_NOT_FOUND: 'TokenPool state PDA not found.',
+  TOKEN_POOL_STATE_NOT_FOUND:
+    'Verify poolType matches the deployed pool, pass poolProgramAddress for a custom pool, and confirm the pool is initialized for this mint on this cluster.',
   TOKEN_POOL_INFO_NOT_FOUND:
     'Check that the token pool is deployed and configured for this lane. Verify supported tokens: https://docs.chain.link/ccip/directory',
   TOKEN_ACCOUNT_NOT_FOUND:
@@ -128,6 +130,13 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
 
   FINALITY_NOT_ALLOWED:
     "The receiver contract does not accept the requested finality. Check the receiver's getCCVsAndFinalityConfig() for the allowed depth or safe flag.",
+
+  DEST_EXECUTION_REVERT:
+    'The destination pool releaseOrMint reverts, so the message would not execute on the destination. Parse context.revert (the raw encoded revert) with EVMChain.parse to find the cause, resolve it, then retry.',
+  DEST_SIMULATION_UNAVAILABLE:
+    'The destination releaseOrMint simulation could not be performed, so executability is undetermined. On a transport error, retry (optionally with a different destination RPC); for attestation-consuming pools the check only becomes possible post-send.',
+  SOURCE_POOL_REVERT:
+    'The source pool lockOrBurn reverts, so ccipSend would revert with the same cause. Parse context.revert (the raw encoded revert) with EVMChain.parse to find the cause (allowlist, outbound rate limit, finality gate), resolve it, then retry.',
 
   USDC_ATTESTATION_FAILED: 'USDC attestation not ready. Wait and retry (10-30 min typical).',
   LBTC_ATTESTATION_ERROR: 'LBTC attestation fetch failed. Wait and retry.',
@@ -201,146 +210,11 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
   INTERACTIVE_REQUIRED:
     'Provide the required input via CLI flags or environment variables, or remove --no-interactive to allow prompts.',
 
-  TOKEN_DEPLOY_PARAMS_INVALID:
-    'Verify the token deployment parameters: name and symbol must be non-empty, decimals must be within range for the chain family (0-18 EVM, 0-9 Solana).',
-  TOKEN_DEPLOY_FAILED:
-    'The token deployment transaction failed. Check the transaction hash on a block explorer for revert reason. Ensure the wallet has sufficient funds for gas.',
-
-  POOL_DEPLOY_PARAMS_INVALID:
-    'Verify the pool deployment parameters: tokenAddress, poolType, localTokenDecimals, and chain-specific addresses (routerAddress, poolProgramId, mcmsAddress) must be valid.',
-  POOL_DEPLOY_FAILED:
-    'The pool deployment transaction failed. Check the transaction hash on a block explorer for revert reason. Ensure the wallet has sufficient funds for gas.',
-  POOL_NOT_INITIALIZED:
-    'This Aptos generic pool requires initialization by the token creator module. ' +
-    'The token creator must call burn_mint_token_pool::initialize() or lock_release_token_pool::initialize() ' +
-    'with stored capability refs (BurnRef/MintRef/TransferRef). This cannot be done via the SDK.',
-
-  PROPOSE_ADMIN_ROLE_PARAMS_INVALID:
-    'Verify the propose admin role parameters: tokenAddress, administrator, and routerAddress must be non-empty valid addresses.',
-  PROPOSE_ADMIN_ROLE_FAILED:
-    'The propose admin role transaction failed. Ensure the caller is the TokenAdminRegistry owner or has permission to propose administrators.',
-
-  ACCEPT_ADMIN_ROLE_PARAMS_INVALID:
-    'Check that tokenAddress and routerAddress are valid, non-empty addresses.',
-  ACCEPT_ADMIN_ROLE_FAILED:
-    'The accept admin role transaction failed. Ensure the caller is the pending administrator for this token.',
-
-  TRANSFER_ADMIN_ROLE_PARAMS_INVALID:
-    'Check that tokenAddress, newAdmin, and routerAddress are valid, non-empty addresses.',
-  TRANSFER_ADMIN_ROLE_FAILED:
-    'The transfer admin role transaction failed. Ensure the caller is the current administrator for this token.',
-
-  APPLY_CHAIN_UPDATES_PARAMS_INVALID:
-    'Check that poolAddress is valid and chainsToAdd entries have valid remoteChainSelector, remotePoolAddresses, and remoteTokenAddress.',
-  APPLY_CHAIN_UPDATES_FAILED:
-    'The apply chain updates transaction failed. Ensure the caller is the pool owner and the remote chain selectors are valid.',
-
-  APPEND_REMOTE_POOL_ADDRESSES_PARAMS_INVALID:
-    'Check that poolAddress, remoteChainSelector, and remotePoolAddresses are valid and non-empty.',
-  APPEND_REMOTE_POOL_ADDRESSES_FAILED:
-    'The append remote pool addresses transaction failed. Ensure the caller is the pool owner and the remote chain config exists.',
-
-  DELETE_CHAIN_CONFIG_PARAMS_INVALID:
-    'Check that poolAddress and remoteChainSelector are valid and non-empty.',
-  DELETE_CHAIN_CONFIG_FAILED:
-    'The delete chain config transaction failed. Ensure the caller is the pool owner and the remote chain config exists.',
-
-  REMOVE_REMOTE_POOL_ADDRESSES_PARAMS_INVALID:
-    'Check that poolAddress, remoteChainSelector, and remotePoolAddresses are valid and non-empty.',
-  REMOVE_REMOTE_POOL_ADDRESSES_FAILED:
-    'The remove remote pool addresses transaction failed. Ensure the caller is the pool owner and the remote chain config exists with the specified pool addresses.',
-
-  SET_RATE_LIMITER_CONFIG_PARAMS_INVALID:
-    'Check that poolAddress is valid and each chain config has a valid remoteChainSelector with valid rate limiter configs (capacity and rate as non-negative string integers).',
-  SET_RATE_LIMITER_CONFIG_FAILED:
-    'The set rate limiter config transaction failed. Ensure the caller is the pool owner or rate limit admin, and the remote chain selectors are configured.',
-
-  SET_RATE_LIMIT_ADMIN_PARAMS_INVALID:
-    'Check that poolAddress and rateLimitAdmin are valid non-empty addresses.',
-  SET_RATE_LIMIT_ADMIN_FAILED:
-    'The set rate limit admin transaction failed. Ensure the caller is the pool owner.',
-
-  PROVIDE_LIQUIDITY_PARAMS_INVALID:
-    'Check that poolAddress is a valid lock-release pool and amount is a positive bigint (whole-unit amount times token decimals).',
-  PROVIDE_LIQUIDITY_FAILED:
-    'The provide-liquidity transaction failed. Ensure the token approval succeeded, the caller is the pool rebalancer (v1.x), and the caller holds enough token balance.',
-
-  SET_TOKEN_TRANSFER_FEE_CONFIG_PARAMS_INVALID:
-    'Check that poolAddress is valid, at least one update or disable selector is provided, and each fee config field is a non-negative integer within range.',
-  SET_TOKEN_TRANSFER_FEE_CONFIG_FAILED:
-    'The set token transfer fee config transaction failed. This operation requires an EVM v2.0+ pool. Ensure the caller is the pool owner or fee admin.',
-
-  SET_ALLOWED_FINALITY_CONFIG_PARAMS_INVALID:
-    'Check that poolAddress is valid and finality is "finalized", "safe", or a block depth between 0 and 65535.',
-  SET_ALLOWED_FINALITY_CONFIG_FAILED:
-    'The set allowed finality config transaction failed. This operation requires an EVM v2.0+ pool. Ensure the caller is the pool owner.',
-
-  SET_FEE_ADMIN_PARAMS_INVALID:
-    'Check that poolAddress and feeAdmin are valid non-empty addresses.',
-  SET_FEE_ADMIN_FAILED:
-    'The set fee admin transaction failed. This operation requires an EVM v2.0+ pool. Ensure the caller is the pool owner.',
-
-  CREATE_POOL_MULTISIG_PARAMS_INVALID:
-    'Check that mint and poolProgramId are valid public keys, additionalSigners is non-empty with valid public keys, and threshold is a positive integer not exceeding total signers (max 11).',
-  CREATE_POOL_MULTISIG_FAILED:
-    'The create pool mint authority multisig transaction failed. Ensure the wallet has sufficient SOL for rent exemption and the mint account exists on-chain.',
-
-  TRANSFER_MINT_AUTHORITY_PARAMS_INVALID:
-    'Check that mint and newMintAuthority are valid public keys.',
-  TRANSFER_MINT_AUTHORITY_FAILED:
-    'The transfer mint authority transaction failed. Ensure the caller is the current mint authority.',
-
-  GRANT_MINT_BURN_ACCESS_PARAMS_INVALID:
-    'Check that tokenAddress and authority are valid addresses for this chain.',
-  GRANT_MINT_BURN_ACCESS_FAILED:
-    'The grant mint/burn access transaction failed. Ensure the caller is the token owner/admin and the authority address is valid.',
-
-  REVOKE_MINT_BURN_ACCESS_PARAMS_INVALID:
-    'Check that tokenAddress, authority, and role are valid. Role must be "mint" or "burn".',
-  REVOKE_MINT_BURN_ACCESS_FAILED:
-    'The revoke mint/burn access transaction failed. Ensure the caller is the token owner/admin and the authority currently holds the role.',
-
-  CREATE_POOL_TOKEN_ACCOUNT_PARAMS_INVALID:
-    'Check that tokenAddress and poolAddress are valid Solana public keys and exist on-chain.',
-  CREATE_POOL_TOKEN_ACCOUNT_FAILED:
-    'The create pool token account transaction failed. Ensure the wallet has sufficient SOL for rent exemption and the pool/mint accounts exist on-chain.',
-
-  CREATE_TOKEN_ALT_PARAMS_INVALID:
-    'Check that tokenAddress, poolAddress, and routerAddress are valid Solana public keys. If authority is provided, it must also be a valid public key.',
-  CREATE_TOKEN_ALT_FAILED:
-    'The create token ALT transaction failed. Ensure the wallet has sufficient SOL for rent exemption and the pool/mint accounts exist on-chain.',
-
-  SET_POOL_PARAMS_INVALID:
-    'Check that tokenAddress, poolAddress, and routerAddress are valid. On Solana, poolLookupTable is also required.',
-  SET_POOL_FAILED:
-    'The set pool transaction failed. Ensure the caller is the token administrator in the TokenAdminRegistry.',
-
-  TRANSFER_OWNERSHIP_PARAMS_INVALID:
-    'Check that poolAddress is valid and newOwner is a valid address for the target chain.',
-  TRANSFER_OWNERSHIP_FAILED:
-    'The transfer ownership transaction failed. Ensure the caller is the current pool owner.',
-
-  ACCEPT_OWNERSHIP_PARAMS_INVALID: 'Check that poolAddress is valid for the target chain.',
-  ACCEPT_OWNERSHIP_FAILED:
-    'The accept ownership transaction failed. Ensure the caller is the pending (proposed) owner.',
-
-  EXECUTE_OWNERSHIP_TRANSFER_PARAMS_INVALID:
-    'Check that poolAddress is valid and newOwner matches the address that accepted ownership.',
-  EXECUTE_OWNERSHIP_TRANSFER_FAILED:
-    'The execute ownership transfer failed. Ensure the caller is the current owner and the proposed owner has already called acceptOwnership. This step is Aptos-only.',
-
   NOT_IMPLEMENTED: 'This feature is not yet implemented.',
   UNKNOWN: 'An unknown error occurred. Check the error details.',
 
   CANTON_API_ERROR:
     'Canton Ledger API returned an error. Verify the party ID is correct, the contract is active, and the Canton node is reachable.',
-
-  CONTRACT_VERIFICATION_ERROR:
-    'The explorer rejected the verification request. Check the API key, chainId, and that the contract bytecode is indexed (a freshly-deployed contract may need a few seconds).',
-  CONTRACT_VERIFICATION_FAILED:
-    'Verification failed. Ensure the contract, chainId, and constructor args match the deployed bytecode, or pass an explicit verifier.',
-  VERIFICATION_CONTRACT_UNKNOWN:
-    'Unknown contract name. Use one of the bundled deployable contracts (see listDeployableContracts()).',
 
   // Cross-Chain Token
   CCT_PARAMS_INVALID:
@@ -349,6 +223,12 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
     'The CCT transaction failed. Ensure the caller holds the required role for this operation.',
   CCT_TX_NOT_CONFIRMED:
     'The transaction was submitted but not confirmed in time. Check the tx hash in error.context before resubmitting; it may still be mined.',
+  CCT_CONTRACT_VERSION_UNSUPPORTED:
+    'This contract version is not supported by the CCT SDK. Check the contract address and its typeAndVersion.',
+  CCT_OPERATION_UNSUPPORTED:
+    'This operation is not available at the contract version in error.context. Verify the contract version supports it.',
+  CCT_DATA_DECODE_FAILED:
+    'Ensure the account belongs to a compatible CCT program and uses the expected data layout.',
 }
 
 /** Returns default recovery hint for error code, or undefined if none. */

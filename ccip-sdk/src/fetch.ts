@@ -22,6 +22,14 @@ export type RateLimitOpts = {
   /** Max concurrent in-flight requests per endpoint (default 5). */
   maxInFlight?: number
   seed?: { limit: number; windowMs: number }
+  /**
+   * Ceiling on how far ahead the pacer may reserve a slot before a request
+   * fails fast instead of sleeping (default 30_000ms). A request that exceeds
+   * it is retried after the already-reserved backlog drains, so the ceiling
+   * bounds per-request latency without converting a slow endpoint into a hard
+   * failure.
+   */
+  maxPacingBacklogMs?: number
 }
 
 /** Default (ceiling) max concurrent in-flight requests per endpoint. */
@@ -94,6 +102,10 @@ class AdaptiveSemaphore {
 const DEFAULT_WINDOW_MS = 1_000
 const MIN_WINDOW_MS = 250
 const MAX_WINDOW_MS = 60_000
+/** Ceiling on how far ahead the pacer may reserve a slot. Past this the request
+ * fails fast instead of sleeping, so a runaway paced backlog can't hold callers
+ * (and their concurrency permits / upstream task slots) for minutes on end. */
+const MAX_PACING_WAIT_MS = 30_000
 
 function clampWindow(ms: number): number {
   return Math.min(MAX_WINDOW_MS, Math.max(MIN_WINDOW_MS, Math.round(ms)))
@@ -115,23 +127,45 @@ class AdaptiveLimiter {
   active: boolean
   limit: number
   windowMs: number
+  /** Fail-fast ceiling on the paced backlog (see {@link RateLimitOpts.maxPacingBacklogMs}). */
+  private readonly maxPacingBacklogMs: number
   private nextSendAt = 0
   private lastLimitTs = 0
   private successStreak = 0
 
-  constructor(seed?: { limit: number; windowMs: number }) {
+  constructor(
+    seed?: { limit: number; windowMs: number },
+    maxPacingBacklogMs: number = MAX_PACING_WAIT_MS,
+  ) {
     this.active = seed != null
     this.limit = Math.max(1, seed?.limit ?? 1)
     this.windowMs = clampWindow(seed?.windowMs ?? DEFAULT_WINDOW_MS)
+    this.maxPacingBacklogMs = Math.max(0, maxPacingBacklogMs)
   }
 
-  /** Wait (only when active) for this scope's evenly-paced slot. */
-  async acquire(): Promise<void> {
+  /** Wait (only when active) for this scope's evenly-paced slot. Fails fast when
+   * the paced backlog would push this request more than MAX_PACING_WAIT_MS out,
+   * instead of reserving an ever-farther slot — an unbounded `nextSendAt` under
+   * sustained overload is what lets a collapsed endpoint wedge its callers. A
+   * lone request after idle never trips this (its wait is 0). */
+  async acquire(signal?: AbortSignal): Promise<void> {
     if (!this.active) return
-    const now = Date.now()
+    const now = performance.now()
     const at = Math.max(now, this.nextSendAt)
+    if (at - now > this.maxPacingBacklogMs) {
+      throw new CCIPError(
+        'ABORT',
+        `pacing backlog ${at - now}ms exceeds cap ${this.maxPacingBacklogMs}ms`,
+        { isTransient: true },
+      )
+    }
     this.nextSendAt = at + this.windowMs / this.limit // reserve next slot synchronously
-    if (at > now) await sleep(at - now)
+    if (at > now) await sleep(at - now, signal) // abortable: caller checks the signal next
+  }
+
+  /** Milliseconds before the currently-reserved pacing slots drain (0 when inactive/free). */
+  backlogMs(now = performance.now()): number {
+    return this.active ? Math.max(0, this.nextSendAt - now) : 0
   }
 
   /** On a 429: activate + pace ONLY when an explicit reset window is known.
@@ -144,13 +178,13 @@ class AdaptiveLimiter {
       // so each consecutive 429 waits twice as long before the next attempt.
       if (this.active) {
         this.windowMs = clampWindow(this.windowMs * 2)
-        this.lastLimitTs = Date.now()
+        this.lastLimitTs = performance.now()
       }
       return
     }
     this.limit = Math.max(1, hint.limit ?? this.limit)
     this.windowMs = clampWindow(hint.windowMs)
-    this.lastLimitTs = Date.now()
+    this.lastLimitTs = performance.now()
     this.nextSendAt = this.lastLimitTs
     this.successStreak = 0
     this.active = true
@@ -165,7 +199,7 @@ class AdaptiveLimiter {
   /** On success: probe faster after a clean run, deactivate after a long one. */
   onSuccess(): void {
     if (!this.active) return
-    const now = Date.now()
+    const now = performance.now()
     if (now - this.lastLimitTs > this.windowMs && ++this.successStreak >= this.limit) {
       this.windowMs = clampWindow(this.windowMs * 0.7)
       this.limit += Math.max(1, Math.floor(this.limit / 4))
@@ -181,9 +215,13 @@ interface EndpointState {
   limiters: Map<string, AdaptiveLimiter>
   /** Seed applied to newly-created limiters for this endpoint (known hosts). */
   seed?: { limit: number; windowMs: number }
+  /** Fail-fast ceiling for the endpoint's pacing backlog. */
+  pacingBacklogCapMs: number
   /** True once we've seen method-scoped rate headers; routes by JSON-RPC method. */
   methodScoped: boolean
   logRange?: { maxRange: number; source: 'error' | 'success' }
+  /** Learned cap on how many entries one eth_getLogs topic position may hold. */
+  topicLimit?: { maxTopics: number; source: 'error' | 'success' }
 }
 
 /** Module-global registry keyed by origin + pathname (query/hash stripped). */
@@ -211,6 +249,7 @@ function getOrCreateEndpoint(
   input: Parameters<typeof fetch>[0],
   seed?: { limit: number; windowMs: number },
   maxInFlight: number = DEFAULT_MAX_IN_FLIGHT,
+  pacingBacklogCapMs: number = MAX_PACING_WAIT_MS,
 ): EndpointState {
   const key = endpointKey(input)
   let state = endpointRegistry.get(key)
@@ -219,6 +258,7 @@ function getOrCreateEndpoint(
       sem: new AdaptiveSemaphore(maxInFlight),
       limiters: new Map(),
       seed,
+      pacingBacklogCapMs: Math.max(0, pacingBacklogCapMs),
       methodScoped: false,
     }
     endpointRegistry.set(key, state)
@@ -229,7 +269,7 @@ function getOrCreateEndpoint(
 function getLimiter(ep: EndpointState, scope: string): AdaptiveLimiter {
   let lim = ep.limiters.get(scope)
   if (!lim) {
-    lim = new AdaptiveLimiter(ep.seed)
+    lim = new AdaptiveLimiter(ep.seed, ep.pacingBacklogCapMs)
     ep.limiters.set(scope, lim)
   }
   return lim
@@ -248,7 +288,7 @@ export function parseRetryAfter(value: string | null): number | null {
   // Try delta-seconds first
   const deltaSeconds = Number(trimmed)
   if (!isNaN(deltaSeconds) && isFinite(deltaSeconds)) {
-    return Date.now() + deltaSeconds * 1000
+    return performance.now() + deltaSeconds * 1000
   }
   // Try HTTP-date
   const parsed = Date.parse(trimmed)
@@ -282,7 +322,7 @@ export interface ParsedRateLimitHeaders {
  */
 export function parseRateLimitHeaders(headers: Headers): ParsedRateLimitHeaders {
   const result: ParsedRateLimitHeaders = {}
-  const now = Date.now()
+  const now = performance.now()
   const num = (name: string): number | undefined => {
     const raw = headers.get(name)
     const v = raw == null ? NaN : Number(raw)
@@ -355,7 +395,7 @@ function extractRateHint(response: Response, method?: string): RateHint {
   }
   const std = parseRateLimitHeaders(response.headers)
   const resetAt = std.resetAt ?? std.retryAfterAt
-  const windowMs = resetAt != null ? resetAt - Date.now() : undefined
+  const windowMs = resetAt != null ? resetAt - performance.now() : undefined
   return {
     limit: std.limit,
     remaining: std.remaining,
@@ -422,6 +462,41 @@ export function setEndpointLogRange(
   getOrCreateEndpoint(input).logRange = { maxRange, source }
 }
 
+/**
+ * Returns the learned cap on entries per eth_getLogs topic position, if set.
+ *
+ * Some providers (Avalanche's public RPC among them) reject a filter whose topic
+ * OR-set is larger than a fixed number. The cap varies by provider, so like
+ * {@link getEndpointLogRange} it is learned and stored per endpoint rather than
+ * assumed globally — the same URL-keyed registry, so a round-robin across several
+ * providers doesn't apply one provider's cap to another.
+ *
+ * @param input - Fetch input (string, URL, or Request).
+ * @returns Max topics per position, or undefined if not learned.
+ */
+export function getEndpointTopicLimit(input: Parameters<typeof fetch>[0]): number | undefined {
+  return endpointRegistry.get(endpointKey(input))?.topicLimit?.maxTopics
+}
+
+/**
+ * Sets the learned eth_getLogs topic-count cap for an endpoint.
+ *
+ * Exported so a caller who already KNOWS an endpoint is capped can seed it and skip
+ * the discovery round-trip — worth doing, because discovery costs one failed request
+ * and depends on matching the provider's error text (see {@link parseTopicLimitError}).
+ *
+ * @param input - Fetch input (string, URL, or Request).
+ * @param maxTopics - The learned cap on entries in one topic position.
+ * @param source - Whether learned from an error or a success.
+ */
+export function setEndpointTopicLimit(
+  input: Parameters<typeof fetch>[0],
+  maxTopics: number,
+  source: 'error' | 'success',
+): void {
+  getOrCreateEndpoint(input).topicLimit = { maxTopics, source }
+}
+
 /** Buffer in ms added after a rate-limit reset before sending next request. */
 const RESET_BUFFER_MS = 200
 
@@ -438,8 +513,7 @@ function extractMethod(init?: RequestInit): string | undefined {
   if (!init?.body || (typeof init.body !== 'string' && typeof init.body !== 'object')) return
   try {
     const parsed = (typeof init.body === 'string' ? JSON.parse(init.body) : init.body) as
-      | { method?: string }
-      | undefined
+      { method?: string } | undefined
     if (parsed && typeof parsed.method === 'string') return parsed.method
   } catch {
     // Not JSON or no method field
@@ -460,11 +534,7 @@ export function createRateLimitedFetch(
 ): typeof fetch {
   opts.maxRetries ??= 15
   const opts_ = opts as RateLimitOpts
-
-  const isRetryableError = (error: unknown): boolean => {
-    if (error instanceof Error) return !!error.message.match(/\b(429\b|rate.?limit)/i)
-    return false
-  }
+  const pacingBacklogCapMs = opts_.maxPacingBacklogMs ?? MAX_PACING_WAIT_MS
 
   // Backoff used when the limiter is NOT pacing (occasional/bursty 429s). Uses
   // FULL JITTER over a 250ms→2s ramp: critical because callers often fire a
@@ -475,11 +545,35 @@ export function createRateLimitedFetch(
     Math.floor(Math.random() * Math.min(15_000, 250 * 2 ** attempt))
 
   return async (input, init?) => {
+    const isRetryableError = (error: unknown): boolean => {
+      if (error instanceof CCIPError && error.isTransient) return true
+      if (error instanceof Error) {
+        if (error.message.match(/\b(429\b|rate.?limit)/i)) return true
+        // Slow/volatile RPCs (free-tier TON, public endpoints) abort or time out
+        // mid-request under CI/remote load. Retry those unless the caller
+        // (per-request signal) or ctx already asked to cancel — retrying under a
+        // dead signal would just burn backoff time.
+        if (
+          error.message.match(
+            /\b(abort|timeout|timed out|ETIMEDOUT|ECONNRESET|fetch failed|network error)/i,
+          )
+        ) {
+          if (abort?.aborted || init?.signal?.aborted) return false
+          return true
+        }
+      }
+      return false
+    }
+
     let lastError: Error | null = null
     const method = extractMethod(init)
-    const ep = getOrCreateEndpoint(input, opts_.seed, opts_.maxInFlight)
+    const ep = getOrCreateEndpoint(input, opts_.seed, opts_.maxInFlight, pacingBacklogCapMs)
 
     for (let attempt = 0; attempt <= opts_.maxRetries; attempt++) {
+      // Bail out promptly when the caller aborts (e.g. a per-request timeout):
+      // don't burn further attempts/backoff/pacing under a dead signal. The waits
+      // below (pacing + backoff) are also abort-aware so an in-progress one wakes.
+      abort?.throwIfAborted()
       // Resolve the limiter for this request's scope (re-resolved each attempt:
       // methodScoped may flip after the first response).
       const scope = ep.methodScoped && method ? method : '*'
@@ -487,6 +581,14 @@ export function createRateLimitedFetch(
       let response: Response
       let retryDelay = 0
       try {
+        // Pace BEFORE taking a concurrency permit: a request merely waiting for
+        // its evenly-paced slot must not hold a permit, otherwise pacing latency
+        // serializes through the concurrency gate and — under a deep backlog —
+        // wedges the endpoint for everyone. Pace only if this scope is currently
+        // rate-limited; full speed otherwise. May throw (fail fast) if the paced
+        // backlog is too deep; caught below, no permit acquired yet.
+        await lim.acquire(abort)
+
         // Concurrency gate: at most `maxInFlight` requests per endpoint are in
         // flight at once. The slot is held ONLY across the fetch + header read,
         // then released so the next queued request starts immediately (it sees
@@ -494,9 +596,6 @@ export function createRateLimitedFetch(
         // the slot so a backing-off request doesn't occupy a slot.
         await ep.sem.acquire()
         try {
-          // Pace only if this scope is currently rate-limited; full speed otherwise.
-          await lim.acquire()
-
           if (init?.signal && abort) init.signal = AbortSignal.any([init.signal, abort])
           else if (abort) {
             if (!init) init = {}
@@ -541,7 +640,16 @@ export function createRateLimitedFetch(
         // Treat a rate-limit-flavored network error as a limit signal: narrow the
         // concurrency cap and back off before retrying (no header → no pacing).
         ep.sem.decrease()
-        if (!lim.active) await sleep(backoffMs(attempt))
+        // A pacing-backlog abort means acquire() itself won't wait next attempt
+        // (it fails fast instead of sleeping past the cap). Rather than retrying
+        // into the same instant refusal under a deep backlog (jittered backoff
+        // drains nothing in 250ms→2s steps), deterministically wait out the
+        // already-reserved slots: the caller is going to wait for this endpoint
+        // anyway, and an idle drain re-enters acquire() below the cap. Sleep is
+        // abort-aware so callers can still bound/cancel the wait.
+        const isPacingBacklog = lastError.message.includes('pacing backlog')
+        if (isPacingBacklog) await sleep(Math.min(pacingBacklogCapMs, lim.backlogMs() + 250), abort)
+        else if (!lim.active) await sleep(backoffMs(attempt), abort)
         continue
       }
 
@@ -553,7 +661,7 @@ export function createRateLimitedFetch(
       if (isTransientHttpStatus(response.status)) {
         if (attempt < opts_.maxRetries) {
           logger.debug('fetch transient error, retrying', response.status, attempt, retryDelay)
-          if (retryDelay > 0) await sleep(retryDelay)
+          if (retryDelay > 0) await sleep(retryDelay, abort)
           continue
         }
         logger.debug('fetch transient error, retries exhausted', response.status)
@@ -653,17 +761,20 @@ export interface LogRangeErrorInfo {
 }
 
 /**
- * Parses RPC errors for "getLogs block range too large" messages.
- *
- * Covers Alchemy, Infura, QuickNode, and generic EVM provider patterns.
- * Also checks JSON-RPC error code -32005.
+ * Walks an arbitrary caught error and collects the strings that came from an actual
+ * `message` field, plus the sentinels the range parser keys off. Shared by
+ * {@link parseLogRangeError} and {@link parseTopicLimitError} so both see the same
+ * (carefully tuned) view of a provider error — the traversal rules below are subtle
+ * enough that two copies would drift.
  *
  * @param err - The caught error (any shape).
- * @returns Non-null LogRangeErrorInfo if the error is a range error, null otherwise.
+ * @returns Collected `message` strings and the range/size sentinels.
  */
-export function parseLogRangeError(err: unknown): LogRangeErrorInfo | null {
-  if (err == null) return null
-
+function collectErrorMessages(err: unknown): {
+  messageTexts: string[]
+  isRangeCode: boolean
+  isHttp413: boolean
+} {
   // messageTexts: strings from actual `message` keys — the only ones tested against patterns.
   // Sentinels: independent signals (code -32005, HTTP 413) collected separately.
   const messageTexts: string[] = []
@@ -723,6 +834,21 @@ export function parseLogRangeError(err: unknown): LogRangeErrorInfo | null {
     }
   }
   extractMessages(err)
+  return { messageTexts, isRangeCode, isHttp413 }
+}
+
+/**
+ * Parses RPC errors for "getLogs block range too large" messages.
+ *
+ * Covers Alchemy, Infura, QuickNode, and generic EVM provider patterns.
+ * Also checks JSON-RPC error code -32005.
+ *
+ * @param err - The caught error (any shape).
+ * @returns Non-null LogRangeErrorInfo if the error is a range error, null otherwise.
+ */
+export function parseLogRangeError(err: unknown): LogRangeErrorInfo | null {
+  if (err == null) return null
+  const { messageTexts, isRangeCode, isHttp413 } = collectErrorMessages(err)
 
   // Range-error patterns (case-insensitive). First capture group = limit number when present.
   const RANGE_ERROR_PATTERNS = [
@@ -761,7 +887,6 @@ export function parseLogRangeError(err: unknown): LogRangeErrorInfo | null {
   // Alchemy suggested range: [0x..., 0x...]
   const ALCHEMY_SUGGESTED_RANGE = /\[(0x[0-9a-f]+),\s*(0x[0-9a-f]+)\]/i
 
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- mutated by extractMessages closure above
   let isRangeError = isRangeCode || isHttp413
   let maxRange: number | undefined
   let suggestedRange: [number, number] | undefined
@@ -804,5 +929,77 @@ export function parseLogRangeError(err: unknown): LogRangeErrorInfo | null {
   const info: LogRangeErrorInfo = {}
   if (maxRange !== undefined) info.maxRange = maxRange
   if (suggestedRange !== undefined) info.suggestedRange = suggestedRange
+  return info
+}
+
+/** Topic-cap info from a getLogs "too many topics" error. */
+export interface TopicLimitErrorInfo {
+  /** Maximum entries allowed in one topic position, if extractable from the message. */
+  maxTopics?: number
+}
+
+/**
+ * Parses RPC errors for "too many topics in eth_getLogs filter" messages.
+ *
+ * Some providers cap how many values one topic position may OR together —
+ * Avalanche's public RPC is the known case. The cap is per provider, so a match
+ * teaches {@link setEndpointTopicLimit} for that endpoint only.
+ *
+ * Deliberately conservative: it must NOT match a block-range error (that is
+ * {@link parseLogRangeError}'s job, and mistaking one for the other would shrink the
+ * wrong dimension forever). Every pattern therefore requires the word "topic".
+ *
+ * A message we fail to recognise simply means no cap is learned and the filter is
+ * sent whole, i.e. exactly today's behaviour — never a silently wrong result. Callers
+ * that already know an endpoint's cap can bypass detection with
+ * {@link setEndpointTopicLimit}.
+ *
+ * @param err - The caught error (any shape).
+ * @returns Non-null TopicLimitErrorInfo if the error is a topic-count error, else null.
+ */
+export function parseTopicLimitError(err: unknown): TopicLimitErrorInfo | null {
+  if (err == null) return null
+  const { messageTexts } = collectErrorMessages(err)
+
+  // All require "topic" so a range error can never land here. First capture group
+  // is the cap where the provider states it.
+  const TOPIC_LIMIT_PATTERNS = [
+    // "too many topics", "too many topics in filter", "requested too many topics"
+    /too many topics/i,
+    // "eth_getLogs is limited to 5 topics", "limited to a maximum of 5 topics"
+    /limited to (?:a maximum of )?(\d+) topics?/i,
+    // "maximum 5 topics", "max topics: 5", "maximum number of topics is 5"
+    /\bmax(?:imum)?\b[^.]{0,40}?\btopics?\b[^0-9]{0,20}(\d+)/i,
+    // "exceeds the maximum topics", "topics limit exceeded"
+    /\btopics?\b[^.]{0,20}\blimit\b/i,
+    /\blimit\b[^.]{0,20}\btopics?\b/i,
+  ]
+  const TOPIC_COUNT_RE = /(\d+)\s*topics?\b/i
+
+  let isTopicError = false
+  let maxTopics: number | undefined
+
+  for (const msg of messageTexts) {
+    for (const re of TOPIC_LIMIT_PATTERNS) {
+      const m = re.exec(msg)
+      if (!m) continue
+      isTopicError = true
+      const n = Number(m[1])
+      if (!isNaN(n) && n > 0 && (maxTopics === undefined || n < maxTopics)) maxTopics = n
+    }
+    // Fall back to any "<N> topics" phrasing in a message already known to be about
+    // a topic limit (e.g. "too many topics: max 5 topics allowed").
+    if (isTopicError && maxTopics === undefined) {
+      const m = TOPIC_COUNT_RE.exec(msg)
+      if (m) {
+        const n = Number(m[1])
+        if (!isNaN(n) && n > 0) maxTopics = n
+      }
+    }
+  }
+
+  if (!isTopicError) return null
+  const info: TopicLimitErrorInfo = {}
+  if (maxTopics !== undefined) info.maxTopics = maxTopics
   return info
 }

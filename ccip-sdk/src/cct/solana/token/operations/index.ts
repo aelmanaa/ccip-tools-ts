@@ -1,6 +1,11 @@
+export * from './create-token-account.ts'
 export * from './deploy-token.ts'
-export * from './transfer-mint-authority.ts'
-export * from './grant-mint-burn-access.ts'
-export * from './revoke-mint-burn-access.ts'
-export * from './create-pool-mint-authority-multisig.ts'
-export * from './create-pool-token-account.ts'
+export * from './mint-tokens.ts'
+export { SetTokenAuthority } from './set-token-authority.ts'
+export type {
+  ExecuteSetTokenAuthorityParams,
+  ExecuteSetTokenAuthorityResult,
+  GenerateSetTokenAuthorityParams,
+  GenerateSetTokenAuthorityResult,
+  TokenAuthorityType,
+} from './set-token-authority.ts'

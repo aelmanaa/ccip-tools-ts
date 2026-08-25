@@ -1,40 +1,45 @@
-import {
-  createAssociatedTokenAccountIdempotentInstruction,
-  getAssociatedTokenAddressSync,
-} from '@solana/spl-token'
-import { PublicKey, SystemProgram } from '@solana/web3.js'
+import { type PublicKey, SystemProgram } from '@solana/web3.js'
 
-import { CCIPWalletInvalidError } from '../../../../errors/index.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
-import { type UnsignedSolanaTx, isWallet } from '../../../../solana/types.ts'
+import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import type { TransactionHash } from '../../../operation.ts'
+import type { TransactionResult } from '../../../operation.ts'
 import {
   type SolanaExecuteParams,
   type SolanaGenerateParams,
   SolanaOperation,
 } from '../../operation.ts'
 import {
+  type TokenPoolType,
   createTokenPoolProgram,
   deriveTokenPoolConfigPda,
   deriveTokenPoolGlobalConfigPda,
   deriveTokenPoolProgramDataPda,
   deriveTokenPoolSignerPda,
+  resolveTokenPoolProgram,
 } from '../../programs/token-pool.ts'
 import { submit } from '../../submit.ts'
-import { detectMintTokenProgram } from '../../token/operations/spl.ts'
-import { validatePublicKey } from '../../validate.ts'
+import { parsePublicKey, validateAuthorityMatchesWallet, validatePoolType } from '../../validate.ts'
 
-/** Parameters for initializing a Solana token pool, optionally with an allowlist. */
+/**
+ * Parameters for initializing a Solana token pool, optionally with an allowlist.
+ *
+ * @remarks Targets only the canonical CCIP pool programs selected by `poolType` (`burn-mint`,
+ * `lock-release`). Deploying a custom pool program is intentionally unsupported because this
+ * operation initializes pools through the SDK's bundled program IDL; custom programs may use a
+ * different initialize instruction or pool-state PDA layout. This is a deploy-operation scope,
+ * not a protocol limitation: the registry and lookup-table operations remain program-agnostic.
+ */
 type DeployTokenPoolParams = {
   /** Token mint address this pool manages. */
   tokenAddress: string
-  /** Token pool program address, e.g. BurnMint or LockRelease token pool program. */
-  poolProgramAddress: string
+  /** Canonical token pool program to deploy: BurnMint or LockRelease. */
+  poolType: TokenPoolType
   /**
-   * Optional addresses to enable in the pool allowlist during initialization.
-   * If omitted, the pool is initialized without configuring the allowlist.
+   * Addresses to seed into the pool allowlist during initialization.
+   * Providing any address also enables allowlist enforcement.
+   * If omitted, the pool is initialized without an allowlist.
    */
   allowlist?: string[]
   /** Pool authority. Defaults to payer for unsigned generation and wallet public key for execute. */
@@ -44,48 +49,68 @@ type DeployTokenPoolParams = {
 /** Parameters for unsigned Solana token pool deploy generation. */
 export type GenerateDeployTokenPoolParams = SolanaGenerateParams<DeployTokenPoolParams>
 
-/** Unsigned Solana token pool deploy result. */
-export type GenerateDeployTokenPoolResult = UnsignedSolanaTx
+type ParsedDeployTokenPoolParams = {
+  tokenMint: PublicKey
+  poolProgram: PublicKey
+  payer: PublicKey
+  authority: PublicKey
+  allowlist: PublicKey[]
+}
+
+/** Unsigned Solana token pool deploy result plus derived pool PDAs. */
+export type GenerateDeployTokenPoolResult = UnsignedSolanaTx & {
+  poolAddress: string
+  poolSignerAddress: string
+}
 
 /** Parameters for executing Solana token pool deploy. */
 export type ExecuteDeployTokenPoolParams = SolanaExecuteParams<DeployTokenPoolParams>
 
-/** Result of executing Solana token pool deploy, including the pool state/config PDA. */
-export type ExecuteDeployTokenPoolResult = TransactionHash & {
-  /** The pool state/config PDA (base58), derivable pre-submit. */
+/** Result of executing Solana token pool deploy plus derived pool PDAs. */
+export type ExecuteDeployTokenPoolResult = TransactionResult & {
   poolAddress: string
+  poolSignerAddress: string
 }
 
 /** Initializes a Solana token pool, optionally configuring an allowlist. */
 export class DeployTokenPool extends SolanaOperation<
   DeployTokenPoolParams,
   GenerateDeployTokenPoolResult,
-  ExecuteDeployTokenPoolResult
+  ParsedDeployTokenPoolParams
 > {
   readonly name = 'deployTokenPool'
 
-  /** Validates all public keys before any RPC. */
-  protected validate(params: GenerateDeployTokenPoolParams): void {
-    validatePublicKey(this.name, 'tokenAddress', params.tokenAddress)
-    validatePublicKey(this.name, 'poolProgramAddress', params.poolProgramAddress)
-    validatePublicKey(this.name, 'payer', params.payer)
-    if (params.authority) validatePublicKey(this.name, 'authority', params.authority)
-    for (const [i, address] of (params.allowlist ?? []).entries()) {
-      validatePublicKey(this.name, `allowlist[${i}]`, address)
+  /** Parses all public keys before any RPC. */
+  protected override parse(params: GenerateDeployTokenPoolParams): ParsedDeployTokenPoolParams {
+    validatePoolType(this.name, 'poolType', params.poolType)
+    if (params.allowlist !== undefined && !Array.isArray(params.allowlist)) {
+      throw new CCTParamsInvalidError(this.name, 'allowlist', 'must be an array')
+    }
+
+    const payer = parsePublicKey(this.name, 'payer', params.payer)
+    return {
+      tokenMint: parsePublicKey(this.name, 'tokenAddress', params.tokenAddress),
+      poolProgram: resolveTokenPoolProgram(params.poolType),
+      payer,
+      authority:
+        params.authority === undefined
+          ? payer
+          : parsePublicKey(this.name, 'authority', params.authority),
+      allowlist: (params.allowlist ?? []).map((address, i) =>
+        parsePublicKey(this.name, `allowlist[${i}]`, address),
+      ),
     }
   }
 
   /** Builds the unsigned Solana token pool initialize instruction set. */
   protected async buildUnsigned(
     chain: SolanaChain,
-    opts: GenerateDeployTokenPoolParams,
+    opts: ParsedDeployTokenPoolParams,
   ): Promise<GenerateDeployTokenPoolResult> {
-    const tokenMint = new PublicKey(opts.tokenAddress)
-    const poolProgram = new PublicKey(opts.poolProgramAddress)
-    const payer = new PublicKey(opts.payer)
-    const authority = new PublicKey(opts.authority ?? opts.payer)
+    const { tokenMint, poolProgram, payer, authority, allowlist } = opts
     const program = createTokenPoolProgram(chain, poolProgram, payer)
     const state = deriveTokenPoolConfigPda(poolProgram, tokenMint)
+    const poolSigner = deriveTokenPoolSignerPda(poolProgram, tokenMint)
 
     const instructions = [
       await program.methods
@@ -102,7 +127,6 @@ export class DeployTokenPool extends SolanaOperation<
         .instruction(),
     ]
 
-    const allowlist = (opts.allowlist ?? []).map((a) => new PublicKey(a))
     if (allowlist.length) {
       instructions.push(
         await program.methods
@@ -117,31 +141,16 @@ export class DeployTokenPool extends SolanaOperation<
       )
     }
 
-    // POC parity: auto-create the pool signer PDA's associated token account (not in DAPP-10507
-    // deploy-token-pool). Idempotent so re-runs are safe. Reuses the same derivation as
-    // create-pool-token-account.ts. See legacy token-admin/solana/index.ts L816-847.
-    const tokenProgramId = await detectMintTokenProgram(chain, this.name, 'tokenAddress', tokenMint)
-    const poolSignerPda = deriveTokenPoolSignerPda(poolProgram, tokenMint)
-    const poolTokenAta = getAssociatedTokenAddressSync(
-      tokenMint,
-      poolSignerPda,
-      true, // allowOwnerOffCurve — PDAs are off-curve
-      tokenProgramId,
-    )
-    instructions.push(
-      createAssociatedTokenAccountIdempotentInstruction(
-        payer,
-        poolTokenAta,
-        poolSignerPda,
-        tokenMint,
-        tokenProgramId,
-      ),
-    )
-
     chain.logger.debug(
       `${this.name}: token = ${tokenMint.toBase58()}, poolProgram = ${poolProgram.toBase58()}`,
     )
-    return { family: ChainFamily.Solana, instructions, mainIndex: 0 }
+    return {
+      family: ChainFamily.Solana,
+      instructions,
+      mainIndex: 0,
+      poolAddress: state.toBase58(),
+      poolSignerAddress: poolSigner.toBase58(),
+    }
   }
 
   /** Generate, sign, simulate, send, and confirm with wallet.publicKey as payer. */
@@ -149,26 +158,23 @@ export class DeployTokenPool extends SolanaOperation<
     chain: SolanaChain,
     params: ExecuteDeployTokenPoolParams,
   ): Promise<ExecuteDeployTokenPoolResult> {
-    const { wallet, computeUnits, ...rest } = params
-    if (!isWallet(wallet)) throw new CCIPWalletInvalidError(wallet)
+    const { wallet, computeUnits, parsed } = this.prepareWalletExecution(params)
 
-    const payer = wallet.publicKey.toBase58()
-    if (params.authority && !new PublicKey(params.authority).equals(wallet.publicKey)) {
-      throw new CCTParamsInvalidError(
+    if (params.authority !== undefined) {
+      validateAuthorityMatchesWallet(
         this.name,
-        'authority',
+        parsed.authority,
+        wallet.publicKey,
         'deployTokenPool requires authority to be the executing wallet. Use generateUnsignedDeployTokenPool for vault-owned pools and have the vault sign/execute it.',
       )
     }
 
-    const tx = await this.generate(chain, { ...rest, payer })
+    const tx = await this.buildUnsigned(chain, parsed)
     const hash = await submit(chain, wallet, tx, this.name, computeUnits)
-    // POC parity: surface the pool state/config PDA from execute (not in DAPP-10507
-    // deploy-token-pool). Same derivation the op uses for the `initialize` state account.
-    const poolAddress = deriveTokenPoolConfigPda(
-      new PublicKey(rest.poolProgramAddress),
-      new PublicKey(rest.tokenAddress),
-    ).toBase58()
-    return { ...hash, poolAddress }
+    return {
+      ...hash,
+      poolAddress: tx.poolAddress,
+      poolSignerAddress: tx.poolSignerAddress,
+    }
   }
 }

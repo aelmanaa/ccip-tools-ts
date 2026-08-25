@@ -1,22 +1,30 @@
 import { Buffer } from 'buffer'
 
-import bs58 from 'bs58'
 import {
   type BigNumberish,
   type BytesLike,
   type Numeric,
   decodeBase64,
   getBytes,
-  id as keccak256Utf8,
   isBytesLike,
   toBeArray,
   toBigInt,
 } from 'ethers'
 import yaml from 'yaml'
 
+// Re-export the codec helpers moved to ./shared/codec.ts (kept here for back-compat;
+// they are pure leaf utilities used by the errors/ tree without creating a cycle).
+export {
+  encodeAddressToAny,
+  getAddressBytes,
+  hashedUtf8Hex,
+  isCantonPartyId,
+  jsonStringify,
+  normalizeHex,
+  util,
+} from './shared/codec.ts'
 import type { Chain, ChainStatic } from './chain.ts'
 import {
-  CCIPBlockBeforeTimestampNotFoundError,
   CCIPChainFamilyUnsupportedError,
   CCIPDataFormatUnsupportedError,
   CCIPError,
@@ -24,88 +32,104 @@ import {
 } from './errors/index.ts'
 import { getRetryDelay, shouldRetry } from './errors/utils.ts'
 import { ChainFamily } from './networks.ts'
+import { util } from './shared/codec.ts'
 import { supportedChains } from './supported-chains.ts'
-import type { WithLogger } from './types.ts'
+import type { Logger, WithLogger } from './types.ts'
+
+/** How far back the bracketing walk reaches on its first probe. Only a starting
+ * guess: the walk then interpolates with the observed block time, so this just
+ * avoids an extra round-trip on the common "a few thousand blocks back" case. */
+const BRACKET_SEED_BLOCKS = 10_000
 
 /**
- * Returns *some* block number with timestamp prior to `timestamp`
+ * Returns the EXACT first block whose timestamp is `>= timestamp` — the lower
+ * bound, not an approximation.
  *
- * @param getBlockTimestamp - function to get block timestamp
- * @param recentBlockNumber - a block guaranteed to be after `timestamp` (e.g. latest)
- * @param timestamp - target timestamp
- * @param precision - returned blockNumber should be within this many blocks before timestamp
- * @returns blockNumber of a block at provider which is close but before target timestamp
- * @throws {@link CCIPBlockBeforeTimestampNotFoundError} if no block exists before the given timestamp
+ * Callers use this to turn a start *time* into a start *block*, so returning the
+ * boundary block exactly means a scan from it covers everything at or after
+ * `timestamp` and nothing before it. (It replaces an earlier version that stopped
+ * within a `precision` window and returned some block *before* the target, which
+ * made every caller silently over-scan by up to that many blocks.)
+ *
+ * Where several consecutive blocks share a timestamp, the LOWEST is returned, so
+ * nothing at the boundary is skipped.
+ *
+ * Search is interpolating rather than plain binary: block times are near-constant
+ * on most chains, so guessing proportionally converges in a handful of probes even
+ * over millions of blocks. The pivot is clamped strictly inside the bracket, so a
+ * bad interpolation (irregular block times) degrades to a linear scan of that
+ * bracket rather than stalling.
+ *
+ * @param getBlockTimestamp - resolves a block number to its unix timestamp (seconds)
+ * @param recentBlockNumber - a block known to be at/after `timestamp` (e.g. latest)
+ * @param timestamp - target unix timestamp, in seconds
+ * @returns the lowest block number whose timestamp is `>= timestamp`
  */
-export async function getSomeBlockNumberBefore(
+export async function getBlockNumberAtOrAfter(
   getBlockTimestamp: (blockNumber: number) => Promise<number>,
   recentBlockNumber: number,
   timestamp: number,
-  { precision = 10, logger = console }: { precision?: number } & WithLogger = {},
+  { logger = console }: WithLogger = {},
 ): Promise<number> {
   timestamp = Number(timestamp)
   const recentTimestamp = await getBlockTimestamp(recentBlockNumber)
+  // Nothing at/after the target has been mined yet: the tip is the closest a
+  // caller can start from, and a watching scan picks up the rest as it grows.
   if (recentTimestamp <= timestamp) return recentBlockNumber
 
-  let beforeBlockNumber = Math.max(1, recentBlockNumber - precision * 1000)
-  let beforeTimestamp = await getBlockTimestamp(beforeBlockNumber)
+  let before = Math.max(1, recentBlockNumber - BRACKET_SEED_BLOCKS)
+  let beforeTs = await getBlockTimestamp(before)
+  let after = recentBlockNumber
+  let afterTs = recentTimestamp
+  let estimatedBlockTime = (recentTimestamp - beforeTs) / (recentBlockNumber - before)
 
-  let estimatedBlockTime =
-      (recentTimestamp - beforeTimestamp) / (recentBlockNumber - beforeBlockNumber),
-    afterBlockNumber = recentBlockNumber,
-    afterTimestamp = recentTimestamp
-
-  // first, go back looking for a block prior to our target timestamp
-  for (let iter = 0; beforeBlockNumber > 1 && beforeTimestamp > timestamp; iter++) {
-    afterBlockNumber = beforeBlockNumber
-    afterTimestamp = beforeTimestamp
-    beforeBlockNumber = Math.max(
+  // Walk back until the target is bracketed, over-shooting by a growing margin so
+  // a chain whose older blocks were slower than recent ones still terminates fast.
+  for (let iter = 0; before > 1 && beforeTs >= timestamp; iter++) {
+    after = before
+    afterTs = beforeTs
+    before = Math.max(
       1,
-      Math.trunc(beforeBlockNumber - (beforeTimestamp - timestamp) / estimatedBlockTime) -
-        10 ** iter,
+      Math.trunc(before - (beforeTs - timestamp) / estimatedBlockTime) - 10 ** iter,
     )
-    beforeTimestamp = await getBlockTimestamp(beforeBlockNumber)
-    estimatedBlockTime =
-      (recentTimestamp - beforeTimestamp) / (recentBlockNumber - beforeBlockNumber)
+    beforeTs = await getBlockTimestamp(before)
+    estimatedBlockTime = (recentTimestamp - beforeTs) / (recentBlockNumber - before)
   }
 
-  if (beforeTimestamp > timestamp) {
-    throw new CCIPBlockBeforeTimestampNotFoundError(timestamp)
-  }
+  // Even the first block is at/after the target, so it IS the answer. (The old
+  // "no block before this timestamp" error belonged to the previous contract:
+  // asking for a block *before* a pre-genesis timestamp is unanswerable, asking
+  // for the first one at/after it is not.)
+  if (beforeTs >= timestamp) return before
 
-  // now, bin-search based on timestamp proportions, looking for
-  // a block at most N estimated blockTimes from our target timestamp
-  while (timestamp - beforeTimestamp >= 1 && afterBlockNumber - beforeBlockNumber > precision) {
-    const prop = (timestamp - beforeTimestamp) / (afterTimestamp - beforeTimestamp)
-    const delta =
-      prop > 0.5
-        ? Math.floor(prop * (afterBlockNumber - beforeBlockNumber))
-        : Math.ceil(prop * (afterBlockNumber - beforeBlockNumber))
-    let pivot = beforeBlockNumber + delta
-    if (pivot === afterBlockNumber) {
-      pivot--
-    }
-    const pivotTimestamp = await getBlockTimestamp(pivot)
-    if (pivotTimestamp > timestamp) {
-      afterBlockNumber = pivot
-      afterTimestamp = pivotTimestamp
+  // Invariant from here: ts(before) < timestamp <= ts(after). Narrow until they
+  // are adjacent, at which point `after` is the exact lower bound.
+  while (after - before > 1) {
+    const span = after - before
+    const prop = (timestamp - beforeTs) / (afterTs - beforeTs)
+    // Clamp strictly inside (before, after) so every probe shrinks the bracket.
+    const pivot = before + Math.min(span - 1, Math.max(1, Math.round(prop * span)))
+    const pivotTs = await getBlockTimestamp(pivot)
+    if (pivotTs >= timestamp) {
+      after = pivot
+      afterTs = pivotTs
     } else {
-      beforeBlockNumber = pivot
-      beforeTimestamp = pivotTimestamp
+      before = pivot
+      beforeTs = pivotTs
     }
-    logger.debug('getSomeBlockNumberBefore: searching block before', {
-      beforeBlockNumber,
-      beforeTimestamp,
+    logger.debug('getBlockNumberAtOrAfter: searching', {
+      before,
+      beforeTs,
       pivot,
-      pivotTimestamp,
-      afterBlockNumber,
-      afterTimestamp,
+      pivotTs,
+      after,
+      afterTs,
       estimatedBlockTime,
       timestamp,
-      diffNumber: afterBlockNumber - beforeBlockNumber,
+      diffNumber: after - before,
     })
   }
-  return beforeBlockNumber
+  return after
 }
 
 const BLOCK_RANGE = 10_000
@@ -134,83 +158,6 @@ export function* blockRangeGenerator(
       }
     }
   }
-}
-
-function createUncircularReplacer() {
-  const holderStack: object[] = []
-  const ancestorStack: object[] = []
-  const originals = new WeakMap<object, object>()
-
-  const uncircularReplacer = function (this: unknown, _key: string, value: unknown) {
-    // bigints pass through untouched; serialization to bare JSON numbers is
-    // handled by stringifyExtended below.
-    const replaced = value
-    if (typeof replaced !== 'object' || replaced === null) return replaced
-
-    while (holderStack.length > 0 && holderStack.at(-1) !== this) {
-      holderStack.pop()
-      ancestorStack.pop()
-    }
-
-    if (ancestorStack.includes(replaced)) return undefined
-
-    let returned = replaced
-    if (Array.isArray(replaced)) {
-      const filtered = replaced.filter(
-        (item) =>
-          typeof item !== 'object' ||
-          item === null ||
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-          (item !== replaced && !ancestorStack.includes(originals.get(item) ?? item)),
-      )
-      if (filtered.length !== replaced.length) {
-        originals.set(filtered, replaced)
-        returned = filtered
-      }
-    }
-
-    holderStack.push(returned)
-    ancestorStack.push(replaced)
-    return returned
-  }
-  return uncircularReplacer
-}
-
-// Private-use sentinel: JSON.stringify can't emit a bigint, so bigints are first
-// tagged as a string, then the quotes+tag are stripped to leave a bare JSON
-// number.  is in the Unicode private-use area and is left unescaped by
-// JSON.stringify, so it never collides with real (hex/decimal) string data.
-const INT_TAG = 'int:'
-const INT_TAG_RE = new RegExp(`"${INT_TAG}(-?\\d+(?:.0)?)"`, 'g')
-
-/**
- * JSON.stringify that drops circular references (via createUncircularReplacer)
- * and serializes bigints as bare JSON numbers, preserving full precision so a
- * uint64/uint256 survives the round-trip to Go without becoming a decimal string.
- * plain `number` integers are also tagged with `.0` suffix, to differentiate them from `bigint`s.
- * @example
- * ```typescript
- * jsonStringify({ a: 1n, b: 2, c: { d: 3n } }) // '{"a":1,"b":2.0,"c":{"d":3}}'
- * yaml.parse('{"a":1,"b":2.0,"c":{"d":3}}', { intAsBigInt: true }) // { a: 1n, b: 2, c: { d: 3n } }
- * ```
- */
-export function jsonStringify(value: unknown, space?: string | number): string {
-  const uncircular = createUncircularReplacer()
-  const json = JSON.stringify(
-    value,
-    function (this: unknown, key: string, val: unknown) {
-      const replaced = uncircular.call(this, key, val)
-      return typeof replaced === 'bigint'
-        ? INT_TAG + replaced.toString()
-        : typeof replaced === 'number' && Number.isSafeInteger(replaced)
-          ? INT_TAG + replaced.toString() + '.0' // use .0 suffix to distinguish plain numbers
-          : replaced
-    },
-    space,
-  )
-  // JSON.stringify is typed `string` but returns undefined for undefined input.
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  return json === undefined ? json : json.replace(INT_TAG_RE, '$1')
 }
 
 /**
@@ -354,88 +301,46 @@ export function getDataBytes(data: BytesLike | readonly number[]): Uint8Array {
 }
 
 /**
+ * Reads the source decimals a source pool declares in its `destPoolData`/`extraData`.
+ * Deliberately narrower than `TokenPool._parseRemoteDecimals`, which reverts on a non-empty
+ * non-32-byte payload and accepts any `uint8`: pools that override it (USDC/CCTP, Lombard) put
+ * their own payloads here, so only a 32-byte word in the plausible `0..36` range is read as a
+ * declaration.
+ * @param extraData - The transfer's `extraData`/`destPoolData`.
+ * @returns Declared source decimals, or `undefined` when the amount is already in local decimals.
+ */
+export function getSourceDecimalsFromExtraData(extraData?: string): number | undefined {
+  if (!extraData) return undefined
+  try {
+    const bytes = getDataBytes(extraData)
+    if (bytes.length !== 32) return undefined
+    const decimals = toBigInt(bytes)
+    // 0 is a legal declaration — 0-decimal tokens exist
+    return 0n <= decimals && decimals <= 36n ? Number(decimals) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Rescales `amount` from one token's decimals to another's, truncating like the pools do.
+ * @param amount - Amount in `fromDecimals` units.
+ * @param fromDecimals - Decimals `amount` is denominated in.
+ * @param toDecimals - Decimals to convert to.
+ * @returns `amount` in `toDecimals` units.
+ */
+export function scaleDecimals(amount: bigint, fromDecimals: number, toDecimals: number): bigint {
+  if (fromDecimals === toDecimals) return amount
+  return (amount * BigInt(10) ** BigInt(toDecimals)) / BigInt(10) ** BigInt(fromDecimals)
+}
+
+/**
  * Converts bytes to a Node.js Buffer.
  * @param bytes - Bytes to convert (hex string, Uint8Array, Base64, etc).
  * @returns Node.js Buffer.
  */
 export function bytesToBuffer(bytes: BytesLike | readonly number[]): Buffer {
   return Buffer.from(getDataBytes(bytes))
-}
-
-/**
- * Extracts address bytes, handling both hex and Base58 formats.
- * @param address - Address in hex or Base58 format.
- * @returns Address bytes as Uint8Array.
- */
-export function getAddressBytes(address: BytesLike | readonly number[]): Uint8Array {
-  let bytes
-  if (address instanceof Uint8Array) {
-    bytes = address
-  } else if (Array.isArray(address)) {
-    bytes = new Uint8Array(address)
-  } else if (
-    typeof address === 'string' &&
-    address.match(/^((0x[0-9a-f]*)|[0-9a-f]{40,})(::.*)?$/i)
-  ) {
-    address = address.split('::')[0]! // discard possible Aptos/Sui module suffix
-    // supports with or without (long>=20B) 0x-prefix, odd or even length
-    bytes = getBytes(
-      address.length % 2
-        ? '0x0' + (address.toLowerCase().startsWith('0x') ? address.slice(2) : address)
-        : !address.toLowerCase().startsWith('0x')
-          ? '0x' + address
-          : address,
-    )
-  } else if (typeof address === 'string' && isCantonPartyId(address)) {
-    // Canton CCIP receivers use keccak256(partyId) as a 32-byte address (see HashedPartyFromString in chainlink-canton).
-    bytes = getBytes(`0x${hashedUtf8Hex(address)}`)
-  } else if (typeof address === 'string' && /^-?\d+:[0-9a-f]{64}$/i.test(address)) {
-    // TON raw format: "workchain:hash" → 36-byte CCIP format (4-byte BE workchain + 32-byte hash)
-    const [workchain, hash] = address.split(':')
-    const buf = new Uint8Array(36)
-    const view = new DataView(buf.buffer)
-    view.setInt32(0, parseInt(workchain!, 10), false) // big-endian
-    buf.set(getBytes('0x' + hash), 4)
-    bytes = buf
-  } else {
-    try {
-      const bytes_ = bs58.decode(address as string)
-      if (bytes_.length % 32 === 0) bytes = bytes_
-    } catch (_) {
-      // pass
-    }
-    if (!bytes) bytes = decodeBase64(address as string)
-  }
-  return bytes
-}
-
-/** Strip optional `0x` prefix and lowercase for stable hex string comparison. */
-export function normalizeHex(value: string): string {
-  const trimmed = value.trim()
-  return (trimmed.startsWith('0x') ? trimmed.slice(2) : trimmed).toLowerCase()
-}
-
-/** keccak256(utf8 string) as normalized hex (no `0x`). Used for Canton party / InstanceAddress hashes. */
-export function hashedUtf8Hex(value: string): string {
-  return normalizeHex(keccak256Utf8(value))
-}
-
-/** Daml party ID: `hint::1220<64-hex-fingerprint>` (not a 3-part instrument id). */
-export function isCantonPartyId(address: string): boolean {
-  return /^[\w.-]+::1220[0-9a-fA-F]{64}$/.test(address)
-}
-
-/**
- * Encodes remote/alien addresses for Any SRC
- *
- * Addresses less than 32 bytes (EVM 20B, Aptos/Solana/Sui 32B) are zero-padded to 32 bytes
- * Addresses greater than 32 bytes (e.g., TON 4+32=36B) are used as raw bytes without padding
- */
-export function encodeAddressToAny(address: BytesLike): Buffer {
-  const bytes = getAddressBytes(address)
-  return bytes.length < 32
-    ? Buffer.concat([Buffer.alloc(32 - bytes.length), Buffer.from(bytes)]) // pad to 32 bytes
-    : Buffer.from(bytes)
 }
 
 /**
@@ -461,6 +366,10 @@ export function convertKeysToCamelCase(
   }
 
   if (obj == null) return obj
+  if (mapValues) {
+    const res = mapValues(obj, key)
+    if (res !== obj) return res
+  }
   if (
     typeof obj !== 'object' ||
     !(Object.getPrototypeOf(obj) == null || Object.getPrototypeOf(obj) === Object.prototype)
@@ -482,8 +391,17 @@ export function convertKeysToCamelCase(
  * @param ms - Duration in milliseconds.
  * @returns Promise that resolves after the specified duration.
  */
-// eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- unref is Node.js-only; browsers return number
-export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms).unref?.())
+export const sleep = (ms: number, abort?: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    if (abort?.aborted || !ms) return resolve()
+    let timeout = AbortSignal.timeout(Math.ceil(ms))
+    if (abort) timeout = AbortSignal.any([abort, timeout])
+    const onAbort = () => {
+      timeout.removeEventListener('abort', onAbort)
+      resolve()
+    }
+    timeout.addEventListener('abort', onAbort, { once: true })
+  })
 
 /**
  * Configuration for the withRetry utility.
@@ -622,29 +540,76 @@ export function parseTypeAndVersion(
   else return [type, version, typeAndVersion, match[3]]
 }
 
-// Re-export for backward compatibility (symbols moved to fetch.ts)
-export { createRateLimitedFetch, fetchWithTimeout } from './fetch.ts'
+/**
+ * Matches a parsed `typeAndVersion()` result against a set of patterns, per the rule
+ * documented on {@link passesTypeAndVersion}.
+ *
+ * Candidates are the normalized `type`, the raw (unparsed) string, and `${type} ${version}`.
+ * A plain string pattern must equal one of the three exactly; a RegExp pattern is tested
+ * only against the raw string and `${type} ${version}` — deliberately never against the
+ * bare `type` alone, since a short/generic type name (e.g. `Router`) would otherwise let a
+ * loosely-written regex over-match.
+ */
+function matchesTypeAndVersion(
+  [type, version, raw]: Awaited<ReturnType<Chain['typeAndVersion']>>,
+  typeAndVersions: readonly (string | RegExp)[],
+): boolean {
+  const versioned = `${type} ${version}`
+  const candidates = [type, raw, versioned]
+  return typeAndVersions.some((pattern) =>
+    typeof pattern === 'string'
+      ? candidates.includes(pattern)
+      : pattern.test(raw) || pattern.test(versioned),
+  )
+}
 
-// barebones `node:util` backfill, if needed
-const util =
-  'util' in globalThis
-    ? (
-        globalThis as unknown as {
-          util: {
-            inspect: ((v: unknown) => string) & {
-              custom: symbol
-              defaultOptions: Record<string, unknown>
-            }
-          }
-        }
-      ).util
-    : {
-        inspect: Object.assign((v: unknown) => JSON.stringify(v), {
-          custom: Symbol('custom'),
-          defaultOptions: { depth: 2 },
-        }),
-      }
-export { util }
+const failCountPerChainPerAddr = new WeakMap<Pick<Chain, 'typeAndVersion'>, Map<string, number>>()
+const MAX_FAILS = 3
+
+/**
+ * Predicate backing {@link LogFilter.typeAndVersions}: does the contract at `address` match
+ * any of the given type/version patterns?
+ *
+ * Resolves to `true` immediately — without calling `typeAndVersion` at all — when
+ * `typeAndVersions` is `undefined` or empty, so the filter is zero-cost when unused.
+ * Otherwise awaits `chain.typeAndVersion(address)` and matches the result via
+ * {@link matchesTypeAndVersion}.
+ *
+ * @remarks
+ * If `typeAndVersion` throws — no `typeAndVersion()` on the contract, a revert,
+ * {@link CCIPTypeVersionInvalidError}, {@link CCIPNotImplementedError} (e.g. Canton), or a
+ * transient RPC error — this resolves to `false` rather than propagating. This predicate is
+ * a narrowing filter over an already topic-filtered set of logs: dropping one address's logs
+ * on a lookup failure costs at most a missed event, whereas letting the error escape would
+ * abort the whole `getLogs` iteration over a single bad/unsupported address.
+ *
+ * @param chain - Chain (or a subset exposing `typeAndVersion`) to query.
+ * @param address - Contract address whose type/version to check.
+ * @param typeAndVersions - Patterns to match against; `undefined`/empty matches everything.
+ */
+export async function passesTypeAndVersion(
+  chain: Pick<Chain, 'typeAndVersion'> & { logger?: Pick<Logger, 'debug'> },
+  address: string,
+  typeAndVersions: readonly (string | RegExp)[] | undefined,
+): Promise<boolean> {
+  if (!typeAndVersions?.length) return true
+
+  if (!failCountPerChainPerAddr.has(chain)) failCountPerChainPerAddr.set(chain, new Map())
+  const count = failCountPerChainPerAddr.get(chain)!.get(address) ?? 0
+  if (count >= MAX_FAILS) return false
+
+  try {
+    const parsed = await chain.typeAndVersion(address)
+    failCountPerChainPerAddr.get(chain)!.set(address, 0)
+    return matchesTypeAndVersion(parsed, typeAndVersions)
+  } catch (err) {
+    failCountPerChainPerAddr.get(chain)!.set(address, count + 1)
+    // Narrowing filter over an already topic-filtered set of logs: a failed lookup should
+    // drop this one address's logs, not abort the whole getLogs iteration.
+    chain.logger?.debug('passesTypeAndVersion: typeAndVersion failed for', address, err)
+    return false
+  }
+}
 
 /**
  * Converts an AbortSignal into a Promise that rejects when the signal is aborted.
@@ -657,9 +622,8 @@ export { util }
  * @param signal - AbortSignal to convert
  * @returns Promise that rejects with the signal's reason when aborted
  */
-export function signalToPromise(signal: AbortSignal): Promise<never> {
-  if (signal.aborted) return Promise.reject(signal.reason as Error)
-
+export async function signalToPromise(signal: AbortSignal): Promise<never> {
+  signal.throwIfAborted()
   return new Promise<never>((_resolve, reject) => {
     signal.addEventListener('abort', () => reject(signal.reason as Error), { once: true })
   })

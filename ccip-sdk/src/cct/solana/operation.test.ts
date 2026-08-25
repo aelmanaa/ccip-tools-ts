@@ -14,7 +14,7 @@ class TestOperation extends SolanaOperation<{ value: string }> {
   captured?: string
   validated?: string
 
-  protected validate(params: { payer: string }): void {
+  protected override validate(params: { payer: string }): void {
     this.validated = params.payer
   }
 
@@ -27,30 +27,65 @@ class TestOperation extends SolanaOperation<{ value: string }> {
   }
 }
 
-type TestTx = UnsignedSolanaTx & { lookupTableAddress: string }
-type TestResult = { hash: string; lookupTableAddress: string }
+class ParsedTestOperation extends SolanaOperation<
+  { value: string },
+  UnsignedSolanaTx,
+  { payer: string; value: number }
+> {
+  readonly name = 'parsedTestOperation'
+  readonly lifecycle: string[] = []
+  captured?: { payer: string; value: number }
 
-class TestResultOperation extends SolanaOperation<{ value: string }, TestTx, TestResult> {
-  readonly name = 'testResultOperation'
-
-  protected validate(): void {}
-
-  protected buildUnsigned(): Promise<TestTx> {
-    return Promise.resolve({
-      family: ChainFamily.Solana,
-      instructions: [],
-      lookupTableAddress: 'lookup-table',
-    })
+  protected override validate(params: { payer: string; value: string }): void {
+    this.lifecycle.push(`validate:${params.value}`)
   }
 
-  protected override resultFromGenerated(hash: { hash: string }, tx: TestTx): TestResult {
-    return { ...hash, lookupTableAddress: tx.lookupTableAddress }
+  protected override parse(params: { payer: string; value: string }): {
+    payer: string
+    value: number
+  } {
+    this.lifecycle.push(`parse:${params.value}`)
+    return { ...params, value: Number(params.value) }
+  }
+
+  protected buildUnsigned(
+    _chain: SolanaChain,
+    params: { payer: string; value: number },
+  ): Promise<UnsignedSolanaTx> {
+    this.lifecycle.push(`build:${params.value}`)
+    this.captured = params
+    return Promise.resolve({ family: ChainFamily.Solana, instructions: [] })
   }
 }
 
 const chain = { logger: console, connection: {} } as unknown as SolanaChain
 
 describe('SolanaOperation', () => {
+  it('validates, parses, then builds without mutating input', async () => {
+    const op = new ParsedTestOperation()
+    const params = { payer: PublicKey.default.toBase58(), value: '42' }
+
+    await op.generate(chain, params)
+
+    assert.deepEqual(op.lifecycle, ['validate:42', 'parse:42', 'build:42'])
+    assert.deepEqual(op.captured, { payer: params.payer, value: 42 })
+    assert.equal(params.value, '42')
+  })
+
+  it('stops before parsing or building when validation fails', async () => {
+    class RejectingOperation extends ParsedTestOperation {
+      protected override validate(params: { payer: string; value: string }): void {
+        this.lifecycle.push(`validate:${params.value}`)
+        throw new Error('invalid params')
+      }
+    }
+
+    const op = new RejectingOperation()
+
+    await assert.rejects(() => op.generate(chain, { payer: 'payer', value: '42' }))
+    assert.deepEqual(op.lifecycle, ['validate:42'])
+  })
+
   it('uses wallet public key as payer without mutating caller params', async () => {
     const op = new TestOperation()
     const wallet = {
@@ -76,18 +111,6 @@ describe('SolanaOperation', () => {
     await op.execute(chain, { value: 'x', wallet })
 
     assert.equal(op.captured, wallet.publicKey.toBase58())
-  })
-
-  it('lets operations add generated data to execute results', async () => {
-    const op = new TestResultOperation()
-    const wallet = {
-      publicKey: Keypair.generate().publicKey,
-      signTransaction: async <T>(tx: T) => tx,
-    }
-
-    const result = await op.execute(chain, { value: 'x', wallet })
-
-    assert.equal(result.lookupTableAddress, 'lookup-table')
   })
 
   it('rejects invalid wallets before validation or building unsigned txs', async () => {

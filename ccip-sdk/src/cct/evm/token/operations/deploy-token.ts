@@ -1,148 +1,113 @@
 /**
- * deployToken — deploys a CrossChainToken (v2.0.0) via contract creation.
- *
- * The signed `execute` path auto-fills `ownerAddress` from the wallet and returns
- * the deployed `tokenAddress` (from the mined receipt). The unsigned `generate`
- * path requires `ownerAddress` explicitly (no signer to derive it from).
+ * deployToken — deploys a `CrossChainToken` (v2.0.0) via raw init-code. The tx has no
+ * `to`; `execute` returns the deployed contract address.
  *
  * @packageDocumentation
  */
 
-import { type TransactionReceipt, AbiCoder, ZeroAddress, concat } from 'ethers'
+import { type Interface, ZeroAddress } from 'ethers'
 
-import { CCIPWalletInvalidError } from '../../../../errors/index.ts'
-import { type EVMChain, isSigner } from '../../../../evm/index.ts'
-import type { UnsignedEVMTx } from '../../../../evm/types.ts'
-import { ChainFamily } from '../../../../networks.ts'
-import { CCTParamsInvalidError, CCTTxFailedError } from '../../../errors.ts'
-import type { TransactionHash } from '../../../operation.ts'
-import { type DeployVerification, buildDeployVerification } from '../../deploy-verification.ts'
-import { EVMOperation } from '../../operation.ts'
-import { CROSS_CHAIN_TOKEN_BYTECODE } from '../bytecodes/CrossChainToken.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
+import { type DeployArtifact, EVMDeployOperation } from '../../operation.ts'
+import {
+  validateAddress,
+  validateNonEmptyString,
+  validateUint256,
+  validateUint8,
+} from '../../validate.ts'
+import { TokenVersion, getTokenArtifact } from '../contracts.ts'
 
-const CROSS_CHAIN_TOKEN_PARAMS_TUPLE =
-  'tuple(string name, string symbol, uint256 maxSupply, uint256 preMint, address preMintRecipient, uint8 decimals, address ccipAdmin)'
-
-/** Parameters for `deployToken`. */
-export type DeployTokenParams = {
+/** Parameters for {@link DeployToken} — deploys `CrossChainToken` (v2.0.0). */
+export interface DeployTokenParams {
   name: string
   symbol: string
   decimals: number
-  maxSupply?: bigint
-  /** Amount pre-minted at deploy. `undefined`/`0n` = none. */
-  initialSupply?: bigint
-  /**
-   * Owner (2-step AccessControl admin). Required on the unsigned path; auto-filled
-   * from the signer on the signed path. Defaults the other address fields.
-   */
-  ownerAddress?: string
-  /** CCIP admin (`getCCIPAdmin()`). Defaults to `ownerAddress`. */
-  ccipAdmin?: string
-  /** Admin that may grant/revoke MINTER/BURNER roles. Defaults to `ownerAddress`. */
-  burnMintRoleAdmin?: string
-  /** Recipient of the pre-mint. Defaults to `ownerAddress`; ignored when `initialSupply` is `0n`. */
+  /** Max supply cap; `0n` means unlimited. */
+  maxSupply: bigint
+  /** Amount minted at deploy; defaults to `0n`. Must be `<= maxSupply` when capped. */
+  preMint?: bigint
+  /** Receives ownership; a valid address. */
+  owner: string
+  /** Recipient of `preMint`; required when `preMint > 0`, must be unset otherwise. */
   preMintRecipient?: string
+  /** CCIP admin (`getCCIPAdmin`); defaults to `owner`. */
+  ccipAdmin?: string
+  /** Admin of the burn/mint roles; defaults to `owner`. */
+  burnMintRoleAdmin?: string
   sender?: string
 }
 
-/** Result of a signed `deployToken`: the tx hash plus the deployed token address. */
-export type DeployTokenResult = TransactionHash & {
-  tokenAddress: string
-  /** Block-explorer verification handle (contract key + ABI-encoded constructor args). */
-  verification: DeployVerification
+/** Encodes the `CrossChainToken` (v2.0.0) constructor args; admins default to `owner`. */
+function encodeCrossChainToken(iface: Interface, p: DeployTokenParams): string {
+  return iface.encodeDeploy([
+    [
+      p.name,
+      p.symbol,
+      p.maxSupply,
+      p.preMint ?? 0n,
+      // preMintRecipient is set iff preMint > 0 (enforced in validate); zero address otherwise.
+      p.preMintRecipient ?? ZeroAddress,
+      p.decimals,
+      p.ccipAdmin ?? p.owner,
+    ],
+    p.burnMintRoleAdmin ?? p.owner,
+    p.owner,
+  ])
 }
 
-/** Deploys a CrossChainToken via contract creation. */
-export class DeployToken extends EVMOperation<DeployTokenParams, DeployTokenResult> {
+/** Deploys a `CrossChainToken`; `execute` resolves to `{ hash, contractAddress, verification }`. */
+export class DeployToken extends EVMDeployOperation<DeployTokenParams> {
   readonly name = 'deployToken'
 
-  /** Validates token params (owner required only on the unsigned path). */
-  protected validate(p: DeployTokenParams): void {
-    if (!p.name || p.name.trim().length === 0)
-      throw new CCTParamsInvalidError(this.name, 'name', 'must be non-empty')
-    if (!p.symbol || p.symbol.trim().length === 0)
-      throw new CCTParamsInvalidError(this.name, 'symbol', 'must be non-empty')
-    if (p.maxSupply !== undefined && p.maxSupply < 0n)
-      throw new CCTParamsInvalidError(this.name, 'maxSupply', 'must be non-negative')
-    if (p.initialSupply !== undefined && p.initialSupply < 0n)
-      throw new CCTParamsInvalidError(this.name, 'initialSupply', 'must be non-negative')
-    if (
-      p.maxSupply !== undefined &&
-      p.maxSupply > 0n &&
-      p.initialSupply !== undefined &&
-      p.initialSupply > p.maxSupply
-    )
-      throw new CCTParamsInvalidError(this.name, 'initialSupply', 'exceeds maxSupply')
-    if (!p.ownerAddress || p.ownerAddress.trim().length === 0)
+  /** Validates the constructor params before building init-code. */
+  protected validate(params: DeployTokenParams): void {
+    validateNonEmptyString(this.name, 'name', params.name)
+    validateNonEmptyString(this.name, 'symbol', params.symbol)
+    validateUint8(this.name, 'decimals', params.decimals)
+    validateUint256(this.name, 'maxSupply', params.maxSupply)
+    const preMint = params.preMint ?? 0n
+    validateUint256(this.name, 'preMint', preMint)
+    validateAddress(this.name, 'owner', params.owner)
+    if (params.maxSupply !== 0n && preMint > params.maxSupply)
       throw new CCTParamsInvalidError(
         this.name,
-        'ownerAddress',
-        'required (the signed deployToken path auto-fills it from the signer)',
+        'preMint',
+        `must be <= maxSupply (${params.maxSupply}), got ${preMint}`,
       )
-  }
-
-  /** Builds the CrossChainToken contract-creation tx (constructor args + bytecode). */
-  protected buildUnsigned(_chain: EVMChain, p: DeployTokenParams): UnsignedEVMTx {
-    const owner = p.ownerAddress!
-    const maxSupply = p.maxSupply ?? 0n
-    const preMint = p.initialSupply ?? 0n
-    const ccipAdmin = p.ccipAdmin ?? owner
-    const burnMintRoleAdmin = p.burnMintRoleAdmin ?? owner
-    // CrossChainToken reverts unless preMintRecipient is zero exactly when preMint is zero.
-    const preMintRecipient = preMint > 0n ? (p.preMintRecipient ?? owner) : ZeroAddress
-
-    const encodedArgs = AbiCoder.defaultAbiCoder().encode(
-      [CROSS_CHAIN_TOKEN_PARAMS_TUPLE, 'address', 'address'],
-      [
-        {
-          name: p.name,
-          symbol: p.symbol,
-          maxSupply,
-          preMint,
-          preMintRecipient,
-          decimals: p.decimals,
-          ccipAdmin,
-        },
-        burnMintRoleAdmin,
-        owner,
-      ],
-    )
-    const data = concat([CROSS_CHAIN_TOKEN_BYTECODE, encodedArgs])
-    return { family: ChainFamily.EVM, transactions: [{ to: null, data }] }
-  }
-
-  /** Signed deploy: auto-fills `ownerAddress` from the wallet, then deploys. */
-  override async execute(
-    chain: EVMChain,
-    params: DeployTokenParams & { wallet: unknown },
-  ): Promise<DeployTokenResult> {
-    if (!isSigner(params.wallet)) throw new CCIPWalletInvalidError(params.wallet)
-    const ownerAddress = params.ownerAddress ?? (await params.wallet.getAddress())
-    return super.execute(chain, { ...params, ownerAddress })
-  }
-
-  /**
-   * Extracts the deployed token address from the creation receipt and rebuilds the
-   * block-explorer verification handle from the submitted creation calldata.
-   */
-  protected override resultFromReceipt(
-    hash: TransactionHash,
-    receipt: TransactionReceipt,
-    unsigned: UnsignedEVMTx,
-  ): DeployTokenResult {
-    if (!receipt.contractAddress)
-      throw new CCTTxFailedError(this.name, 'no contract address in deploy receipt', {
-        context: { txHash: hash.hash },
-      })
-    const data = unsigned.transactions[0]?.data
-    if (!data)
-      throw new CCTTxFailedError(this.name, 'missing deploy calldata for verification', {
-        context: { txHash: hash.hash },
-      })
-    return {
-      ...hash,
-      tokenAddress: receipt.contractAddress,
-      verification: buildDeployVerification('CrossChainToken', data, CROSS_CHAIN_TOKEN_BYTECODE),
+    // Mirror CrossChainToken's ctor: preMintRecipient is set (and non-zero) iff preMint > 0.
+    if (preMint > 0n) {
+      if (params.preMintRecipient === undefined)
+        throw new CCTParamsInvalidError(
+          this.name,
+          'preMintRecipient',
+          'must be set when preMint > 0',
+        )
+      validateAddress(this.name, 'preMintRecipient', params.preMintRecipient)
+      if (params.preMintRecipient === ZeroAddress)
+        throw new CCTParamsInvalidError(
+          this.name,
+          'preMintRecipient',
+          'must be non-zero when preMint > 0',
+        )
+    } else if (params.preMintRecipient !== undefined) {
+      throw new CCTParamsInvalidError(
+        this.name,
+        'preMintRecipient',
+        'must be unset when preMint is 0',
+      )
     }
+    if (params.ccipAdmin !== undefined) validateAddress(this.name, 'ccipAdmin', params.ccipAdmin)
+    if (params.burnMintRoleAdmin !== undefined)
+      validateAddress(this.name, 'burnMintRoleAdmin', params.burnMintRoleAdmin)
+  }
+
+  /** Deploy artifact for `CrossChainToken` (v2.0.0). */
+  protected artifact(): DeployArtifact {
+    return getTokenArtifact(TokenVersion.V2_0_0)
+  }
+
+  /** ABI-encodes the `CrossChainToken` (v2.0.0) constructor args. */
+  protected encode(iface: Interface, params: DeployTokenParams): string {
+    return encodeCrossChainToken(iface, params)
   }
 }

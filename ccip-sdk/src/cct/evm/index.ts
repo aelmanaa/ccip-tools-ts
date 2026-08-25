@@ -12,126 +12,76 @@ import type { ChainContext } from '../../chain.ts'
 import { EVMChain } from '../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../evm/types.ts'
 import type { ChainFamily } from '../../networks.ts'
-import type { TransactionHash } from '../operation.ts'
+import type { TransactionResult } from '../operation.ts'
 import { TokenManager } from '../token-manager.ts'
-import { type AcceptOwnershipParams, AcceptOwnership } from './pool/operations/accept-ownership.ts'
 import {
-  type AppendRemotePoolAddressesParams,
-  AppendRemotePoolAddresses,
-} from './pool/operations/append-remote-pool-addresses.ts'
+  type AuthorizeLockboxCallersParams,
+  AuthorizeLockboxCallers,
+} from './lockbox/operations/authorize-callers.ts'
+import { type DeployLockboxParams, DeployLockbox } from './lockbox/operations/deploy-lockbox.ts'
+import type { DeployResult, EVMExecuteParams } from './operation.ts'
+import { type DeployTokenParams, DeployToken } from './token/operations/deploy-token.ts'
 import {
-  type ApplyChainUpdatesParams,
-  ApplyChainUpdates,
-} from './pool/operations/apply-chain-updates.ts'
+  type AcceptAdminParams,
+  AcceptAdmin,
+} from './token-admin-registry/operations/accept-admin.ts'
 import {
-  type DeleteChainConfigParams,
-  DeleteChainConfig,
-} from './pool/operations/delete-chain-config.ts'
+  type GetSupportedTokensParams,
+  type GetSupportedTokensResult,
+  GetSupportedTokens,
+} from './token-admin-registry/operations/get-supported-tokens.ts'
 import {
-  type RemoveRemotePoolAddressesParams,
-  RemoveRemotePoolAddresses,
-} from './pool/operations/remove-remote-pool-addresses.ts'
+  type GetTokenAdminRegistryParams,
+  type GetTokenAdminRegistryResult,
+  GetTokenAdminRegistry,
+} from './token-admin-registry/operations/get-token-admin-registry.ts'
 import {
-  type SetAllowedFinalityConfigParams,
-  SetAllowedFinalityConfig,
-} from './pool/operations/set-allowed-finality-config.ts'
+  type RegisterAdminParams,
+  RegisterAdmin,
+} from './token-admin-registry/operations/register-admin.ts'
+import { type SetPoolParams, SetPool } from './token-admin-registry/operations/set-pool.ts'
 import {
-  type SetChainRateLimiterConfigParams,
-  SetChainRateLimiterConfig,
-} from './pool/operations/set-chain-rate-limiter-config.ts'
-import { type SetFeeAdminParams, SetFeeAdmin } from './pool/operations/set-fee-admin.ts'
+  type TransferAdminParams,
+  TransferAdmin,
+} from './token-admin-registry/operations/transfer-admin.ts'
 import {
-  type SetRateLimitAdminParams,
-  SetRateLimitAdmin,
-} from './pool/operations/set-rate-limit-admin.ts'
+  type DeployTokenPoolParams,
+  DeployTokenPool,
+} from './token-pool/operations/deploy-token-pool.ts'
 import {
-  type SetTokenTransferFeeConfigParams,
-  SetTokenTransferFeeConfig,
-} from './pool/operations/set-token-transfer-fee-config.ts'
+  type GetTokenPoolStateParams,
+  type GetTokenPoolStateResult,
+  GetTokenPoolState,
+} from './token-pool/operations/get-token-pool-state.ts'
 import {
   type TransferOwnershipParams,
   TransferOwnership,
-} from './pool/operations/transfer-ownership.ts'
-import { type MintBurnRolesResult, getMintBurnRoles } from './token/get-mint-burn-roles.ts'
-import {
-  type DeployCrossChainPoolTokenParams,
-  type DeployCrossChainPoolTokenResult,
-  DeployCrossChainPoolToken,
-} from './token/operations/deploy-cross-chain-pool-token.ts'
-import {
-  type DeployTokenParams,
-  type DeployTokenResult,
-  DeployToken,
-} from './token/operations/deploy-token.ts'
-import {
-  type GrantMintBurnAccessParams,
-  GrantMintBurnAccess,
-} from './token/operations/grant-mint-burn-access.ts'
-import {
-  type RevokeMintBurnAccessParams,
-  RevokeMintBurnAccess,
-} from './token/operations/revoke-mint-burn-access.ts'
-import {
-  type AcceptAdminRoleParams,
-  AcceptAdminRole,
-} from './token-admin-registry/operations/accept-admin-role.ts'
-import {
-  type ProposeAdminRoleParams,
-  ProposeAdminRole,
-} from './token-admin-registry/operations/propose-admin-role.ts'
-import { type SetPoolParams, SetPool } from './token-admin-registry/operations/set-pool.ts'
-import {
-  type TransferAdminRoleParams,
-  TransferAdminRole,
-} from './token-admin-registry/operations/transfer-admin-role.ts'
-import {
-  type DeployPoolViaFactoryParams,
-  type DeployPoolViaFactoryResult,
-  DeployPoolViaFactory,
-} from './token-pool/operations/deploy-pool-via-factory.ts'
-import {
-  type DeployPoolParams,
-  type DeployPoolResult,
-  DeployPool,
-} from './token-pool/operations/deploy-pool.ts'
-import {
-  type DeployTokenAndPoolViaFactoryParams,
-  type DeployTokenAndPoolViaFactoryResult,
-  DeployTokenAndPoolViaFactory,
-} from './token-pool/operations/deploy-token-and-pool-via-factory.ts'
-import {
-  type ProvideLiquidityParams,
-  ProvideLiquidity,
-} from './token-pool/operations/provide-liquidity.ts'
+} from './token-pool/operations/transfer-ownership.ts'
 
 /** CCT admin operations for EVM chains, delegating each op to an operation class. */
 export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   readonly chain: EVMChain
-  readonly #setPool = new SetPool()
-  readonly #proposeAdminRole = new ProposeAdminRole()
-  readonly #acceptAdminRole = new AcceptAdminRole()
-  readonly #transferAdminRole = new TransferAdminRole()
-  readonly #applyChainUpdates = new ApplyChainUpdates()
-  readonly #deleteChainConfig = new DeleteChainConfig()
-  readonly #appendRemotePoolAddresses = new AppendRemotePoolAddresses()
-  readonly #removeRemotePoolAddresses = new RemoveRemotePoolAddresses()
-  readonly #setRateLimitAdmin = new SetRateLimitAdmin()
-  readonly #setFeeAdmin = new SetFeeAdmin()
-  readonly #setAllowedFinalityConfig = new SetAllowedFinalityConfig()
-  readonly #setChainRateLimiterConfig = new SetChainRateLimiterConfig()
-  readonly #setTokenTransferFeeConfig = new SetTokenTransferFeeConfig()
-  readonly #transferOwnership = new TransferOwnership()
-  readonly #acceptOwnership = new AcceptOwnership()
-  readonly #grantMintBurnAccess = new GrantMintBurnAccess()
-  readonly #revokeMintBurnAccess = new RevokeMintBurnAccess()
+  // Token operations
   readonly #deployToken = new DeployToken()
-  readonly #deployCrossChainPoolToken = new DeployCrossChainPoolToken()
-  readonly #deployPool = new DeployPool()
-  readonly #deployPoolViaFactory = new DeployPoolViaFactory()
-  readonly #deployTokenAndPoolViaFactory = new DeployTokenAndPoolViaFactory()
-  readonly #provideLiquidity = new ProvideLiquidity()
 
-  /** Wraps the chain this manager builds and submits through. */
+  // Token admin registry operations
+  readonly #registerAdmin = new RegisterAdmin()
+  readonly #setPool = new SetPool()
+  readonly #transferAdmin = new TransferAdmin()
+  readonly #acceptAdmin = new AcceptAdmin()
+  readonly #getTokenAdminRegistry = new GetTokenAdminRegistry()
+  readonly #getSupportedTokens = new GetSupportedTokens()
+
+  // Token pool operations
+  readonly #deployTokenPool = new DeployTokenPool()
+  readonly #transferOwnership = new TransferOwnership()
+  readonly #getTokenPoolState = new GetTokenPoolState()
+
+  // Lockbox operations
+  readonly #deployLockbox = new DeployLockbox()
+  readonly #authorizeLockboxCallers = new AuthorizeLockboxCallers()
+
+  /** Wraps an {@link EVMChain}; prefer the static factory methods. */
   constructor(chain: EVMChain) {
     super()
     this.chain = chain
@@ -158,6 +108,69 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   /** Provider of the underlying chain. */
   get provider(): JsonRpcApiProvider {
     return this.chain.provider
+  }
+
+  /**
+   * Builds an unsigned `registerAdmin` tx (for multisig / offline signing): proposes a token's
+   * administrator in the TokenAdminRegistry via a RegistryModuleOwnerCustom. Two-step by design —
+   * the proposed administrator must then call {@link acceptAdmin}.
+   * @remarks The administrator is not a parameter — the module derives it on-chain. `owner`/`ccip-admin` read the token's own `owner()`/`getCCIPAdmin()`, so
+   * the result is independent of who signs; a wrong signer simply reverts (`CanOnlySelfRegister`).
+   *
+   * `access-control-default-admin` behaves differently and warrants care on this offline path: the
+   * module registers **`msg.sender`** after checking it holds the token's `DEFAULT_ADMIN_ROLE`.
+   * `sender` here only drives the local pre-flight probe, so if the built tx is ultimately signed
+   * by a *different* address that also holds that role, the **signer** becomes the token's
+   * administrator — silently, with no revert to catch it. Confirm the signing key before relaying
+   * an `access-control-default-admin` registration. {@link registerAdmin} is not exposed to this,
+   * since it rejects a `sender` that differs from its wallet.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid, `registryModule` is not a
+   * registered TAR module, `registrationMethod` needs a v1.6+ module, `sender` doesn't match the
+   * token's authority for the chosen method, or the token is already registered (or pending
+   * acceptance)
+   * @example
+   * ```typescript
+   * // build only — sign later (multisig / offline). `sender` must be the token's owner (or
+   * // CCIP admin / default admin, matching `registrationMethod`).
+   * const unsigned = await cct.generateUnsignedRegisterAdmin({
+   *   tokenAddress: '0xToken...',
+   *   registryModule: '0xRegistryModuleOwnerCustom...', // not discoverable on-chain
+   *   address: '0xTokenAdminRegistry...', // the TAR, or a Router/OnRamp/OffRamp/pool to resolve it from
+   *   sender: '0xTokenOwner...',
+   * })
+   * ```
+   */
+  generateUnsignedRegisterAdmin(opts: RegisterAdminParams): Promise<UnsignedEVMTx> {
+    return this.#registerAdmin.generate(this.chain, opts)
+  }
+
+  /**
+   * Proposes a token's administrator in the TokenAdminRegistry via a RegistryModuleOwnerCustom,
+   * signing + submitting with `opts.wallet`. Two-step by design — the proposed administrator
+   * must then call {@link acceptAdmin}.
+   * @remarks The administrator is not a parameter — see {@link generateUnsignedRegisterAdmin}. `sender` also defaults to `opts.wallet`'s address here
+   * (unlike the unsigned builder, where it's optional for offline/multisig flows), so the
+   * token-authority check always runs before this signs and submits.
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCTParamsInvalidError} if any param is invalid, `registryModule` is not a
+   * registered TAR module, `registrationMethod` needs a v1.6+ module, `sender` doesn't match the
+   * token's authority for the chosen method, or the token is already registered (or pending
+   * acceptance)
+   * @throws {@link CCTTxFailedError} if the tx reverts or fails
+   * @example
+   * ```typescript
+   * // `wallet` must be the token's owner (or CCIP admin / hold DEFAULT_ADMIN_ROLE, matching
+   * // `registrationMethod`) — enforced automatically since `sender` defaults to its address.
+   * const { hash } = await cct.registerAdmin({
+   *   tokenAddress: '0xToken...',
+   *   registryModule: '0xRegistryModuleOwnerCustom...',
+   *   address: '0xTokenAdminRegistry...',
+   *   wallet,
+   * })
+   * ```
+   */
+  registerAdmin(opts: EVMExecuteParams<RegisterAdminParams>): Promise<TransactionResult> {
+    return this.#registerAdmin.execute(this.chain, opts)
   }
 
   /**
@@ -196,341 +209,426 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * })
    * ```
    */
-  setPool(opts: SetPoolParams & { wallet: unknown }): Promise<TransactionHash> {
+  setPool(opts: EVMExecuteParams<SetPoolParams>): Promise<TransactionResult> {
     return this.#setPool.execute(this.chain, opts)
   }
 
   /**
-   * Builds an unsigned `proposeAdminRole` tx (for multisig / offline signing).
-   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   * Builds an unsigned TokenAdminRegistry `transferAdmin` tx (for multisig / offline signing).
+   * Two-step by design: `newAdmin` must separately call `acceptAdmin` to complete the
+   * handoff. This is the registry's ADMIN role — distinct from a pool's Ownable2Step *owner*
+   * (see {@link transferOwnership}); do not confuse the two.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid, or if `sender` is not the
+   * token's current registry administrator (including a not-yet-accepted registration)
    * @example
    * ```typescript
-   * const unsigned = await cct.generateUnsignedProposeAdminRole({
+   * // `sender` must be the token's current registry administrator
+   * const unsigned = await cct.generateUnsignedTransferAdmin({
    *   tokenAddress: '0xToken...',
-   *   registryModuleAddress: '0xRegistryModuleOwnerCustom...',
-   *   registrationMethod: 'owner', // default; how the module verifies your authority
-   *   sender: '0xTokenOwner...',
+   *   newAdmin: '0xNewAdmin...', // must separately call acceptAdmin
+   *   address: '0xTokenAdminRegistry...', // the TAR, or a Router/pool to resolve it from
+   *   sender: '0xCurrentAdmin...',
    * })
    * ```
    */
-  generateUnsignedProposeAdminRole(opts: ProposeAdminRoleParams): Promise<UnsignedEVMTx> {
-    return this.#proposeAdminRole.generate(this.chain, opts)
+  generateUnsignedTransferAdmin(opts: TransferAdminParams): Promise<UnsignedEVMTx> {
+    return this.#transferAdmin.generate(this.chain, opts)
   }
 
   /**
-   * Proposes the caller as token administrator, signing + submitting with `opts.wallet`.
-   * The wallet must hold the authority the `registrationMethod` checks (token owner by default).
+   * Proposes a new TokenAdminRegistry administrator, signing + submitting with `opts.wallet`
+   * (the current registry admin). Two-step: `newAdmin` must separately call `acceptAdmin`.
+   * This is the registry's ADMIN role — distinct from a pool's Ownable2Step *owner*
+   * (see {@link transferOwnership}); do not confuse the two.
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
-   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   * @throws {@link CCTParamsInvalidError} if any param is invalid, if the signing wallet is not the
+   * token's current registry administrator (including a not-yet-accepted registration), or if an
+   * explicit `opts.sender` does not match the wallet's address
    * @throws {@link CCTTxFailedError} if the tx reverts or fails
    * @example
    * ```typescript
-   * const { hash } = await cct.proposeAdminRole({
+   * // `wallet` must sign as the token's current registry administrator; `sender` defaults to its
+   * // address, so pass it only for offline builds via generateUnsignedTransferAdmin.
+   * const { hash } = await cct.transferAdmin({
    *   tokenAddress: '0xToken...',
-   *   registryModuleAddress: '0xRegistryModuleOwnerCustom...',
+   *   newAdmin: '0xNewAdmin...',
+   *   address: '0xTokenAdminRegistry...',
    *   wallet,
    * })
    * ```
    */
-  proposeAdminRole(opts: ProposeAdminRoleParams & { wallet: unknown }): Promise<TransactionHash> {
-    return this.#proposeAdminRole.execute(this.chain, opts)
-  }
-
-  /** Builds an unsigned `acceptAdminRole` tx. @throws {@link CCTParamsInvalidError} */
-  generateUnsignedAcceptAdminRole(opts: AcceptAdminRoleParams): Promise<UnsignedEVMTx> {
-    return this.#acceptAdminRole.generate(this.chain, opts)
-  }
-  /** Accepts the pending admin role, signing with `opts.wallet`. */
-  acceptAdminRole(opts: AcceptAdminRoleParams & { wallet: unknown }): Promise<TransactionHash> {
-    return this.#acceptAdminRole.execute(this.chain, opts)
-  }
-
-  /** Builds an unsigned `transferAdminRole` tx (proposes a new pending admin). */
-  generateUnsignedTransferAdminRole(opts: TransferAdminRoleParams): Promise<UnsignedEVMTx> {
-    return this.#transferAdminRole.generate(this.chain, opts)
-  }
-  /** Transfers (proposes) the admin role to `newAdmin`, signing with `opts.wallet`. */
-  transferAdminRole(opts: TransferAdminRoleParams & { wallet: unknown }): Promise<TransactionHash> {
-    return this.#transferAdminRole.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `applyChainUpdates` tx (add/remove remote chain configs on a pool). */
-  generateUnsignedApplyChainUpdates(opts: ApplyChainUpdatesParams): Promise<UnsignedEVMTx> {
-    return this.#applyChainUpdates.generate(this.chain, opts)
-  }
-  /** Applies remote-chain config updates to a pool, signing with `opts.wallet`. */
-  applyChainUpdates(opts: ApplyChainUpdatesParams & { wallet: unknown }): Promise<TransactionHash> {
-    return this.#applyChainUpdates.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `deleteChainConfig` tx (removes a remote chain from a pool). */
-  generateUnsignedDeleteChainConfig(opts: DeleteChainConfigParams): Promise<UnsignedEVMTx> {
-    return this.#deleteChainConfig.generate(this.chain, opts)
-  }
-  /** Deletes a remote-chain config from a pool, signing with `opts.wallet`. */
-  deleteChainConfig(opts: DeleteChainConfigParams & { wallet: unknown }): Promise<TransactionHash> {
-    return this.#deleteChainConfig.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `appendRemotePoolAddresses` txs (one per address). */
-  generateUnsignedAppendRemotePoolAddresses(
-    opts: AppendRemotePoolAddressesParams,
-  ): Promise<UnsignedEVMTx> {
-    return this.#appendRemotePoolAddresses.generate(this.chain, opts)
-  }
-  /** Appends remote pool addresses to a pool (multi-tx), signing with `opts.wallet`. */
-  appendRemotePoolAddresses(
-    opts: AppendRemotePoolAddressesParams & { wallet: unknown },
-  ): Promise<TransactionHash> {
-    return this.#appendRemotePoolAddresses.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `removeRemotePoolAddresses` txs (one per address). */
-  generateUnsignedRemoveRemotePoolAddresses(
-    opts: RemoveRemotePoolAddressesParams,
-  ): Promise<UnsignedEVMTx> {
-    return this.#removeRemotePoolAddresses.generate(this.chain, opts)
-  }
-  /** Removes remote pool addresses from a pool (multi-tx), signing with `opts.wallet`. */
-  removeRemotePoolAddresses(
-    opts: RemoveRemotePoolAddressesParams & { wallet: unknown },
-  ): Promise<TransactionHash> {
-    return this.#removeRemotePoolAddresses.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `setRateLimitAdmin` tx. */
-  generateUnsignedSetRateLimitAdmin(opts: SetRateLimitAdminParams): Promise<UnsignedEVMTx> {
-    return this.#setRateLimitAdmin.generate(this.chain, opts)
-  }
-  /** Sets the pool's rate-limit admin, signing with `opts.wallet`. */
-  setRateLimitAdmin(opts: SetRateLimitAdminParams & { wallet: unknown }): Promise<TransactionHash> {
-    return this.#setRateLimitAdmin.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `setFeeAdmin` tx (v2.0+ pools). */
-  generateUnsignedSetFeeAdmin(opts: SetFeeAdminParams): Promise<UnsignedEVMTx> {
-    return this.#setFeeAdmin.generate(this.chain, opts)
-  }
-  /** Sets the pool's fee admin (v2.0+), signing with `opts.wallet`. */
-  setFeeAdmin(opts: SetFeeAdminParams & { wallet: unknown }): Promise<TransactionHash> {
-    return this.#setFeeAdmin.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `setAllowedFinalityConfig` tx (v2.0+ pools). */
-  generateUnsignedSetAllowedFinalityConfig(
-    opts: SetAllowedFinalityConfigParams,
-  ): Promise<UnsignedEVMTx> {
-    return this.#setAllowedFinalityConfig.generate(this.chain, opts)
-  }
-  /** Sets the pool's allowed finality config (v2.0+), signing with `opts.wallet`. */
-  setAllowedFinalityConfig(
-    opts: SetAllowedFinalityConfigParams & { wallet: unknown },
-  ): Promise<TransactionHash> {
-    return this.#setAllowedFinalityConfig.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `setChainRateLimiterConfig` tx(s) (v1.6 = one per chain, v2.0 = batched). */
-  generateUnsignedSetChainRateLimiterConfig(
-    opts: SetChainRateLimiterConfigParams,
-  ): Promise<UnsignedEVMTx> {
-    return this.#setChainRateLimiterConfig.generate(this.chain, opts)
-  }
-  /** Sets per-chain rate limiter config on a pool, signing with `opts.wallet`. */
-  setChainRateLimiterConfig(
-    opts: SetChainRateLimiterConfigParams & { wallet: unknown },
-  ): Promise<TransactionHash> {
-    return this.#setChainRateLimiterConfig.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `setTokenTransferFeeConfig` tx (v2.0+ pools). */
-  generateUnsignedSetTokenTransferFeeConfig(
-    opts: SetTokenTransferFeeConfigParams,
-  ): Promise<UnsignedEVMTx> {
-    return this.#setTokenTransferFeeConfig.generate(this.chain, opts)
-  }
-  /** Sets token-transfer fee config on a pool (v2.0+), signing with `opts.wallet`. */
-  setTokenTransferFeeConfig(
-    opts: SetTokenTransferFeeConfigParams & { wallet: unknown },
-  ): Promise<TransactionHash> {
-    return this.#setTokenTransferFeeConfig.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `transferOwnership` tx (Ownable2Step, pool). */
-  generateUnsignedTransferOwnership(opts: TransferOwnershipParams): Promise<UnsignedEVMTx> {
-    return this.#transferOwnership.generate(this.chain, opts)
-  }
-  /** Transfers pool ownership (proposes new owner), signing with `opts.wallet`. */
-  transferOwnership(opts: TransferOwnershipParams & { wallet: unknown }): Promise<TransactionHash> {
-    return this.#transferOwnership.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `acceptOwnership` tx (Ownable2Step, pool). */
-  generateUnsignedAcceptOwnership(opts: AcceptOwnershipParams): Promise<UnsignedEVMTx> {
-    return this.#acceptOwnership.generate(this.chain, opts)
-  }
-  /** Accepts pending pool ownership, signing with `opts.wallet`. */
-  acceptOwnership(opts: AcceptOwnershipParams & { wallet: unknown }): Promise<TransactionHash> {
-    return this.#acceptOwnership.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `grantMintBurnAccess` tx (grant mint/burn role on a token). */
-  generateUnsignedGrantMintBurnAccess(opts: GrantMintBurnAccessParams): Promise<UnsignedEVMTx> {
-    return this.#grantMintBurnAccess.generate(this.chain, opts)
-  }
-  /** Grants mint/burn role(s) on a token, signing with `opts.wallet`. */
-  grantMintBurnAccess(
-    opts: GrantMintBurnAccessParams & { wallet: unknown },
-  ): Promise<TransactionHash> {
-    return this.#grantMintBurnAccess.execute(this.chain, opts)
-  }
-
-  /** Builds unsigned `revokeMintBurnAccess` tx (revoke mint/burn role on a token). */
-  generateUnsignedRevokeMintBurnAccess(opts: RevokeMintBurnAccessParams): Promise<UnsignedEVMTx> {
-    return this.#revokeMintBurnAccess.generate(this.chain, opts)
-  }
-  /** Revokes a mint/burn role on a token, signing with `opts.wallet`. */
-  revokeMintBurnAccess(
-    opts: RevokeMintBurnAccessParams & { wallet: unknown },
-  ): Promise<TransactionHash> {
-    return this.#revokeMintBurnAccess.execute(this.chain, opts)
+  transferAdmin(opts: EVMExecuteParams<TransferAdminParams>): Promise<TransactionResult> {
+    return this.#transferAdmin.execute(this.chain, opts)
   }
 
   /**
-   * Builds an unsigned CrossChainToken deploy tx (contract creation).
-   * `ownerAddress` is required here (no signer to derive it from).
+   * Builds an unsigned `acceptAdminRole` tx (for multisig / offline signing). Second half of
+   * the two-step admin handshake: a registry module's `registerAdmin` (fresh registration) or
+   * the current admin's `transferAdmin` (hand-off) proposes `opts.sender` as
+   * `pendingAdministrator`; `acceptAdmin` then confirms it on-chain before encoding, after which
+   * {@link setPool} becomes callable by the new administrator.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid, or `sender` is not the
+   *   pending administrator
+   * @example
+   * ```typescript
+   * // `sender` must be the pending administrator proposed by registerAdmin/transferAdmin
+   * const unsigned = await cct.generateUnsignedAcceptAdmin({
+   *   tokenAddress: '0xToken...',
+   *   address: '0xTokenAdminRegistry...', // the TAR, or a Router/pool to resolve it from
+   *   sender: '0xPendingAdmin...',
+   * })
+   * ```
+   */
+  generateUnsignedAcceptAdmin(opts: AcceptAdminParams): Promise<UnsignedEVMTx> {
+    return this.#acceptAdmin.generate(this.chain, opts)
+  }
+
+  /**
+   * Accepts a pending TokenAdminRegistry administrator role, signing + submitting with
+   * `opts.wallet` (the pending administrator). Completes the `registerAdmin`/`transferAdmin` →
+   * `acceptAdmin` handshake, after which {@link setPool} becomes callable.
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCTParamsInvalidError} if any param is invalid, or `sender` is not the
+   *   pending administrator
+   * @throws {@link CCTTxFailedError} if the tx reverts or fails
+   * @example
+   * ```typescript
+   * // `wallet` must sign as the pending administrator
+   * const { hash } = await cct.acceptAdmin({
+   *   tokenAddress: '0xToken...',
+   *   address: '0xTokenAdminRegistry...',
+   *   wallet,
+   * })
+   * ```
+   */
+  acceptAdmin(opts: EVMExecuteParams<AcceptAdminParams>): Promise<TransactionResult> {
+    return this.#acceptAdmin.execute(this.chain, opts)
+  }
+
+  /**
+   * Reads a token's TokenAdminRegistry entry: its `administrator`, any `pendingAdministrator`,
+   * and its registered `tokenPool`.
+   * @remarks Deliberately diverges from `cct.chain.getRegistryTokenConfig()`, which throws when
+   * `administrator` is the zero address — exactly the post-`registerAdmin`, pre-`acceptAdmin`
+   * state. This op reports `{ administrator: ZeroAddress, pendingAdministrator }` faithfully
+   * instead, so a pending registration is observable; see
+   * {@link GetTokenAdminRegistry} for the full rationale. `pendingAdministrator` and `tokenPool`
+   * are still omitted when zero.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   * @example
+   * ```typescript
+   * const config = await cct.getTokenAdminRegistry({
+   *   address: '0xTokenAdminRegistry...', // or a Router/OnRamp/OffRamp/pool to resolve it from
+   *   tokenAddress: '0xToken...',
+   * })
+   * if (config.administrator === ZeroAddress) {
+   *   console.log('pending acceptance by', config.pendingAdministrator)
+   * }
+   * ```
+   */
+  getTokenAdminRegistry(opts: GetTokenAdminRegistryParams): Promise<GetTokenAdminRegistryResult> {
+    return this.#getTokenAdminRegistry.query(this.chain, opts)
+  }
+
+  /**
+   * Lists every token configured in the TokenAdminRegistry resolved from `address`.
+   * @remarks The registry paginates via `getAllConfiguredTokens` — `opts.page` sets the batch size per call; omit it to read the
+   * whole registry in one round trip per 1000 tokens.
+   * @throws {@link CCTParamsInvalidError} if `address` is not a valid address, or `page` is given
+   * and is not a positive integer
+   * @example
+   * ```typescript
+   * const tokens = await cct.getSupportedTokens({ address: '0xTokenAdminRegistry...' })
+   * ```
+   */
+  getSupportedTokens(opts: GetSupportedTokensParams): Promise<GetSupportedTokensResult> {
+    return this.#getSupportedTokens.query(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned pool `transferOwnership` tx (for multisig / offline signing). Probes the
+   * pool's on-chain `typeAndVersion` to resolve its interface + encoder; the `transferOwnership`
+   * calldata is stable across pool versions, so the resolved encoding is version/type-independent.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   */
+  generateUnsignedTransferOwnership(opts: TransferOwnershipParams): Promise<UnsignedEVMTx> {
+    return this.#transferOwnership.generate(this.chain, opts)
+  }
+
+  /**
+   * Proposes a new pool owner (two-step), signing + submitting with `opts.wallet`.
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   * @throws {@link CCTTxFailedError} if the tx reverts or fails
+   */
+  transferOwnership(opts: EVMExecuteParams<TransferOwnershipParams>): Promise<TransactionResult> {
+    return this.#transferOwnership.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `CrossChainToken` (v2.0.0) deployment tx (for multisig / offline
+   * signing). The deployed address is only known once mined, so it is NOT returned here —
+   * use {@link deployToken} to deploy and receive `{ hash, contractAddress, verification }`.
+   * @remarks Same post-deploy roles caveat as {@link deployToken} — the pool needs
+   * `grantMintAndBurnRoles` before it can bridge.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedDeployToken({
+   *   name: 'My Token',
+   *   symbol: 'MTK',
+   *   decimals: 18,
+   *   maxSupply: 0n, // 0 = unlimited
+   *   owner: '0xOwner...', // CrossChainToken v2.0.0; ccipAdmin/burnMintRoleAdmin default to owner
+   *   sender: '0xDeployer...',
+   * })
+   * ```
    */
   generateUnsignedDeployToken(opts: DeployTokenParams): Promise<UnsignedEVMTx> {
     return this.#deployToken.generate(this.chain, opts)
   }
+
   /**
-   * Deploys a CrossChainToken, signing with `opts.wallet`; returns the deployed
-   * `tokenAddress`. `ownerAddress` defaults to the signer's address.
+   * Deploys a `CrossChainToken` (v2.0.0), signing + submitting with `opts.wallet`; resolves
+   * to the tx hash, the newly deployed token address, and a `verification`
+   * ({@link ExplorerVerificationInput}) for verifying the source on a block explorer.
+   * @remarks Mint/burn are role-gated (`MINTER_ROLE`/`BURNER_ROLE`); the token grants neither
+   * to any pool at deploy. `preMint` mints initial supply to `preMintRecipient`, but before a
+   * pool can bridge, `burnMintRoleAdmin` must `grantMintAndBurnRoles(pool)`.
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   * @throws {@link CCTTxFailedError} if the tx reverts, fails, or mines without an address
+   * @example
+   * ```typescript
+   * const { hash, contractAddress, verification } = await cct.deployToken({
+   *   name: 'My Token',
+   *   symbol: 'MTK',
+   *   decimals: 18,
+   *   maxSupply: 0n,
+   *   owner: '0xOwner...',
+   *   wallet,
+   * })
+   * ```
    */
-  deployToken(opts: DeployTokenParams & { wallet: unknown }): Promise<DeployTokenResult> {
+  deployToken(opts: EVMExecuteParams<DeployTokenParams>): Promise<DeployResult> {
     return this.#deployToken.execute(this.chain, opts)
   }
 
-  /** Builds an unsigned CrossChainPoolToken deploy tx (combined token+pool, creation). */
-  generateUnsignedDeployCrossChainPoolToken(
-    opts: DeployCrossChainPoolTokenParams,
-  ): Promise<UnsignedEVMTx> {
-    return this.#deployCrossChainPoolToken.generate(this.chain, opts)
-  }
-  /** Deploys a CrossChainPoolToken (token == pool), signing with `opts.wallet`; returns its address. */
-  deployCrossChainPoolToken(
-    opts: DeployCrossChainPoolTokenParams & { wallet: unknown },
-  ): Promise<DeployCrossChainPoolTokenResult> {
-    return this.#deployCrossChainPoolToken.execute(this.chain, opts)
+  /**
+   * Builds an unsigned pool deployment tx (for multisig / offline signing). `type` selects
+   * the pool contract — a `DeployableTokenPoolType` (`BurnMintTokenPool`, `BurnFromMintTokenPool`,
+   * `BurnWithFromMintTokenPool`, or `LockReleaseTokenPool`; all v2.0.0). The deployed address is
+   * only known once mined, so it is NOT returned here — use {@link deployTokenPool} to receive
+   * `{ hash, contractAddress, verification }`.
+   * @remarks Same post-deploy setup caveat as {@link deployTokenPool} — a fresh pool must be
+   * registered, role-granted, and lane-configured before it can bridge. `LockReleaseTokenPool`
+   * additionally requires a pre-deployed `lockbox` ({@link DeployLockReleaseTokenPoolParams})
+   * with the pool authorized on it. The full sequence: {@link deployToken} → {@link deployLockbox}
+   * → {@link deployTokenPool} (passing the lockbox) → {@link authorizeLockboxCallers}
+   * (`addedCallers: [pool]`) → {@link setPool} → configure lanes.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedDeployTokenPool({
+   *   type: 'BurnMintTokenPool', // burn-* variant; LockReleaseTokenPool additionally requires `lockbox`
+   *   token: '0xToken...',
+   *   localTokenDecimals: 18,
+   *   rmnProxy: '0xRmnProxy...',
+   *   router: '0xRouter...',
+   *   sender: '0xDeployer...',
+   * })
+   * ```
+   */
+  generateUnsignedDeployTokenPool(opts: DeployTokenPoolParams): Promise<UnsignedEVMTx> {
+    return this.#deployTokenPool.generate(this.chain, opts)
   }
 
   /**
-   * Builds an unsigned pool-creation tx. `lock-release` requires `lockBoxAddress`
-   * here (the signed `deployPool` auto-deploys one).
+   * Deploys a token pool, signing + submitting with `opts.wallet`; resolves to the tx hash, the
+   * newly deployed pool address, and a `verification` ({@link ExplorerVerificationInput}) for
+   * verifying the source on a block explorer. `type` selects the pool contract (a
+   * `DeployableTokenPoolType`, v2.0.0).
+   * @remarks Deploying the pool alone doesn't make it usable: register it with {@link setPool},
+   * grant it the token's mint/burn roles (`grantMintAndBurnRoles`), and configure its remote
+   * pools + rate limits before it can bridge. `LockReleaseTokenPool` also needs a pre-deployed
+   * `lockbox` and the pool authorized on it ({@link DeployLockReleaseTokenPoolParams}). The full
+   * sequence: {@link deployToken} → {@link deployLockbox} → {@link deployTokenPool} (passing the
+   * lockbox) → {@link authorizeLockboxCallers} (`addedCallers: [pool]`) → {@link setPool} →
+   * configure lanes.
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   * @throws {@link CCTTxFailedError} if the tx reverts, fails, or mines without an address
+   * @example
+   * ```typescript
+   * const { hash, contractAddress, verification } = await cct.deployTokenPool({
+   *   type: 'LockReleaseTokenPool',
+   *   token: '0xToken...',
+   *   localTokenDecimals: 18,
+   *   rmnProxy: '0xRmnProxy...',
+   *   router: '0xRouter...',
+   *   lockbox: '0xLockbox...', // required for LockReleaseTokenPool; must be a non-zero address
+   *   wallet,
+   * })
+   * ```
    */
-  generateUnsignedDeployPool(opts: DeployPoolParams): Promise<UnsignedEVMTx> {
-    return this.#deployPool.generate(this.chain, opts)
+  deployTokenPool(opts: EVMExecuteParams<DeployTokenPoolParams>): Promise<DeployResult> {
+    return this.#deployTokenPool.execute(this.chain, opts)
   }
+
   /**
-   * Deploys a CCIP token pool, signing with `opts.wallet`; returns the `poolAddress`.
-   * For `lock-release`, auto-deploys an `ERC20LockBox` and authorizes the pool on it.
+   * Builds an unsigned `ERC20LockBox` (v2.0.0) deployment tx (for multisig / offline signing).
+   * A lockbox escrows a single `token` for `LockReleaseTokenPool`s. The deployed address is
+   * only known once mined, so it is NOT returned here — use {@link deployLockbox} to receive
+   * `{ hash, contractAddress, verification }`.
+   * @remarks Deploy the lockbox before its pool, then authorize the pool on it with
+   * {@link authorizeLockboxCallers} before the pool can lock/release.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedDeployLockbox({
+   *   token: '0xToken...', // must be non-zero; the same token the LockReleaseTokenPool manages
+   *   sender: '0xDeployer...',
+   * })
+   * ```
    */
-  deployPool(opts: DeployPoolParams & { wallet: unknown }): Promise<DeployPoolResult> {
-    return this.#deployPool.execute(this.chain, opts)
+  generateUnsignedDeployLockbox(opts: DeployLockboxParams): Promise<UnsignedEVMTx> {
+    return this.#deployLockbox.generate(this.chain, opts)
   }
 
-  /** Builds an unsigned `TokenPoolFactory` pool-deploy tx for an existing token. Requires `futureOwner`. */
-  generateUnsignedDeployPoolViaFactory(opts: DeployPoolViaFactoryParams): Promise<UnsignedEVMTx> {
-    return this.#deployPoolViaFactory.generate(this.chain, opts)
-  }
-  /** Deploys a pool for an existing token via TokenPoolFactory 2.0.0 (CREATE2); returns the `poolAddress`. */
-  deployPoolViaFactory(
-    opts: DeployPoolViaFactoryParams & { wallet: unknown },
-  ): Promise<DeployPoolViaFactoryResult> {
-    return this.#deployPoolViaFactory.execute(this.chain, opts)
+  /**
+   * Deploys an `ERC20LockBox` (v2.0.0), signing + submitting with `opts.wallet`; resolves to the
+   * tx hash, the newly deployed lockbox address, and a `verification`
+   * ({@link ExplorerVerificationInput}) for verifying the source on a block explorer.
+   * @remarks Step two of the lock/release flow: {@link deployToken} → {@link deployLockbox} →
+   * {@link deployTokenPool} (passing this lockbox) → {@link authorizeLockboxCallers}
+   * (`addedCallers: [pool]`) → {@link setPool} → configure lanes.
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   * @throws {@link CCTTxFailedError} if the tx reverts, fails, or mines without an address
+   * @example
+   * ```typescript
+   * const { hash, contractAddress, verification } = await cct.deployLockbox({
+   *   token: '0xToken...',
+   *   wallet,
+   * })
+   * ```
+   */
+  deployLockbox(opts: EVMExecuteParams<DeployLockboxParams>): Promise<DeployResult> {
+    return this.#deployLockbox.execute(this.chain, opts)
   }
 
-  /** Builds an unsigned `TokenPoolFactory` token+pool-deploy tx. Requires `futureOwner`. */
-  generateUnsignedDeployTokenAndPoolViaFactory(
-    opts: DeployTokenAndPoolViaFactoryParams,
+  /**
+   * Builds an unsigned `ERC20LockBox` `applyAuthorizedCallerUpdates` tx (for multisig / offline
+   * signing) that adds/removes authorized callers. Authorize a `LockReleaseTokenPool` here so it
+   * can lock/release against the lockbox.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid, or if no caller is supplied
+   * @example
+   * ```typescript
+   * // `sender` must be the lockbox owner
+   * const unsigned = await cct.generateUnsignedAuthorizeLockboxCallers({
+   *   lockbox: '0xLockbox...',
+   *   addedCallers: ['0xPool...'], // the LockReleaseTokenPool to authorize
+   *   sender: '0xLockboxOwner...',
+   * })
+   * ```
+   */
+  generateUnsignedAuthorizeLockboxCallers(
+    opts: AuthorizeLockboxCallersParams,
   ): Promise<UnsignedEVMTx> {
-    return this.#deployTokenAndPoolViaFactory.generate(this.chain, opts)
-  }
-  /** Deploys a new token + its pool in one tx via TokenPoolFactory 2.0.0 (CREATE2); returns both addresses. */
-  deployTokenAndPoolViaFactory(
-    opts: DeployTokenAndPoolViaFactoryParams & { wallet: unknown },
-  ): Promise<DeployTokenAndPoolViaFactoryResult> {
-    return this.#deployTokenAndPoolViaFactory.execute(this.chain, opts)
+    return this.#authorizeLockboxCallers.generate(this.chain, opts)
   }
 
-  /** Builds unsigned `provideLiquidity` txs (`[approve, provide/deposit]`) for a lock-release pool. */
-  generateUnsignedProvideLiquidity(opts: ProvideLiquidityParams): Promise<UnsignedEVMTx> {
-    return this.#provideLiquidity.generate(this.chain, opts)
-  }
-  /** Provides liquidity to a lock-release pool, signing with `opts.wallet`. */
-  provideLiquidity(opts: ProvideLiquidityParams & { wallet: unknown }): Promise<TransactionHash> {
-    return this.#provideLiquidity.execute(this.chain, opts)
+  /**
+   * Adds/removes authorized callers on an `ERC20LockBox`, signing + submitting with `opts.wallet`
+   * (the lockbox owner). Authorize the `LockReleaseTokenPool` before it can lock/release.
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCTParamsInvalidError} if any param is invalid, or if no caller is supplied
+   * @throws {@link CCTTxFailedError} if the tx reverts or fails
+   * @example
+   * ```typescript
+   * // `wallet` must sign as the lockbox owner
+   * const { hash } = await cct.authorizeLockboxCallers({
+   *   lockbox: '0xLockbox...',
+   *   addedCallers: ['0xPool...'],
+   *   wallet,
+   * })
+   * ```
+   */
+  authorizeLockboxCallers(
+    opts: EVMExecuteParams<AuthorizeLockboxCallersParams>,
+  ): Promise<TransactionResult> {
+    return this.#authorizeLockboxCallers.execute(this.chain, opts)
   }
 
-  /** Reads the current MINTER/BURNER role holders on a CrossChainToken (read-only). */
-  getMintBurnRoles(tokenAddress: string): Promise<MintBurnRolesResult> {
-    return getMintBurnRoles(this.chain, tokenAddress)
+  /**
+   * Reads a pool's admin state, v1.5.0 through v2.0.0: the `owner` every pool write is gated on,
+   * the `rateLimitAdmin` role, its token/router and configured lanes — plus, on v2.0.0 pools, the
+   * `feeAdmin` role, the allowed finality window, and a lock/release pool's `lockBox`.
+   * @remarks The result is a union: `state.version === '2.0.0'` gates the roles and finality
+   * window that version added, and `state.type === 'LockReleaseTokenPool'` gates its `lockBox`
+   * (see the example). A v2.0.0 `SiloedLockReleaseTokenPool` is rejected — it escrows per remote
+   * chain (`getLockBox(uint64)`). For a legacy pool's `allowList` / `rebalancer`, proxy/USDC
+   * pools, or v1.5.0 `*AndProxy` pools, use `cct.chain.getTokenPoolConfig()`, the tolerant
+   * transfer-flow read. No pool version exposes a pending-owner getter, so a proposed owner is
+   * not readable here.
+   * @remarks The Solana counterpart, `SolanaTokenManager.getTokenPoolState`, returns a different
+   * shape: its fields nest under `state.config` where these are flat, it spells `token` /
+   * `tokenDecimals` / `rmnProxy` as `config.mint` / `config.decimals` / `config.rmnRemote`, and its
+   * `version` is the account-layout number, not this protocol semver. `owner`, `rateLimitAdmin`
+   * and `router` are named alike on both.
+   * @throws {@link CCTParamsInvalidError} if `poolAddress` is not a valid address
+   * @throws {@link CCTContractTypeInvalidError} if the pool is not a supported CCT pool type
+   * @throws {@link CCTContractVersionUnsupportedError} if the pool's version is not a known one
+   * @example
+   * ```typescript
+   * const state = await cct.getTokenPoolState({ poolAddress: '0xPool...' })
+   * // state.owner must sign transferOwnership / lane config; state.rateLimitAdmin may set rate limits
+   * if (state.version === '2.0.0') {
+   *   console.log(state.feeAdmin, state.finalityDepth)
+   *   if (state.type === 'LockReleaseTokenPool') console.log(state.lockBox)
+   * }
+   * ```
+   */
+  getTokenPoolState(opts: GetTokenPoolStateParams): Promise<GetTokenPoolStateResult> {
+    return this.#getTokenPoolState.query(this.chain, opts)
   }
 }
 
 export * from '../errors.ts'
-export type { DeployVerification, DeployVerificationTarget } from './deploy-verification.ts'
+export type { AcceptAdminParams } from './token-admin-registry/operations/accept-admin.ts'
+export type {
+  RegisterAdminMethod,
+  RegisterAdminParams,
+} from './token-admin-registry/operations/register-admin.ts'
+export type {
+  GetTokenAdminRegistryParams,
+  GetTokenAdminRegistryResult,
+} from './token-admin-registry/operations/get-token-admin-registry.ts'
 export type { SetPoolParams } from './token-admin-registry/operations/set-pool.ts'
+export type { TransferAdminParams } from './token-admin-registry/operations/transfer-admin.ts'
 export type {
-  EVMRegistrationMethod,
-  ProposeAdminRoleParams,
-} from './token-admin-registry/operations/propose-admin-role.ts'
-export type { AcceptAdminRoleParams } from './token-admin-registry/operations/accept-admin-role.ts'
-export type { TransferAdminRoleParams } from './token-admin-registry/operations/transfer-admin-role.ts'
+  GetSupportedTokensParams,
+  GetSupportedTokensResult,
+} from './token-admin-registry/operations/get-supported-tokens.ts'
+export type { DeployTokenParams } from './token/operations/deploy-token.ts'
 export type {
-  ApplyChainUpdatesParams,
-  RateLimiterConfig,
-  RemoteChainConfig,
-} from './pool/operations/apply-chain-updates.ts'
-export type { DeleteChainConfigParams } from './pool/operations/delete-chain-config.ts'
-export type { AppendRemotePoolAddressesParams } from './pool/operations/append-remote-pool-addresses.ts'
-export type { RemoveRemotePoolAddressesParams } from './pool/operations/remove-remote-pool-addresses.ts'
-export type { SetRateLimitAdminParams } from './pool/operations/set-rate-limit-admin.ts'
-export type { SetFeeAdminParams } from './pool/operations/set-fee-admin.ts'
-export type { SetAllowedFinalityConfigParams } from './pool/operations/set-allowed-finality-config.ts'
+  DeployTokenPoolParams,
+  DeployableTokenPoolType,
+} from './token-pool/operations/deploy-token-pool.ts'
 export type {
-  ChainRateLimiterConfig,
-  SetChainRateLimiterConfigParams,
-} from './pool/operations/set-chain-rate-limiter-config.ts'
-export type { SetTokenTransferFeeConfigParams } from './pool/operations/set-token-transfer-fee-config.ts'
-export type { TransferOwnershipParams } from './pool/operations/transfer-ownership.ts'
-export type { AcceptOwnershipParams } from './pool/operations/accept-ownership.ts'
+  BurnMintTokenPoolStateV2_0_0,
+  GetTokenPoolStateParams,
+  GetTokenPoolStateResult,
+  LegacyTokenPoolState,
+  LockReleaseTokenPoolStateV2_0_0,
+  TokenPoolStateV2_0_0,
+} from './token-pool/operations/get-token-pool-state.ts'
+export type { DeployLockboxParams } from './lockbox/operations/deploy-lockbox.ts'
+export type { AuthorizeLockboxCallersParams } from './lockbox/operations/authorize-callers.ts'
 export type {
-  GrantMintBurnAccessParams,
-  GrantMintBurnRole,
-} from './token/operations/grant-mint-burn-access.ts'
-export type {
-  RevokeMintBurnAccessParams,
-  RevokeMintBurnRole,
-} from './token/operations/revoke-mint-burn-access.ts'
-export type { DeployTokenParams, DeployTokenResult } from './token/operations/deploy-token.ts'
-export type {
-  DeployCrossChainPoolTokenParams,
-  DeployCrossChainPoolTokenResult,
-} from './token/operations/deploy-cross-chain-pool-token.ts'
-export type { ProvideLiquidityParams } from './token-pool/operations/provide-liquidity.ts'
-export type {
-  DeployPoolParams,
-  DeployPoolResult,
-  EVMPoolType,
-} from './token-pool/operations/deploy-pool.ts'
-export type {
-  DeployPoolViaFactoryParams,
-  DeployPoolViaFactoryResult,
-  FactoryPoolType,
-} from './token-pool/operations/deploy-pool-via-factory.ts'
-export type {
-  DeployTokenAndPoolViaFactoryParams,
-  DeployTokenAndPoolViaFactoryResult,
-} from './token-pool/operations/deploy-token-and-pool-via-factory.ts'
-export type { MintBurnRolesResult } from './token/get-mint-burn-roles.ts'
-export type { TransactionHash } from '../operation.ts'
+  DeployArtifact,
+  DeployResult,
+  EVMExecuteParams,
+  ExplorerVerificationInput,
+} from './operation.ts'
+export type { TransactionResult } from '../operation.ts'

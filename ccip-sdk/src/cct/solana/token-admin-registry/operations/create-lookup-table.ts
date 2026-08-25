@@ -1,11 +1,14 @@
-import { type TransactionInstruction, AddressLookupTableProgram, PublicKey } from '@solana/web3.js'
+import {
+  type PublicKey,
+  type TransactionInstruction,
+  AddressLookupTableProgram,
+} from '@solana/web3.js'
 
-import { CCIPWalletInvalidError } from '../../../../errors/index.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
-import { type UnsignedSolanaTx, isWallet } from '../../../../solana/types.ts'
+import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import type { TransactionHash } from '../../../operation.ts'
+import type { TransactionResult } from '../../../operation.ts'
 import {
   type SolanaExecuteParams,
   type SolanaGenerateParams,
@@ -15,8 +18,13 @@ import {
   buildCreateLookupTableInstruction,
   deriveCcipLookupTableAddresses,
 } from '../../programs/alt.ts'
+import type { PoolProgramRef } from '../../programs/token-pool.ts'
 import { submit } from '../../submit.ts'
-import { validatePublicKey } from '../../validate.ts'
+import {
+  parsePublicKey,
+  resolvePoolProgram,
+  validateAuthorityMatchesWallet,
+} from '../../validate.ts'
 
 const MAX_ALT_ADDRESSES = 256
 const EXTEND_CHUNK_SIZE = 30
@@ -25,15 +33,14 @@ type CreateLookupTableMode = 'createAndExtend' | 'createEmpty'
 
 /** Parameters shared by Solana TokenAdminRegistry `createLookupTable` generation and execution. */
 type CreateLookupTableParams =
-  | {
+  | (PoolProgramRef & {
       /** Defaults to `createAndExtend`; use `createEmpty` to skip extending the ALT. */
       mode?: Extract<CreateLookupTableMode, 'createAndExtend'>
       tokenAddress: string
-      poolProgramAddress: string
       additionalAddresses?: string[]
       /** ALT authority. Defaults to payer for unsigned generation and wallet public key for execute. */
       authority?: string
-    }
+    })
   | {
       /** Creates an empty ALT without extend instructions. */
       mode: Extract<CreateLookupTableMode, 'createEmpty'>
@@ -44,6 +51,17 @@ type CreateLookupTableParams =
 /** Parameters for unsigned Solana lookup table generation. */
 export type GenerateCreateLookupTableParams = SolanaGenerateParams<CreateLookupTableParams>
 
+type ParsedCreateLookupTableParams =
+  | { mode: 'createEmpty'; payer: PublicKey; authority: PublicKey }
+  | {
+      mode: 'createAndExtend'
+      payer: PublicKey
+      authority: PublicKey
+      tokenMint: PublicKey
+      poolProgram: PublicKey
+      additionalAddresses: PublicKey[]
+    }
+
 /** Unsigned create lookup table result, including the derived ALT address. */
 export type GenerateCreateLookupTableResult = UnsignedSolanaTx & {
   lookupTableAddress: string
@@ -53,44 +71,50 @@ export type GenerateCreateLookupTableResult = UnsignedSolanaTx & {
 export type ExecuteCreateLookupTableParams = SolanaExecuteParams<CreateLookupTableParams>
 
 /** Result of executing Solana TokenAdminRegistry `createLookupTable`. */
-export type ExecuteCreateLookupTableResult = TransactionHash & { lookupTableAddress: string }
+export type ExecuteCreateLookupTableResult = TransactionResult & { lookupTableAddress: string }
 
 /** Builds and submits Solana ALT create instructions, optionally with extend instructions. */
 export class CreateLookupTable extends SolanaOperation<
   CreateLookupTableParams,
   GenerateCreateLookupTableResult,
-  ExecuteCreateLookupTableResult
+  ParsedCreateLookupTableParams
 > {
   readonly name = 'createLookupTable'
 
-  /** Validates all public keys before any RPC. */
-  protected validate(params: GenerateCreateLookupTableParams): void {
-    validatePublicKey(this.name, 'payer', params.payer)
-    if (params.authority) validatePublicKey(this.name, 'authority', params.authority)
-    if (params.mode === 'createEmpty') return
+  /** Parses params before `buildUnsigned()` performs any RPC. */
+  protected override parse(params: GenerateCreateLookupTableParams): ParsedCreateLookupTableParams {
+    const payer = parsePublicKey(this.name, 'payer', params.payer)
+    const authority =
+      params.authority === undefined
+        ? payer
+        : parsePublicKey(this.name, 'authority', params.authority)
+    if (params.mode === 'createEmpty') return { mode: 'createEmpty', payer, authority }
 
-    validatePublicKey(this.name, 'tokenAddress', params.tokenAddress)
-    validatePublicKey(this.name, 'poolProgramAddress', params.poolProgramAddress)
-    for (const [i, address] of (params.additionalAddresses ?? []).entries()) {
-      validatePublicKey(this.name, `additionalAddresses[${i}]`, address)
+    return {
+      mode: 'createAndExtend',
+      payer,
+      authority,
+      tokenMint: parsePublicKey(this.name, 'tokenAddress', params.tokenAddress),
+      poolProgram: resolvePoolProgram(this.name, params),
+      additionalAddresses: (params.additionalAddresses ?? []).map((address, i) =>
+        parsePublicKey(this.name, `additionalAddresses[${i}]`, address),
+      ),
     }
   }
 
   /** Builds unsigned ALT create instructions, optionally with extend instructions. */
   protected async buildUnsigned(
     chain: SolanaChain,
-    opts: GenerateCreateLookupTableParams,
+    opts: ParsedCreateLookupTableParams,
   ): Promise<GenerateCreateLookupTableResult> {
-    const payer = new PublicKey(opts.payer)
-    const authority = new PublicKey(opts.authority ?? opts.payer)
-
-    const { instruction: createIx, lookupTableAddress } = buildCreateLookupTableInstruction({
-      authority,
-      payer,
-      recentSlot: await chain.connection.getSlot('finalized'),
-    })
+    const { payer, authority } = opts
 
     if (opts.mode === 'createEmpty') {
+      const { instruction: createIx, lookupTableAddress } = buildCreateLookupTableInstruction({
+        authority,
+        payer,
+        recentSlot: await chain.connection.getSlot('finalized'),
+      })
       chain.logger.debug(
         `${this.name}: mode = createEmpty, lookupTable = ${lookupTableAddress.toBase58()}`,
       )
@@ -102,15 +126,18 @@ export class CreateLookupTable extends SolanaOperation<
       }
     }
 
-    const poolProgram = new PublicKey(opts.poolProgramAddress)
-    const tokenMint = new PublicKey(opts.tokenAddress)
-    const additionalAddresses = (opts.additionalAddresses ?? []).map((a) => new PublicKey(a))
+    const { poolProgram, tokenMint, additionalAddresses } = opts
+
+    const { instruction: createIx, lookupTableAddress } = buildCreateLookupTableInstruction({
+      authority,
+      payer,
+      recentSlot: await chain.connection.getSlot('finalized'),
+    })
 
     const ccipAddresses = await deriveCcipLookupTableAddresses(chain, {
       lookupTableAddress,
       tokenMint,
       poolProgram,
-      authority,
     })
     const addresses = [...ccipAddresses, ...additionalAddresses]
 
@@ -145,37 +172,24 @@ export class CreateLookupTable extends SolanaOperation<
     }
   }
 
-  /** Adds the generated lookup table address to the execute result. */
-  protected override resultFromGenerated(
-    hash: TransactionHash,
-    tx: GenerateCreateLookupTableResult,
-  ): ExecuteCreateLookupTableResult {
-    return { ...hash, lookupTableAddress: tx.lookupTableAddress }
-  }
-
   /** Generate, sign, simulate, send, and confirm with wallet.publicKey as payer. */
   override async execute(
     chain: SolanaChain,
     params: ExecuteCreateLookupTableParams,
   ): Promise<ExecuteCreateLookupTableResult> {
-    const { wallet, computeUnits, ...rest } = params
-    if (!isWallet(wallet)) throw new CCIPWalletInvalidError(wallet)
+    const { wallet, computeUnits, parsed } = this.prepareWalletExecution(params)
 
-    const payer = wallet.publicKey.toBase58()
-    if (
-      params.mode !== 'createEmpty' &&
-      params.authority &&
-      !new PublicKey(params.authority).equals(wallet.publicKey)
-    ) {
-      throw new CCTParamsInvalidError(
+    if (params.mode !== 'createEmpty' && params.authority !== undefined) {
+      validateAuthorityMatchesWallet(
         this.name,
-        'authority',
-        "createAndExtend requires authority to be the executing wallet. Use mode: 'createEmpty' for vault-owned ALTs.",
+        parsed.authority,
+        wallet.publicKey,
+        "createAndExtend requires authority to be the executing wallet. Use 'createEmpty' mode for vault-owned ALTs.",
       )
     }
 
-    const tx = await this.generate(chain, { ...rest, payer })
+    const tx = await this.buildUnsigned(chain, parsed)
     const hash = await submit(chain, wallet, tx, this.name, computeUnits)
-    return this.resultFromGenerated(hash, tx)
+    return { ...hash, lookupTableAddress: tx.lookupTableAddress }
   }
 }

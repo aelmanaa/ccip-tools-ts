@@ -11,9 +11,10 @@ import {
   isHexString,
 } from 'ethers'
 
-import { defaultAbiCoder, interfaces } from './const.ts'
+import { defaultAbiCoder, getPoolErrorInterfaces, interfaces } from './const.ts'
 import { decodeExtraArgs } from '../extra-args.ts'
-import { ChainFamily, networkInfo } from '../networks.ts'
+import { decodeMessageV1 } from '../messages.ts'
+import { ChainFamily } from '../networks.ts'
 
 /**
  * Get error data from an error object, if possible
@@ -103,6 +104,24 @@ export function parseWithFragment(
       // test all abis
     }
   }
+  if (!res) {
+    // fall through to the error-only interfaces of the specialized pool contracts (lazily built;
+    // they carry no functions/events, only revert-decoding coverage)
+    for (const [name, iface] of Object.entries(getPoolErrorInterfaces())) {
+      try {
+        const error = iface.getError(isHexString(selector) ? dataSlice(selector, 0, 4) : selector)
+        if (error) {
+          if (!data && isHexString(selector) && dataLength(selector) > 4) {
+            ;[selector, data] = [dataSlice(selector, 0, 4), dataSlice(selector, 4)]
+          }
+          res = [error, name] as const
+          break
+        }
+      } catch (_) {
+        // test all error-only abis
+      }
+    }
+  }
   if (res && data) {
     let parsed
     const [fragment] = res
@@ -156,16 +175,6 @@ export function recursiveParseError(
     )
   }
   if (!isBytesLike(data) || [0, 20].includes(dataLength(data))) {
-    if (key.match(/[Ss]el(ector)?$/) && typeof data === 'bigint') {
-      // try to include networkName for chainSelectors
-      try {
-        data = `${data} [${networkInfo(data).name}]`
-      } catch {
-        // ignore
-      }
-    } else if (key.match(/\berr$/) && data === '0x') {
-      data = '0x [possibly out-of-gas or abi.decode error]'
-    }
     return [[key, data]]
   }
   try {
@@ -198,13 +207,19 @@ export function recursiveParseError(
 export function parseData(data: unknown): Record<string, unknown> | undefined {
   if (!data) return
   if (isHexString(data)) {
-    const parsed = recursiveParseError('', data)
-    if (parsed.length === 1 && parsed[0]![1] === data) return
-    // like Object.fromEntries, but on duplicated keys, add a space to first occurrence, to avoid overwriting and keep all values
-    return parsed.reduceRight(
-      (acc, [k, v]) => ({ ...{ [k && k in acc ? k + ' ' : k]: v }, ...acc }),
-      {},
-    )
+    let parsed
+    try {
+      parsed = decodeMessageV1(data)
+      return parsed
+    } catch {
+      parsed = recursiveParseError('', data)
+      if (parsed.length === 1 && parsed[0]![1] === data) return
+      // like Object.fromEntries, but on duplicated keys, add a space to first occurrence, to avoid overwriting and keep all values
+      return parsed.reduceRight(
+        (acc, [k, v]) => ({ ...{ [k && k in acc ? k + ' ' : k]: v }, ...acc }),
+        {},
+      )
+    }
   }
   if (typeof data !== 'object') return
   // ethers tx/simulation/call errors

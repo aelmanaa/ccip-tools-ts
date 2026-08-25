@@ -1,13 +1,13 @@
 /**
  * Shared sign-and-submit pipeline for EVM CCT operations. Maps broadcast and
  * confirmation failures to {@link CCTTxFailedError} / {@link CCTTxNotConfirmedError},
- * and on-chain reverts to {@link CCIPExecTxRevertedError}.
+ * and on-chain reverts to {@link CCIPExecTxRevertedError}. Operations map the
+ * confirmed `{ response, receipt }` to their own result shape.
  *
  * @packageDocumentation
  */
 
 import {
-  type Signer,
   type TransactionReceipt,
   type TransactionRequest,
   type TransactionResponse,
@@ -18,7 +18,6 @@ import { CCIPExecTxRevertedError, CCIPWalletInvalidError } from '../../errors/in
 import { type EVMChain, isSigner, submitTransaction } from '../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../evm/types.ts'
 import { CCTTxFailedError, CCTTxNotConfirmedError } from '../errors.ts'
-import type { TransactionHash } from '../operation.ts'
 
 /** Max ms to wait for one confirmation before throwing {@link CCTTxNotConfirmedError}. */
 const CONFIRM_TIMEOUT_MS = 60_000
@@ -31,14 +30,12 @@ function isTransientError(error: unknown): boolean {
 }
 
 /**
- * Signs and submits every transaction in `unsigned` sequentially, waiting for one
- * confirmation each, and returns the hash of the last confirmed transaction.
- * Most ops are single-tx; some (e.g. append/removeRemotePoolAddresses, per-chain
- * setChainRateLimiterConfig on v1.6) emit one tx per item. `operation` labels logs
- * and error context. A failure mid-sequence throws, leaving already-mined txs applied.
+ * Signs and submits the first transaction in `unsigned`, then waits for one confirmation.
+ * Returns the broadcast `response` and mined `receipt`; callers map these to their
+ * own result shape (see {@link EVMOperation.execute}).
  * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
  * @throws {@link CCTTxFailedError} if submission fails before broadcast
- * @throws {@link CCIPExecTxRevertedError} if a tx reverts on-chain
+ * @throws {@link CCIPExecTxRevertedError} if the tx reverts on-chain
  * @throws {@link CCTTxNotConfirmedError} if broadcast but not confirmed in time
  */
 export async function submit(
@@ -46,49 +43,18 @@ export async function submit(
   wallet: unknown,
   unsigned: UnsignedEVMTx,
   operation: string,
-): Promise<TransactionHash> {
-  const { hash } = await submitForReceipt(chain, wallet, unsigned, operation)
-  return { hash }
-}
-
-/**
- * Like {@link submit}, but also returns the last transaction's mined receipt —
- * used by deploy ops that need `receipt.contractAddress`. Same sequential
- * multi-tx semantics and error mapping.
- */
-export async function submitForReceipt(
-  chain: EVMChain,
-  wallet: unknown,
-  unsigned: UnsignedEVMTx,
-  operation: string,
-): Promise<TransactionHash & { receipt: TransactionReceipt }> {
+): Promise<{ response: TransactionResponse; receipt: TransactionReceipt }> {
   if (!isSigner(wallet)) throw new CCIPWalletInvalidError(wallet)
   const sender = await wallet.getAddress()
-
-  let last: (TransactionHash & { receipt: TransactionReceipt }) | undefined
-  const total = unsigned.transactions.length
-  for (let i = 0; i < total; i++) {
-    const label = total > 1 ? `${operation} [${i + 1}/${total}]` : operation
-    last = await submitOne(chain, wallet, sender, unsigned.transactions[i]!, label)
-  }
-  if (!last) throw new CCTTxFailedError(operation, 'no transactions to submit')
-  return last
-}
-
-/** Signs, submits, and confirms one transaction; shared by every op. */
-async function submitOne(
-  chain: EVMChain,
-  wallet: Signer,
-  sender: string,
-  txRequest: TransactionRequest,
-  operation: string,
-): Promise<TransactionHash & { receipt: TransactionReceipt }> {
   chain.logger.debug(`${operation}: submitting...`)
+
+  const [first] = unsigned.transactions
+  if (!first) throw new CCTTxFailedError(operation, 'no transaction to submit')
 
   let response: TransactionResponse
   let nonceConsumed = false
   try {
-    let tx: TransactionRequest = { ...txRequest }
+    let tx: TransactionRequest = { ...first }
     tx.from = undefined // drop any builder-set sender before populate, else ethers throws on a from/signer mismatch
     if (tx.nonce == null) {
       tx.nonce = await chain.nextNonce(sender)
@@ -107,7 +73,7 @@ async function submitOne(
 
   chain.logger.debug(`${operation}: waiting for confirmation, tx =`, response.hash)
 
-  let receipt
+  let receipt: TransactionReceipt | null
   try {
     receipt = await response.wait(1, CONFIRM_TIMEOUT_MS)
   } catch (error) {
@@ -125,5 +91,5 @@ async function submitOne(
   if (!receipt) throw new CCTTxNotConfirmedError(operation, response.hash)
 
   chain.logger.info(`${operation}: confirmed, tx =`, response.hash)
-  return { hash: response.hash, receipt }
+  return { response, receipt }
 }

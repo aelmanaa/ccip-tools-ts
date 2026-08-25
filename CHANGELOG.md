@@ -7,8 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-08-19
+
+- SDK: support a new `typeAndVersions?: (string | RegExp)[]` filter option for `getLogs`, emitting only logs from addresses matching type string or typeAndVersion regexp
+- EVM: gracefully handle RPCs limiting the number of `topics` filters in getLogs
+- EVM: improve `USDCTokenPoolProxy 2.0.0` multiple `getPools()` support
+- Aptos: support multiple topics in `getLogs`
+- Aptos: always format addresses as short hex (strip leading zeros)
+- Solana: preview support for latest v2 contracts
+- TON: improve logs masterchain blockNumber fetching
+- Canton: support v2 apis
+
+## [1.11.0] - 2026-08-07
+
 - SDK: `sendMessage` and `execute` methods now accept `opts.txGasLimit`, skips estimation
 - CLI: `send` and `manual-exec --tx-gas-limit` option to force gas limit for txs
+- SDK/CLI: add `q` free-text filter to `searchMessages` and `-q` to `search messages`; matches token and pool addresses, tx hashes, messageId, sender and receiver
+- SDK: `searchAllMessages` accepts `options.cursor` to resume from a previous page
+- CLI: `search messages --cursor` resumes an earlier run; when `--limit` caps the results, the next cursor is printed to stderr
+- SDK/CLI: `CCIPAPIClient.getLaneLatency` accepts `options.sourceTokenAddress`, exposed as `lane-latency --source-token`
+- SDK: **Breaking**: lane latency `INSUFFICIENT_DATA` now throws `CCIPLaneLatencyInsufficientDataError` instead of `CCIPHttpError`
+- SDK: `estimateReceiveExecution` now preflights the whole delivery pre-send: requested finality via the destination OffRamp's `getCCVsForMessage`, OffRamp lane gates, inbound rate limits, and, for token transfers, each destination pool's `releaseOrMint`
+  - catches unregistered tokens, mis-wired source pools, missing mint/burn authority, RMN curses and insufficient liquidity, which previously only surfaced after the message stranded on the destination
+  - source pools are simulated too, so the check consumes the same post-fee amount and `destPoolData` the OnRamp would emit
+  - new `simulateReleaseOrMint`, `simulateLockOrBurn`, `classifyPoolRevert`, `isTransientReleaseOrMintRevert`, and errors `CCIPDestExecutionRevertError`, `CCIPDestSimulationUnavailableError`, `CCIPSourcePoolRevertError`
+- CLI: `send` warns and continues when the preflight is inconclusive (destination RPC failure, attestation-consuming pool) instead of failing; `--estimate-gas-limit`/`--only-estimate` still make it fatal
+- CLI: `send --only-ccvs` prints the destination-required CCV set (`requiredCCVs`, `optionalCCVs`, `optionalThreshold`) and exits, without sending
+- SDK: `getRequiredCCVs` exported to read that set programmatically, plus `encodeMessageV1`/`encodeTokenTransferV1` for the message encoding it uses
+- EVM: `getOffRampConfig` now also returns `rmn`, when the OffRamp's RMNProxy is set
 
 ## [1.10.0] - 2026-06-30
 
