@@ -89,10 +89,7 @@ export type DeployTokenAndPoolViaFactoryResult = TransactionHash & {
 }
 
 /** Deploys a new CrossChainToken and its pool in one tx via `TokenPoolFactory 2.0.0`. */
-export class DeployTokenAndPoolViaFactory extends EVMOperation<
-  DeployTokenAndPoolViaFactoryParams,
-  DeployTokenAndPoolViaFactoryResult
-> {
+export class DeployTokenAndPoolViaFactory extends EVMOperation<DeployTokenAndPoolViaFactoryParams> {
   readonly name = 'deployTokenAndPoolViaFactory'
 
   /** Validates factory-deploy params (`futureOwner` required on the unsigned path). */

@@ -11,6 +11,12 @@ import type { ChainTransaction } from '../types.ts'
 export type TransactionResult = Pick<ChainTransaction, 'hash'>
 
 /**
+ * Alias of {@link TransactionResult}, retained for the productized CCT ops
+ * (EVM/Solana/Aptos facades) that were authored against this name.
+ */
+export type TransactionHash = TransactionResult
+
+/**
  * Execute params for a CCT write: an op's own params plus the signing `wallet`.
  * Families extend with submit-time extras (e.g. Solana's `computeUnits`).
  */

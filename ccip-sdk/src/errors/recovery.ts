@@ -229,6 +229,116 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
     'This operation is not available at the contract version in error.context. Verify the contract version supports it.',
   CCT_DATA_DECODE_FAILED:
     'Ensure the account belongs to a compatible CCT program and uses the expected data layout.',
+
+  // CCT productized operations (propose-admin facade: EVM/Solana/Aptos ops + verify subsystem)
+  TOKEN_DEPLOY_PARAMS_INVALID:
+    'Verify the token deploy parameters (name, symbol, decimals, supply). See error.context for the field and reason.',
+  TOKEN_DEPLOY_FAILED:
+    'Token deployment failed. Check the signer has funds and the constructor arguments are valid.',
+  POOL_DEPLOY_PARAMS_INVALID:
+    'Verify the pool deploy parameters (pool type, token, router, decimals). See error.context for the field and reason.',
+  POOL_DEPLOY_FAILED:
+    'Pool deployment failed. Check the signer has funds and the router/token addresses are correct.',
+  POOL_NOT_INITIALIZED:
+    'The pool is not initialized. Initialize its chain/remote configuration before this operation.',
+  PROPOSE_ADMIN_ROLE_PARAMS_INVALID:
+    'Verify the propose-admin parameters (token, registry module, registration method). See error.context.',
+  PROPOSE_ADMIN_ROLE_FAILED:
+    'Proposing the admin failed. Ensure the caller holds the token authority required by the registration method.',
+  ACCEPT_ADMIN_ROLE_PARAMS_INVALID:
+    'Verify the accept-admin parameters. See error.context for the field and reason.',
+  ACCEPT_ADMIN_ROLE_FAILED:
+    'Accepting the admin role failed. Ensure the caller is the pending administrator for this token.',
+  TRANSFER_ADMIN_ROLE_PARAMS_INVALID:
+    'Verify the transfer-admin parameters (token, new admin). See error.context for the field and reason.',
+  TRANSFER_ADMIN_ROLE_FAILED:
+    'Transferring the admin role failed. Ensure the caller is the current registry administrator.',
+  APPLY_CHAIN_UPDATES_PARAMS_INVALID:
+    'Verify the chain-update parameters (remote selectors, pool addresses, rate limits). See error.context.',
+  APPLY_CHAIN_UPDATES_FAILED:
+    'Applying chain updates failed. Ensure the caller owns the pool and the remote configuration is valid.',
+  APPEND_REMOTE_POOL_ADDRESSES_PARAMS_INVALID:
+    'Verify the remote chain selector and pool addresses. See error.context for the field and reason.',
+  APPEND_REMOTE_POOL_ADDRESSES_FAILED:
+    'Appending remote pool addresses failed. Ensure the caller owns the pool and the lane is configured.',
+  DELETE_CHAIN_CONFIG_PARAMS_INVALID:
+    'Verify the pool address and remote chain selector. See error.context for the field and reason.',
+  DELETE_CHAIN_CONFIG_FAILED:
+    'Deleting the chain config failed. Ensure the caller owns the pool and the chain is configured.',
+  REMOVE_REMOTE_POOL_ADDRESSES_PARAMS_INVALID:
+    'Verify the remote chain selector and pool addresses. See error.context for the field and reason.',
+  REMOVE_REMOTE_POOL_ADDRESSES_FAILED:
+    'Removing remote pool addresses failed. Ensure the caller owns the pool and the addresses are configured.',
+  SET_RATE_LIMITER_CONFIG_PARAMS_INVALID:
+    'Verify the rate limiter parameters (capacity, rate, enabled). See error.context for the field and reason.',
+  SET_RATE_LIMITER_CONFIG_FAILED:
+    'Setting the rate limiter config failed. Ensure the caller is the pool owner or rate-limit admin.',
+  SET_RATE_LIMIT_ADMIN_PARAMS_INVALID:
+    'Verify the pool address and rate-limit admin address. See error.context for the field and reason.',
+  SET_RATE_LIMIT_ADMIN_FAILED:
+    'Setting the rate-limit admin failed. Ensure the caller is the pool owner.',
+  PROVIDE_LIQUIDITY_PARAMS_INVALID:
+    'Verify the provide-liquidity parameters (pool, amount). Lock-release pools only. See error.context.',
+  PROVIDE_LIQUIDITY_FAILED:
+    'Providing liquidity failed. Ensure the caller is authorized on the lockbox and holds sufficient token balance.',
+  SET_TOKEN_TRANSFER_FEE_CONFIG_PARAMS_INVALID:
+    'Verify the token transfer fee parameters. EVM v2.0+ pools only. See error.context.',
+  SET_TOKEN_TRANSFER_FEE_CONFIG_FAILED:
+    'Setting the token transfer fee config failed. Ensure the caller is the pool fee admin (v2.0+).',
+  SET_ALLOWED_FINALITY_CONFIG_PARAMS_INVALID:
+    'Verify the allowed finality parameters. EVM v2.0+ pools only. See error.context.',
+  SET_ALLOWED_FINALITY_CONFIG_FAILED:
+    'Setting the allowed finality config failed. Ensure the caller owns the pool (v2.0+).',
+  SET_FEE_ADMIN_PARAMS_INVALID:
+    'Verify the pool address and fee admin address. EVM v2.0+ pools only. See error.context.',
+  SET_FEE_ADMIN_FAILED:
+    'Setting the fee admin failed. Ensure the caller is the pool owner (v2.0+).',
+  CREATE_POOL_MULTISIG_PARAMS_INVALID:
+    'Verify the multisig parameters (mint, pool program, signers, threshold). See error.context.',
+  CREATE_POOL_MULTISIG_FAILED:
+    'Creating the pool mint-authority multisig failed. Ensure the payer has funds and the program id is correct.',
+  TRANSFER_MINT_AUTHORITY_PARAMS_INVALID:
+    'Verify the mint and new mint-authority addresses. See error.context for the field and reason.',
+  TRANSFER_MINT_AUTHORITY_FAILED:
+    'Transferring the mint authority failed. Ensure the signer is the current mint authority.',
+  GRANT_MINT_BURN_ACCESS_PARAMS_INVALID:
+    'Verify the token and authority addresses and the role. See error.context for the field and reason.',
+  GRANT_MINT_BURN_ACCESS_FAILED:
+    'Granting mint/burn access failed. Ensure the caller administers the token roles.',
+  REVOKE_MINT_BURN_ACCESS_PARAMS_INVALID:
+    'Verify the token and authority addresses and the role. See error.context for the field and reason.',
+  REVOKE_MINT_BURN_ACCESS_FAILED:
+    'Revoking mint/burn access failed. Ensure the caller administers the token roles.',
+  CREATE_POOL_TOKEN_ACCOUNT_PARAMS_INVALID:
+    'Verify the token mint and pool addresses. See error.context for the field and reason.',
+  CREATE_POOL_TOKEN_ACCOUNT_FAILED:
+    'Creating the pool token account failed. Ensure the pool state account exists on-chain and the payer has funds.',
+  CREATE_TOKEN_ALT_PARAMS_INVALID:
+    'Verify the address lookup table parameters. See error.context for the field and reason.',
+  CREATE_TOKEN_ALT_FAILED:
+    'Creating the token address lookup table failed. Ensure the payer has funds and the accounts are valid.',
+  SET_POOL_PARAMS_INVALID:
+    'Verify the token and pool addresses. Pass the zero address to delist. See error.context.',
+  SET_POOL_FAILED:
+    'Setting the pool failed. Ensure the caller is the token registry administrator.',
+  TRANSFER_OWNERSHIP_PARAMS_INVALID:
+    'Verify the pool and new-owner addresses. See error.context for the field and reason.',
+  TRANSFER_OWNERSHIP_FAILED:
+    'Transferring pool ownership failed. Ensure the caller is the current pool owner.',
+  ACCEPT_OWNERSHIP_PARAMS_INVALID:
+    'Verify the pool address. See error.context for the field and reason.',
+  ACCEPT_OWNERSHIP_FAILED:
+    'Accepting pool ownership failed. Ensure the caller is the proposed (pending) owner.',
+  EXECUTE_OWNERSHIP_TRANSFER_PARAMS_INVALID:
+    'Verify the pool address. Aptos ownership-transfer finalization. See error.context.',
+  EXECUTE_OWNERSHIP_TRANSFER_FAILED:
+    'Executing the ownership transfer failed. Ensure the caller is the pool owner completing the handoff.',
+  CONTRACT_VERIFICATION_ERROR:
+    'Contract source verification errored. Check the explorer API key, network, and compiler settings.',
+  CONTRACT_VERIFICATION_FAILED:
+    'Contract source verification failed. Confirm the source, compiler version, and constructor args match the deployment.',
+  VERIFICATION_CONTRACT_UNKNOWN:
+    'The contract is not a known verifiable type. Verify the contract name/kind is supported by the verifier.',
 }
 
 /** Returns default recovery hint for error code, or undefined if none. */

@@ -3,9 +3,9 @@ import { describe, it } from 'node:test'
 
 import { Keypair } from '@solana/web3.js'
 
+import { RevokeMintBurnAccess } from './revoke-mint-burn-access.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { RevokeMintBurnAccess } from './revoke-mint-burn-access.ts'
 
 const PAYER = Keypair.generate().publicKey.toBase58()
 const TOKEN = Keypair.generate().publicKey.toBase58()

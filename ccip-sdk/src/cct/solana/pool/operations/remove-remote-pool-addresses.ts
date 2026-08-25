@@ -1,5 +1,11 @@
 import { PublicKey } from '@solana/web3.js'
 
+import {
+  type RateLimiterConfig,
+  buildApplyChainUpdatesInstructions,
+  encodeRemoteAddress,
+  validateSelectorWithAddresses,
+} from './common.ts'
 import type { RateLimiterState } from '../../../../chain.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
@@ -12,12 +18,6 @@ import {
   SolanaOperation,
 } from '../../operation.ts'
 import { validatePublicKey } from '../../validate.ts'
-import {
-  type RateLimiterConfig,
-  buildApplyChainUpdatesInstructions,
-  encodeRemoteAddress,
-  validateSelectorWithAddresses,
-} from './common.ts'
 
 /** Parameters shared by token-pool `removeRemotePoolAddresses` generation and execution. */
 type RemoveRemotePoolAddressesParams = {
@@ -64,7 +64,7 @@ export class RemoveRemotePoolAddresses extends SolanaOperation<RemoveRemotePoolA
   readonly name = 'removeRemotePoolAddresses'
 
   /** Validates addresses and selector before any RPC. */
-  protected validate(params: GenerateRemoveRemotePoolAddressesParams): void {
+  protected override validate(params: GenerateRemoveRemotePoolAddressesParams): void {
     validatePublicKey(this.name, 'poolAddress', params.poolAddress)
     validatePublicKey(this.name, 'payer', params.payer)
     if (params.authority) validatePublicKey(this.name, 'authority', params.authority)

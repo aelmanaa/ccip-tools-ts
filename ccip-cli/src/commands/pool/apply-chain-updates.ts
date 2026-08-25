@@ -77,7 +77,21 @@ export const builder = (yargs: Argv) =>
     })
     .option('pool-address', {
       type: 'string',
-      describe: 'Local pool address',
+      describe: 'Local pool address (EVM / Aptos)',
+    })
+    .option('token-address', {
+      type: 'string',
+      describe: 'Local token mint address (Solana only; the state PDA is derived from it)',
+    })
+    .option('pool-type', {
+      type: 'string',
+      choices: ['burn-mint', 'lock-release'] as const,
+      describe:
+        'Canonical Solana pool program to target (Solana only; or use --pool-program-address)',
+    })
+    .option('pool-program-address', {
+      type: 'string',
+      describe: 'Custom Solana token-pool program id (Solana only; alternative to --pool-type)',
     })
     .option('config', {
       type: 'string',
@@ -91,8 +105,12 @@ export const builder = (yargs: Argv) =>
       if (!argv.generateConfig) {
         if (!argv.network)
           throw new CCIPArgumentInvalidError('network', 'required argument missing')
-        if (!argv.poolAddress)
-          throw new CCIPArgumentInvalidError('pool-address', 'required argument missing')
+        // EVM/Aptos identify the pool by address; Solana identifies it by token mint + pool program.
+        if (!argv.poolAddress && !argv.tokenAddress)
+          throw new CCIPArgumentInvalidError(
+            'pool-address',
+            'required argument missing (use --pool-address for EVM/Aptos, or --token-address + --pool-type/--pool-program-address for Solana)',
+          )
       }
       return true
     })
@@ -187,26 +205,88 @@ function configToParams(poolAddress: string, config: ConfigFile): ApplyChainUpda
   }
 }
 
-/** Calls applyChainUpdates on the appropriate chain-family facade, normalizing to `{ hash }`. */
+/** Maps an EVM/CLI `RateLimiterConfig` to Solana's `RateLimitConfig` (isEnabled becomes enabled). */
+function toSolanaRateLimit(rl?: RateLimiterConfig) {
+  return (rl?.isEnabled ?? false)
+    ? { enabled: true as const, capacity: BigInt(rl!.capacity), rate: BigInt(rl!.rate) }
+    : {
+        enabled: false as const,
+        capacity: BigInt(rl?.capacity ?? '0'),
+        rate: BigInt(rl?.rate ?? '0'),
+      }
+}
+
+/**
+ * Builds cct-sdk's Solana `applyChainUpdates` params from the config + CLI args. The Solana op
+ * derives the pool state PDA from the pool program + token mint, so it needs `tokenAddress` (mint)
+ * and a pool-program ref (canonical `poolType` or a custom `poolProgramAddress`) rather than a
+ * pool address. Each `chainsToAdd` entry must carry `remoteTokenDecimals` (required by the account).
+ */
+function configToSolanaOpts(argv: ApplyArgv, config: ConfigFile, wallet: unknown) {
+  if (!argv.tokenAddress)
+    throw new CCIPArgumentInvalidError('token-address', 'required for Solana apply-chain-updates')
+  if (!argv.poolProgramAddress && !argv.poolType)
+    throw new CCIPArgumentInvalidError(
+      'pool-type',
+      'Solana requires --pool-type (burn-mint|lock-release) or --pool-program-address',
+    )
+  const poolRef = argv.poolProgramAddress
+    ? { poolProgramAddress: argv.poolProgramAddress }
+    : { poolType: argv.poolType as 'burn-mint' | 'lock-release' }
+
+  const chainsToAdd = (config.chainsToAdd ?? []).map((c, i) => {
+    if (c.remoteTokenDecimals == null)
+      throw new CCIPArgumentInvalidError(
+        `chainsToAdd[${i}].remoteTokenDecimals`,
+        'required for Solana (the pool account stores remote token decimals)',
+      )
+    return {
+      remoteChainSelector: resolveChainSelector(c.remoteChainSelector),
+      remoteTokenAddress: c.remoteTokenAddress,
+      remotePoolAddresses: c.remotePoolAddresses,
+      remoteTokenDecimals: c.remoteTokenDecimals,
+      inboundRateLimiterConfig: toSolanaRateLimit(c.inboundRateLimiterConfig),
+      outboundRateLimiterConfig: toSolanaRateLimit(c.outboundRateLimiterConfig),
+    }
+  })
+
+  return {
+    ...poolRef,
+    tokenAddress: argv.tokenAddress,
+    chainsToAdd,
+    remoteChainSelectorsToRemove: (config.chainsToRemove ?? []).map(resolveChainSelector),
+    wallet,
+  }
+}
+
+/**
+ * Calls applyChainUpdates on the appropriate chain-family facade, normalizing to `{ hash }`.
+ * Solana batches into multiple transactions, so `hashes` carries every signature.
+ */
 async function applyForChain(
   chain: Chain,
   wallet: unknown,
-  params: ApplyChainUpdatesParams,
-): Promise<{ hash: string }> {
+  argv: ApplyArgv,
+  config: ConfigFile,
+): Promise<{ hash: string; hashes?: string[] }> {
   switch (chain.network.family) {
     case ChainFamily.EVM: {
       const evmChain = chain as EVMChain
       const mgr = EVMTokenManager.fromChain(evmChain)
+      const params = configToParams(argv.poolAddress!, config)
       return mgr.applyChainUpdates({ ...params, wallet })
     }
     case ChainFamily.Solana: {
-      const solanaChain = chain as SolanaChain
-      const mgr = SolanaTokenManager.fromChain(solanaChain)
-      return mgr.applyChainUpdates({ ...params, wallet })
+      const mgr = SolanaTokenManager.fromChain(chain as unknown as SolanaChain)
+      const { hashes } = await mgr.applyChainUpdates(configToSolanaOpts(argv, config, wallet))
+      // Solana splits chain updates across several transactions; report the last as the shared
+      // `hash` while surfacing every signature via `hashes`.
+      return { hash: hashes[hashes.length - 1] ?? '', hashes }
     }
     case ChainFamily.Aptos: {
       const aptosChain = chain as AptosChain
       const mgr = AptosTokenManager.fromChain(aptosChain)
+      const params = configToParams(argv.poolAddress!, config)
       const { hash } = await mgr.applyChainUpdates({ ...params, wallet })
       return { hash }
     }
@@ -222,21 +302,24 @@ async function doApplyChainUpdates(ctx: Ctx, argv: ApplyArgv) {
   const chain = await getChain(networkName)
 
   const config = await readConfig(argv)
-  const params = configToParams(argv.poolAddress!, config)
+  const addCount = (config.chainsToAdd ?? []).length
+  const removeCount = (config.chainsToRemove ?? []).length
 
-  logger.debug(
-    `Applying chain updates: ${params.chainsToAdd.length} add(s), ${params.remoteChainSelectorsToRemove.length} remove(s)`,
-  )
+  logger.debug(`Applying chain updates: ${addCount} add(s), ${removeCount} remove(s)`)
 
   const [, wallet] = await loadChainWallet(chain, argv)
-  const result = await applyForChain(chain, wallet, params)
+  const result = await applyForChain(chain, wallet, argv, config)
+
+  // Log every signature so a batched Solana run can be fully captured.
+  if (result.hashes) result.hashes.forEach((h, i) => logger.info(`tx[${i}]: ${h}`))
 
   const output: Record<string, string> = {
     network: networkName,
-    poolAddress: argv.poolAddress!,
+    poolAddress: argv.poolAddress ?? argv.tokenAddress ?? '',
     txHash: result.hash,
-    chainsAdded: String(params.chainsToAdd.length),
-    chainsRemoved: String(params.remoteChainSelectorsToRemove.length),
+    ...(result.hashes ? { txHashes: result.hashes.join(',') } : {}),
+    chainsAdded: String(addCount),
+    chainsRemoved: String(removeCount),
   }
 
   switch (argv.format) {

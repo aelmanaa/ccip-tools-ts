@@ -1,12 +1,9 @@
 import { Buffer } from 'buffer'
-
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { ChainFamily } from '../../../../networks.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
-import { RemoveRemotePoolAddresses } from './remove-remote-pool-addresses.ts'
 import { encodeRemotePoolAddressBytes } from './common.ts'
+import { RemoveRemotePoolAddresses } from './remove-remote-pool-addresses.ts'
 import {
   PAYER,
   POOL_PROGRAM,
@@ -16,6 +13,8 @@ import {
   chainConfigPda,
   stubChain,
 } from './test-helpers.ts'
+import { ChainFamily } from '../../../../networks.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
 
 const EVM_TOKEN = '0xa42BA090720aEE0602aD4381FAdcC9380aD3d888'
 const POOL_A = '0xd7BF0d8E6C242b6Dde4490Ab3aFc8C1e811ec9aD'

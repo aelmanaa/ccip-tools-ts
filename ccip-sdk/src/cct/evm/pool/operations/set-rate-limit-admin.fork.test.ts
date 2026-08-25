@@ -63,14 +63,17 @@ describe('EVMTokenManager setRateLimitAdmin Fork Tests', { skip, timeout: 120_00
       name: 'Rate Limit Admin Test Token',
       symbol: 'RLAT',
       decimals: 18,
-      initialSupply: 1_000_000n * 10n ** 18n,
+      preMint: 1_000_000n * 10n ** 18n,
       wallet,
+      maxSupply: 0n,
+      owner: await wallet.getAddress(),
+      preMintRecipient: await wallet.getAddress(),
     })
 
     // 2. Deploy pool (deploys a v2.0 BurnMintTokenPool)
     const poolResult = await mgr.deployPool({
       poolType: 'burn-mint',
-      tokenAddress: tokenResult.tokenAddress,
+      tokenAddress: tokenResult.contractAddress,
       localTokenDecimals: 18,
       routerAddress: SEPOLIA_ROUTER,
       wallet,

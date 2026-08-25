@@ -1,5 +1,6 @@
 import { PublicKey } from '@solana/web3.js'
 
+import { discoverPoolInfo } from './common.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
@@ -11,7 +12,6 @@ import {
 } from '../../operation.ts'
 import { createTokenPoolProgram, deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { validatePublicKey } from '../../validate.ts'
-import { discoverPoolInfo } from './common.ts'
 
 /** Parameters shared by token-pool `setRateLimitAdmin` generation and execution. */
 type SetRateLimitAdminParams = {
@@ -40,7 +40,7 @@ export class SetRateLimitAdmin extends SolanaOperation<SetRateLimitAdminParams> 
   readonly name = 'setRateLimitAdmin'
 
   /** Validates addresses before any RPC. */
-  protected validate(params: GenerateSetRateLimitAdminParams): void {
+  protected override validate(params: GenerateSetRateLimitAdminParams): void {
     validatePublicKey(this.name, 'poolAddress', params.poolAddress)
     validatePublicKey(this.name, 'payer', params.payer)
     validatePublicKey(this.name, 'rateLimitAdmin', params.rateLimitAdmin)

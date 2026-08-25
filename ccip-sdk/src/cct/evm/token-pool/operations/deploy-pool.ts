@@ -59,7 +59,7 @@ export type DeployPoolResult = TransactionHash & {
 }
 
 /** Deploys a CCIP token pool (BurnMint or LockRelease). */
-export class DeployPool extends EVMOperation<DeployPoolParams, DeployPoolResult> {
+export class DeployPool extends EVMOperation<DeployPoolParams> {
   readonly name = 'deployPool'
 
   /** Validates pool params (lockBoxAddress required on the unsigned lock-release path). */

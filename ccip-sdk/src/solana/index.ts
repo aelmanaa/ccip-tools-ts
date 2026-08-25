@@ -87,6 +87,7 @@ import { decodeMessageV1 } from '../messages.ts'
 import { type NetworkInfo, ChainFamily, networkInfo } from '../networks.ts'
 import { buildMessageForDest, decodeMessage, normalizeDeep } from '../requests.ts'
 import SELECTORS from '../selectors.ts'
+import { cacheGetSignaturesForAddress } from './signatures-cache.ts'
 import { DEFAULT_GAS_LIMIT } from '../shared/constants.ts'
 import { supportedChains } from '../supported-chains.ts'
 import {
@@ -134,7 +135,6 @@ import {
   decodeTokenAdminRegistryConfig,
   getTokenAdminRegistryConfig,
 } from './token-admin-registry.ts'
-import { cacheGetSignaturesForAddress } from './signatures-cache.ts'
 import { type CCIPMessage_V1_6_Solana, type UnsignedSolanaTx, isWallet } from './types.ts'
 import {
   convertRateLimiter,

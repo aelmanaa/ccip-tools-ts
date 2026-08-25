@@ -4,6 +4,7 @@ import {
 } from '@solana/spl-token'
 import { PublicKey } from '@solana/web3.js'
 
+import { detectMintTokenProgram } from './spl.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
@@ -15,8 +16,8 @@ import {
   SolanaOperation,
 } from '../../operation.ts'
 import { deriveTokenPoolSignerPda } from '../../programs/token-pool.ts'
+import { submit } from '../../submit.ts'
 import { validatePublicKey } from '../../validate.ts'
-import { detectMintTokenProgram } from './spl.ts'
 
 /** Parameters for creating the pool signer PDA's associated token account. **Solana only.** */
 type CreatePoolTokenAccountParams = {
@@ -56,13 +57,12 @@ export type ExecuteCreatePoolTokenAccountResult = TransactionHash & {
  */
 export class CreatePoolTokenAccount extends SolanaOperation<
   CreatePoolTokenAccountParams,
-  GenerateCreatePoolTokenAccountResult,
-  ExecuteCreatePoolTokenAccountResult
+  GenerateCreatePoolTokenAccountResult
 > {
   readonly name = 'createPoolTokenAccount'
 
   /** Validates the mint, pool, and payer public keys before any RPC. */
-  protected validate(params: GenerateCreatePoolTokenAccountParams): void {
+  protected override validate(params: GenerateCreatePoolTokenAccountParams): void {
     validatePublicKey(this.name, 'payer', params.payer)
     validatePublicKey(this.name, 'tokenAddress', params.tokenAddress)
     validatePublicKey(this.name, 'poolAddress', params.poolAddress)
@@ -117,11 +117,17 @@ export class CreatePoolTokenAccount extends SolanaOperation<
     }
   }
 
-  /** Adds the derived ATA and owner to the execute result. */
-  protected override resultFromGenerated(
-    hash: TransactionHash,
-    tx: GenerateCreatePoolTokenAccountResult,
-  ): ExecuteCreatePoolTokenAccountResult {
-    return { ...hash, poolTokenAccount: tx.poolTokenAccount, poolSignerPda: tx.poolSignerPda }
+  /**
+   * Generate, sign, and submit with `wallet.publicKey` as payer; adds the derived pool token
+   * account (ATA) and pool signer PDA to the confirmed result.
+   */
+  override async execute(
+    chain: SolanaChain,
+    params: ExecuteCreatePoolTokenAccountParams,
+  ): Promise<ExecuteCreatePoolTokenAccountResult> {
+    const { wallet, computeUnits, parsed } = this.prepareWalletExecution(params)
+    const tx = await this.buildUnsigned(chain, parsed)
+    const { hash } = await submit(chain, wallet, tx, this.name, computeUnits)
+    return { hash, poolTokenAccount: tx.poolTokenAccount, poolSignerPda: tx.poolSignerPda }
   }
 }

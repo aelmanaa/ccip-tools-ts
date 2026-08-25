@@ -3,6 +3,12 @@ import { Buffer } from 'buffer'
 import { PublicKey, SystemProgram } from '@solana/web3.js'
 import BN from 'bn.js'
 
+import {
+  deriveTokenPoolChainConfigPda,
+  discoverPoolInfo,
+  encodeRemotePoolAddressBytes,
+  validateSelectorWithAddresses,
+} from './common.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
@@ -14,12 +20,6 @@ import {
 } from '../../operation.ts'
 import { createTokenPoolProgram, deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { validatePublicKey } from '../../validate.ts'
-import {
-  deriveTokenPoolChainConfigPda,
-  discoverPoolInfo,
-  encodeRemotePoolAddressBytes,
-  validateSelectorWithAddresses,
-} from './common.ts'
 
 /** Parameters shared by token-pool `appendRemotePoolAddresses` generation and execution. */
 type AppendRemotePoolAddressesParams = {
@@ -52,7 +52,7 @@ export class AppendRemotePoolAddresses extends SolanaOperation<AppendRemotePoolA
   readonly name = 'appendRemotePoolAddresses'
 
   /** Validates addresses and selector before any RPC. */
-  protected validate(params: GenerateAppendRemotePoolAddressesParams): void {
+  protected override validate(params: GenerateAppendRemotePoolAddressesParams): void {
     validatePublicKey(this.name, 'poolAddress', params.poolAddress)
     validatePublicKey(this.name, 'payer', params.payer)
     if (params.authority) validatePublicKey(this.name, 'authority', params.authority)

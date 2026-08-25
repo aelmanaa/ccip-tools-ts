@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 
 import { Keypair, PublicKey, SystemProgram } from '@solana/web3.js'
 
+import { ProposeAdminRole } from './propose-admin-role.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
@@ -11,7 +12,6 @@ import {
   deriveRouterConfigPda,
   deriveTokenAdminRegistryPda,
 } from '../../programs/router.ts'
-import { ProposeAdminRole } from './propose-admin-role.ts'
 
 const TOKEN = Keypair.generate().publicKey.toBase58()
 const ADMINISTRATOR = Keypair.generate().publicKey.toBase58()

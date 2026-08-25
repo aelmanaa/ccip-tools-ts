@@ -96,18 +96,19 @@ async function acceptAdminForChain(
       const evmChain = chain as EVMChain
       const mgr = EVMTokenManager.fromChain(evmChain)
       // EVM resolves the TokenAdminRegistry from `address` (router/pool/registry).
-      return mgr.acceptAdminRole({
+      return mgr.acceptAdmin({
         tokenAddress: argv.tokenAddress,
         address: argv.routerAddress,
         wallet,
       })
     }
     case ChainFamily.Solana: {
-      const solanaChain = chain as SolanaChain
+      const solanaChain = chain as unknown as SolanaChain
       const mgr = SolanaTokenManager.fromChain(solanaChain)
-      return mgr.acceptAdminRole({
+      // cct-sdk's Solana acceptAdmin resolves the TAR from `address` (router/registry).
+      return mgr.acceptAdmin({
         tokenAddress: argv.tokenAddress,
-        routerAddress: argv.routerAddress,
+        address: argv.routerAddress,
         wallet,
       })
     }

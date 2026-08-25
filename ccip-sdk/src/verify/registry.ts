@@ -48,11 +48,7 @@ const manifest = JSON.parse(
 
 /** The kind of verification API a chain exposes, as recorded in the bundled `verifiers.json`. */
 export type VerifierProvider =
-  | 'etherscan-v2'
-  | 'blockscout'
-  | 'etherscan-standalone'
-  | 'sourcify'
-  | 'unknown'
+  'etherscan-v2' | 'blockscout' | 'etherscan-standalone' | 'sourcify' | 'unknown'
 
 /** One row of the bundled `verifiers.json`: how to verify on a given CCIP chain. */
 export interface VerifierEntry {

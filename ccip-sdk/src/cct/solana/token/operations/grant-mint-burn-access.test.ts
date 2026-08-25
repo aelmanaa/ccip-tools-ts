@@ -4,10 +4,10 @@ import { describe, it } from 'node:test'
 import { AuthorityType, TOKEN_PROGRAM_ID, createSetAuthorityInstruction } from '@solana/spl-token'
 import { Keypair, PublicKey } from '@solana/web3.js'
 
+import { GrantMintBurnAccess } from './grant-mint-burn-access.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { GrantMintBurnAccess } from './grant-mint-burn-access.ts'
 
 const MINT = Keypair.generate().publicKey
 const PAYER = Keypair.generate().publicKey.toBase58()

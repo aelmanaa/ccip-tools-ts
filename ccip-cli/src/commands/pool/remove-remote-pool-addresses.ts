@@ -5,13 +5,11 @@
 
 import { AptosTokenManager } from '@chainlink/ccip-sdk/src/cct/aptos/index.ts'
 import { EVMTokenManager } from '@chainlink/ccip-sdk/src/cct/evm/index.ts'
-import { SolanaTokenManager } from '@chainlink/ccip-sdk/src/cct/solana/index.ts'
 import {
   type AptosChain,
   type Chain,
   type EVMChain,
   type RemoveRemotePoolAddressesParams,
-  type SolanaChain,
   CCIPArgumentInvalidError,
   CCIPChainFamilyUnsupportedError,
   ChainFamily,
@@ -100,9 +98,9 @@ async function removeForChain(
       return mgr.removeRemotePoolAddresses({ ...params, wallet })
     }
     case ChainFamily.Solana: {
-      const solanaChain = chain as SolanaChain
-      const mgr = SolanaTokenManager.fromChain(solanaChain)
-      return mgr.removeRemotePoolAddresses({ ...params, wallet })
+      // MESH-TODO: cct-sdk's Solana token pool has no removeRemotePoolAddresses (only
+      // appendRemotePoolAddresses); this operation is EVM-only under cct-sdk.
+      throw new CCIPChainFamilyUnsupportedError(chain.network.family)
     }
     case ChainFamily.Aptos: {
       const aptosChain = chain as AptosChain

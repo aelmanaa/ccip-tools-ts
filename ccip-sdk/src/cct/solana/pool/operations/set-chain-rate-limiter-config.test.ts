@@ -4,11 +4,10 @@ import { describe, it } from 'node:test'
 import { PublicKey } from '@solana/web3.js'
 import BN from 'bn.js'
 
-import { ChainFamily } from '../../../../networks.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
-import { createTokenPoolProgram } from '../../programs/token-pool.ts'
-import type { ChainRateLimiterConfig } from './set-chain-rate-limiter-config.ts'
-import { SetChainRateLimiterConfig } from './set-chain-rate-limiter-config.ts'
+import {
+  type ChainRateLimiterConfig,
+  SetChainRateLimiterConfig,
+} from './set-chain-rate-limiter-config.ts'
 import {
   AUTHORITY,
   MINT,
@@ -21,6 +20,9 @@ import {
   statePda,
   stubChain,
 } from './test-helpers.ts'
+import { ChainFamily } from '../../../../networks.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
+import { createTokenPoolProgram } from '../../programs/token-pool.ts'
 
 const SELECTOR_2 = 14767482510784806043n
 

@@ -164,18 +164,21 @@ async function deployForChain(
   argv: DeployArgv,
   maxSupply: bigint | undefined,
   initialSupply: bigint | undefined,
+  signerAddress: string,
 ): Promise<DeployOutcome> {
   switch (chain.network.family) {
     case ChainFamily.EVM: {
       const evmChain = chain as EVMChain
       const mgr = EVMTokenManager.fromChain(evmChain)
+      // cct-sdk's DeployTokenParams requires `owner` (defaults to the signer) and `maxSupply`
+      // (0n = unlimited), and names the pre-mint amount `preMint` (was `initialSupply`).
       const result = await mgr.deployToken({
         name: argv.name,
         symbol: argv.symbol,
         decimals: argv.decimals,
-        ...(maxSupply !== undefined && { maxSupply }),
-        ...(initialSupply !== undefined && { initialSupply }),
-        ...(argv.owner && { ownerAddress: argv.owner }),
+        maxSupply: maxSupply ?? 0n,
+        ...(initialSupply !== undefined && { preMint: initialSupply }),
+        owner: argv.owner ?? signerAddress,
         ...(argv.ccipAdmin && { ccipAdmin: argv.ccipAdmin }),
         ...(argv.burnMintRoleAdmin && { burnMintRoleAdmin: argv.burnMintRoleAdmin }),
         ...(argv.preMintRecipient && { preMintRecipient: argv.preMintRecipient }),
@@ -183,7 +186,7 @@ async function deployForChain(
       })
       return {
         hash: result.hash,
-        tokenAddress: result.tokenAddress,
+        tokenAddress: result.contractAddress,
         verification: result.verification,
       }
     }
@@ -231,13 +234,13 @@ async function doDeployToken(ctx: Ctx, argv: DeployArgv) {
   const getChain = fetchChainsFromRpcs(ctx, argv)
   const chain = await getChain(networkName)
 
-  const [, wallet] = await loadChainWallet(chain, argv)
+  const [signerAddress, wallet] = await loadChainWallet(chain, argv)
 
   const maxSupply = argv.maxSupply ? parseUnits(argv.maxSupply, argv.decimals) : undefined
   const initialSupply =
     argv.initialSupply !== '0' ? parseUnits(argv.initialSupply, argv.decimals) : undefined
 
-  const result = await deployForChain(chain, wallet, argv, maxSupply, initialSupply)
+  const result = await deployForChain(chain, wallet, argv, maxSupply, initialSupply, signerAddress)
 
   // Build output object, including chain-specific optional fields when present
   const output: Record<string, string> = {

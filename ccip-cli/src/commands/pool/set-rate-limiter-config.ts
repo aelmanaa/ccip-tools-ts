@@ -5,7 +5,6 @@
 
 import { AptosTokenManager } from '@chainlink/ccip-sdk/src/cct/aptos/index.ts'
 import { EVMTokenManager } from '@chainlink/ccip-sdk/src/cct/evm/index.ts'
-import { SolanaTokenManager } from '@chainlink/ccip-sdk/src/cct/solana/index.ts'
 import {
   type AptosChain,
   type Chain,
@@ -13,7 +12,6 @@ import {
   type EVMChain,
   type RateLimiterConfig,
   type SetChainRateLimiterConfigParams,
-  type SolanaChain,
   CCIPArgumentInvalidError,
   CCIPChainFamilyUnsupportedError,
   ChainFamily,
@@ -190,9 +188,11 @@ async function setForChain(
       return mgr.setChainRateLimiterConfig({ ...params, wallet })
     }
     case ChainFamily.Solana: {
-      const solanaChain = chain as SolanaChain
-      const mgr = SolanaTokenManager.fromChain(solanaChain)
-      return mgr.setChainRateLimiterConfig({ ...params, wallet })
+      // MESH-TODO: cct-sdk's Solana setChainRateLimit takes PoolProgramRef (poolType /
+      // poolProgramAddress) + tokenAddress + a single remoteChainSelector, which this command's
+      // { poolAddress, chainConfigs[] } options do not provide. Add --pool-type/--pool-program-address
+      // and --token-address (and iterate chainConfigs) to restore Solana support.
+      throw new CCIPChainFamilyUnsupportedError(chain.network.family)
     }
     case ChainFamily.Aptos: {
       const aptosChain = chain as AptosChain

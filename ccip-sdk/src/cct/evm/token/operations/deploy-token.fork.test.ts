@@ -65,18 +65,20 @@ describe('EVMTokenManager Fork Tests', { skip, timeout: 60_000 }, () => {
       symbol: 'TT',
       decimals: 18,
       maxSupply,
-      initialSupply,
+      preMint: initialSupply,
       wallet,
+      owner: await wallet.getAddress(),
+      preMintRecipient: await wallet.getAddress(),
     })
 
     // Verify result shape
-    assert.ok(result.tokenAddress, 'should return token address')
-    assert.match(result.tokenAddress, /^0x[0-9a-fA-F]{40}$/, 'should be valid address')
+    assert.ok(result.contractAddress, 'should return token address')
+    assert.match(result.contractAddress, /^0x[0-9a-fA-F]{40}$/, 'should be valid address')
     assert.ok(result.hash, 'should return tx hash')
     assert.match(result.hash, /^0x[0-9a-fA-F]{64}$/, 'should be valid tx hash')
 
     // Verify all deployed contract state
-    const token = new Contract(result.tokenAddress, CrossChainTokenABI, provider)
+    const token = new Contract(result.contractAddress, CrossChainTokenABI, provider)
     const name: string = await token.getFunction('name')()
     const symbol: string = await token.getFunction('symbol')()
     const decimals: bigint = await token.getFunction('decimals')()
@@ -104,11 +106,13 @@ describe('EVMTokenManager Fork Tests', { skip, timeout: 60_000 }, () => {
       symbol: 'ZD',
       decimals: 0,
       maxSupply: 0n,
-      initialSupply: 100n,
+      preMint: 100n,
       wallet,
+      owner: await wallet.getAddress(),
+      preMintRecipient: await wallet.getAddress(),
     })
 
-    const token = new Contract(result.tokenAddress, CrossChainTokenABI, provider)
+    const token = new Contract(result.contractAddress, CrossChainTokenABI, provider)
     const decimals: bigint = await token.getFunction('decimals')()
     const supply: bigint = await token.getFunction('totalSupply')()
     const max: bigint = await token.getFunction('maxSupply')()
@@ -127,14 +131,17 @@ describe('EVMTokenManager Fork Tests', { skip, timeout: 60_000 }, () => {
       name: 'Manual Token',
       symbol: 'MAN',
       decimals: 8,
-      initialSupply: 500n,
+      preMint: 500n,
       // Unsigned path requires an explicit owner (no signer to derive it from).
-      ownerAddress: await wallet.getAddress(),
+      owner: await wallet.getAddress(),
+      maxSupply: 0n,
+      preMintRecipient: await wallet.getAddress(),
     })
 
     assert.equal(unsigned.transactions.length, 1)
     const tx = unsigned.transactions[0]!
-    assert.equal(tx.to, null)
+    // cct-sdk's deployTx omits `to` for contract-creation txs (undefined), not an explicit null.
+    assert.equal(tx.to ?? null, null)
 
     // Sign and send manually
     const populated = await wallet.populateTransaction(tx)

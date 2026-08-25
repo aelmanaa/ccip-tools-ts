@@ -4,10 +4,7 @@
  */
 
 import { AptosTokenManager } from '@chainlink/ccip-sdk/src/cct/aptos/index.ts'
-import {
-  type EVMRegistrationMethod,
-  EVMTokenManager,
-} from '@chainlink/ccip-sdk/src/cct/evm/index.ts'
+import { type RegisterAdminMethod, EVMTokenManager } from '@chainlink/ccip-sdk/src/cct/evm/index.ts'
 import { SolanaTokenManager } from '@chainlink/ccip-sdk/src/cct/solana/index.ts'
 import {
   type AptosChain,
@@ -117,26 +114,33 @@ async function proposeAdminForChain(
     case ChainFamily.EVM: {
       const evmChain = chain as EVMChain
       const mgr = EVMTokenManager.fromChain(evmChain)
-      // Map CLI kebab-case to SDK type
-      const cliToSdk: Record<string, EVMRegistrationMethod> = {
+      // Map CLI kebab-case choices to cct-sdk's RegisterAdminMethod values.
+      const cliToSdk: Record<string, RegisterAdminMethod> = {
         owner: 'owner',
-        'get-ccip-admin': 'getCCIPAdmin',
-        'access-control-default-admin': 'accessControlDefaultAdmin',
+        'get-ccip-admin': 'ccip-admin',
+        'access-control-default-admin': 'access-control-default-admin',
       }
-      return mgr.proposeAdminRole({
+      // cct-sdk's registerAdmin resolves the TAR from `address` (router/registry/pool) and takes
+      // the RegistryModuleOwnerCustom as `registryModule`.
+      // MESH-TODO: cct-sdk's EVM registerAdmin needs a TAR source in `address`; the EVM path now
+      // relies on --router-address (previously EVM-optional). Make it demanded for EVM, or add a
+      // dedicated --registry-address option.
+      return mgr.registerAdmin({
         tokenAddress: argv.tokenAddress,
-        registryModuleAddress: argv.registryModuleAddress!,
+        registryModule: argv.registryModuleAddress!,
+        address: argv.routerAddress!,
         registrationMethod: cliToSdk[argv.registrationMethod],
         wallet,
       })
     }
     case ChainFamily.Solana: {
-      const solanaChain = chain as SolanaChain
+      const solanaChain = chain as unknown as SolanaChain
       const mgr = SolanaTokenManager.fromChain(solanaChain)
-      return mgr.proposeAdminRole({
+      // cct-sdk's Solana registerAdmin resolves the TAR from `address` (the router).
+      return mgr.registerAdmin({
         tokenAddress: argv.tokenAddress,
         administrator: argv.administrator!,
-        routerAddress: argv.routerAddress!,
+        address: argv.routerAddress!,
         wallet,
       })
     }

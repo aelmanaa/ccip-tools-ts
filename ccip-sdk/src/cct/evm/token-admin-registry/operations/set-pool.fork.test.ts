@@ -81,10 +81,13 @@ describe('EVMTokenManager setPool Fork Tests', { skip, timeout: 120_000 }, () =>
       name: 'Set Pool Test Token',
       symbol: 'SPTT',
       decimals: 18,
-      initialSupply: 1_000_000n * 10n ** 18n,
+      preMint: 1_000_000n * 10n ** 18n,
       wallet,
+      maxSupply: 0n,
+      owner: await wallet.getAddress(),
+      preMintRecipient: await wallet.getAddress(),
     })
-    tokenAddress = tokenResult.tokenAddress
+    tokenAddress = tokenResult.contractAddress
 
     // 2. Deploy pool
     const poolResult = await mgr.deployPool({
@@ -97,14 +100,15 @@ describe('EVMTokenManager setPool Fork Tests', { skip, timeout: 120_000 }, () =>
     poolAddress = poolResult.poolAddress
 
     // 3. Propose + accept admin
-    await mgr.proposeAdminRole({
+    await mgr.registerAdmin({
       tokenAddress,
-      registryModuleAddress: SEPOLIA_REGISTRY_MODULE,
-      registrationMethod: 'getCCIPAdmin',
+      registryModule: SEPOLIA_REGISTRY_MODULE,
+      address: SEPOLIA_ROUTER,
+      registrationMethod: 'ccip-admin',
       wallet,
     })
 
-    await mgr.acceptAdminRole({
+    await mgr.acceptAdmin({
       tokenAddress,
       address: SEPOLIA_ROUTER,
       wallet,
@@ -171,31 +175,34 @@ describe('EVMTokenManager setPool Fork Tests', { skip, timeout: 120_000 }, () =>
       symbol: 'USPT',
       decimals: 18,
       wallet,
+      maxSupply: 0n,
+      owner: await wallet.getAddress(),
     })
 
     const poolResult = await mgr.deployPool({
       poolType: 'burn-mint',
-      tokenAddress: tokenResult.tokenAddress,
+      tokenAddress: tokenResult.contractAddress,
       localTokenDecimals: 18,
       routerAddress: SEPOLIA_ROUTER,
       wallet,
     })
 
-    await mgr.proposeAdminRole({
-      tokenAddress: tokenResult.tokenAddress,
-      registryModuleAddress: SEPOLIA_REGISTRY_MODULE,
-      registrationMethod: 'getCCIPAdmin',
+    await mgr.registerAdmin({
+      tokenAddress: tokenResult.contractAddress,
+      registryModule: SEPOLIA_REGISTRY_MODULE,
+      address: SEPOLIA_ROUTER,
+      registrationMethod: 'ccip-admin',
       wallet,
     })
 
-    await mgr.acceptAdminRole({
-      tokenAddress: tokenResult.tokenAddress,
+    await mgr.acceptAdmin({
+      tokenAddress: tokenResult.contractAddress,
       address: SEPOLIA_ROUTER,
       wallet,
     })
 
     const unsigned = await mgr.generateUnsignedSetPool({
-      tokenAddress: tokenResult.tokenAddress,
+      tokenAddress: tokenResult.contractAddress,
       poolAddress: poolResult.poolAddress,
       address: SEPOLIA_ROUTER,
     })

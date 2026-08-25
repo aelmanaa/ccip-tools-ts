@@ -1,6 +1,11 @@
 import { type TransactionInstruction, PublicKey } from '@solana/web3.js'
 import BN from 'bn.js'
 
+import {
+  type RateLimiterConfig,
+  deriveTokenPoolChainConfigPda,
+  discoverPoolInfo,
+} from './common.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
@@ -13,11 +18,6 @@ import {
 } from '../../operation.ts'
 import { createTokenPoolProgram, deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { validatePublicKey } from '../../validate.ts'
-import {
-  type RateLimiterConfig,
-  deriveTokenPoolChainConfigPda,
-  discoverPoolInfo,
-} from './common.ts'
 
 /** Rate limiter update for a single already-configured remote chain. */
 export type ChainRateLimiterConfig = {
@@ -58,7 +58,7 @@ export class SetChainRateLimiterConfig extends SolanaOperation<SetChainRateLimit
   readonly name = 'setChainRateLimiterConfig'
 
   /** Validates addresses and rate limiter selectors before any RPC. */
-  protected validate(params: GenerateSetChainRateLimiterConfigParams): void {
+  protected override validate(params: GenerateSetChainRateLimiterConfigParams): void {
     validatePublicKey(this.name, 'poolAddress', params.poolAddress)
     validatePublicKey(this.name, 'payer', params.payer)
     if (params.authority) validatePublicKey(this.name, 'authority', params.authority)

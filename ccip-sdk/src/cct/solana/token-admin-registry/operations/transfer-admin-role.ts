@@ -45,7 +45,7 @@ export class TransferAdminRole extends SolanaOperation<TransferAdminRoleParams> 
   readonly name = 'transferAdminRole'
 
   /** Validates all public keys before any RPC. */
-  protected validate(params: GenerateTransferAdminRoleParams): void {
+  protected override validate(params: GenerateTransferAdminRoleParams): void {
     validatePublicKey(this.name, 'tokenAddress', params.tokenAddress)
     validatePublicKey(this.name, 'newAdmin', params.newAdmin)
     validatePublicKey(this.name, 'routerAddress', params.routerAddress)

@@ -102,7 +102,7 @@ async function transferAdminForChain(
       const evmChain = chain as EVMChain
       const mgr = EVMTokenManager.fromChain(evmChain)
       // EVM resolves the TokenAdminRegistry from `address` (router/pool/registry).
-      return mgr.transferAdminRole({
+      return mgr.transferAdmin({
         tokenAddress: argv.tokenAddress,
         newAdmin: argv.newAdmin,
         address: argv.routerAddress,
@@ -110,12 +110,13 @@ async function transferAdminForChain(
       })
     }
     case ChainFamily.Solana: {
-      const solanaChain = chain as SolanaChain
+      const solanaChain = chain as unknown as SolanaChain
       const mgr = SolanaTokenManager.fromChain(solanaChain)
-      return mgr.transferAdminRole({
+      // cct-sdk's Solana transferAdmin resolves the TAR from `address` (router/registry).
+      return mgr.transferAdmin({
         tokenAddress: argv.tokenAddress,
         newAdmin: argv.newAdmin,
-        routerAddress: argv.routerAddress,
+        address: argv.routerAddress,
         wallet,
       })
     }

@@ -14,7 +14,7 @@
  * @packageDocumentation
  */
 
-import { type TransactionReceipt, AbiCoder, Contract, ZeroAddress, concat } from 'ethers'
+import { AbiCoder, Contract, ZeroAddress, concat } from 'ethers'
 
 import { CCIPWalletInvalidError } from '../../../../errors/index.ts'
 import { interfaces } from '../../../../evm/const.ts'
@@ -25,6 +25,7 @@ import { CCTParamsInvalidError, CCTTxFailedError } from '../../../errors.ts'
 import type { TransactionHash } from '../../../operation.ts'
 import { type DeployVerification, buildDeployVerification } from '../../deploy-verification.ts'
 import { EVMOperation } from '../../operation.ts'
+import { submitForReceipt } from '../../submit.ts'
 import { validateAddress } from '../../validate.ts'
 import { CROSS_CHAIN_POOL_TOKEN_BYTECODE } from '../bytecodes/CrossChainPoolToken.ts'
 
@@ -71,10 +72,7 @@ export type DeployCrossChainPoolTokenResult = TransactionHash & {
 }
 
 /** Deploys a `CrossChainPoolToken` (combined token + pool) via contract creation. */
-export class DeployCrossChainPoolToken extends EVMOperation<
-  DeployCrossChainPoolTokenParams,
-  DeployCrossChainPoolTokenResult
-> {
+export class DeployCrossChainPoolToken extends EVMOperation<DeployCrossChainPoolTokenParams> {
   readonly name = 'deployCrossChainPoolToken'
 
   /** Validates token params (ccipAdmin required only on the unsigned path). */
@@ -152,36 +150,30 @@ export class DeployCrossChainPoolToken extends EVMOperation<
     }
   }
 
-  /** Signed deploy: auto-fills `ccipAdmin` from the wallet, then deploys. */
+  /**
+   * Signed deploy: auto-fills `ccipAdmin` from the wallet, submits the creation tx, then
+   * extracts the deployed address from the receipt (token == pool == address) and rebuilds the
+   * block-explorer verification handle from the submitted creation calldata.
+   */
   override async execute(
     chain: EVMChain,
     params: DeployCrossChainPoolTokenParams & { wallet: unknown },
   ): Promise<DeployCrossChainPoolTokenResult> {
     if (!isSigner(params.wallet)) throw new CCIPWalletInvalidError(params.wallet)
     const ccipAdmin = params.ccipAdmin ?? (await params.wallet.getAddress())
-    return super.execute(chain, { ...params, ccipAdmin })
-  }
-
-  /**
-   * Extracts the deployed address from the creation receipt (token == pool == address) and
-   * rebuilds the block-explorer verification handle from the submitted creation calldata.
-   */
-  protected override resultFromReceipt(
-    hash: TransactionHash,
-    receipt: TransactionReceipt,
-    unsigned: UnsignedEVMTx,
-  ): DeployCrossChainPoolTokenResult {
+    const unsigned = await this.generate(chain, { ...params, ccipAdmin })
+    const { hash, receipt } = await submitForReceipt(chain, params.wallet, unsigned, this.name)
     if (!receipt.contractAddress)
       throw new CCTTxFailedError(this.name, 'no contract address in deploy receipt', {
-        context: { txHash: hash.hash },
+        context: { txHash: hash },
       })
     const data = unsigned.transactions[0]?.data
     if (!data)
       throw new CCTTxFailedError(this.name, 'missing deploy calldata for verification', {
-        context: { txHash: hash.hash },
+        context: { txHash: hash },
       })
     return {
-      ...hash,
+      hash,
       address: receipt.contractAddress,
       tokenAddress: receipt.contractAddress,
       poolAddress: receipt.contractAddress,

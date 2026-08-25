@@ -205,10 +205,11 @@ async function deployPoolForChain(
       }
     }
     case ChainFamily.Solana: {
-      const mgr = SolanaTokenManager.fromChain(chain as SolanaChain)
+      const mgr = SolanaTokenManager.fromChain(chain as unknown as SolanaChain)
+      // cct-sdk's Solana deployTokenPool selects the canonical program by `poolType`.
       const result = await mgr.deployTokenPool({
         tokenAddress: argv.tokenAddress,
-        poolProgramAddress: argv.poolProgramId!,
+        poolType,
         wallet,
       })
       return { hash: result.hash, poolAddress: result.poolAddress }

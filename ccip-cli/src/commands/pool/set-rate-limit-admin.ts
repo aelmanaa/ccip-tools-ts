@@ -5,13 +5,11 @@
 
 import { AptosTokenManager } from '@chainlink/ccip-sdk/src/cct/aptos/index.ts'
 import { EVMTokenManager } from '@chainlink/ccip-sdk/src/cct/evm/index.ts'
-import { SolanaTokenManager } from '@chainlink/ccip-sdk/src/cct/solana/index.ts'
 import {
   type AptosChain,
   type Chain,
   type EVMChain,
   type SetRateLimitAdminParams,
-  type SolanaChain,
   CCIPChainFamilyUnsupportedError,
   ChainFamily,
   networkInfo,
@@ -87,9 +85,10 @@ async function setForChain(
       return mgr.setRateLimitAdmin({ ...params, wallet })
     }
     case ChainFamily.Solana: {
-      const solanaChain = chain as SolanaChain
-      const mgr = SolanaTokenManager.fromChain(solanaChain)
-      return mgr.setRateLimitAdmin({ ...params, wallet })
+      // MESH-TODO: cct-sdk's Solana setRateLimitAdmin takes PoolProgramRef (poolType /
+      // poolProgramAddress) + tokenAddress, not { poolAddress }. Add --pool-type/
+      // --pool-program-address and --token-address options to restore Solana support.
+      throw new CCIPChainFamilyUnsupportedError(chain.network.family)
     }
     case ChainFamily.Aptos: {
       // setRateLimitAdmin is unsupported on Aptos — the facade throws at call time (rate limiting is owner-managed).

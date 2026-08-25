@@ -1,14 +1,10 @@
 import { Buffer } from 'buffer'
-
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import { PublicKey, SystemProgram } from '@solana/web3.js'
 import BN from 'bn.js'
 
-import { ChainFamily } from '../../../../networks.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
-import { createTokenPoolProgram } from '../../programs/token-pool.ts'
 import { AppendRemotePoolAddresses } from './append-remote-pool-addresses.ts'
 import { encodeRemotePoolAddressBytes } from './common.ts'
 import {
@@ -22,6 +18,9 @@ import {
   statePda,
   stubChain,
 } from './test-helpers.ts'
+import { ChainFamily } from '../../../../networks.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
+import { createTokenPoolProgram } from '../../programs/token-pool.ts'
 
 const EVM_POOL = '0xd7BF0d8E6C242b6Dde4490Ab3aFc8C1e811ec9aD'
 const SOL_POOL = new PublicKey('11111111111111111111111111111112').toBase58()

@@ -82,10 +82,7 @@ export type DeployPoolViaFactoryResult = TransactionHash & {
 }
 
 /** Deploys a CCIP token pool for an existing token via `TokenPoolFactory 2.0.0`. */
-export class DeployPoolViaFactory extends EVMOperation<
-  DeployPoolViaFactoryParams,
-  DeployPoolViaFactoryResult
-> {
+export class DeployPoolViaFactory extends EVMOperation<DeployPoolViaFactoryParams> {
   readonly name = 'deployPoolViaFactory'
 
   /** Validates factory-deploy params (`futureOwner` required on the unsigned path). */

@@ -1,5 +1,10 @@
 import { PublicKey } from '@solana/web3.js'
 
+import {
+  type RemoteChainConfig,
+  buildApplyChainUpdatesInstructions,
+  validateApplyChainUpdates,
+} from './common.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
@@ -10,11 +15,6 @@ import {
   SolanaOperation,
 } from '../../operation.ts'
 import { validatePublicKey } from '../../validate.ts'
-import {
-  type RemoteChainConfig,
-  buildApplyChainUpdatesInstructions,
-  validateApplyChainUpdates,
-} from './common.ts'
 
 /** Parameters shared by token-pool `applyChainUpdates` generation and execution. */
 type ApplyChainUpdatesParams = {
@@ -45,7 +45,7 @@ export class ApplyChainUpdates extends SolanaOperation<ApplyChainUpdatesParams> 
   readonly name = 'applyChainUpdates'
 
   /** Validates addresses and update fields before any RPC. */
-  protected validate(params: GenerateApplyChainUpdatesParams): void {
+  protected override validate(params: GenerateApplyChainUpdatesParams): void {
     validatePublicKey(this.name, 'poolAddress', params.poolAddress)
     validatePublicKey(this.name, 'payer', params.payer)
     if (params.authority) validatePublicKey(this.name, 'authority', params.authority)

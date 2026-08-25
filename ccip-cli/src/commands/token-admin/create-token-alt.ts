@@ -6,10 +6,12 @@
 import { SolanaTokenManager } from '@chainlink/ccip-sdk/src/cct/solana/index.ts'
 import {
   type SolanaChain,
+  CCIPArgumentInvalidError,
   CCIPChainFamilyUnsupportedError,
   ChainFamily,
   networkInfo,
 } from '@chainlink/ccip-sdk/src/index.ts'
+import { PublicKey } from '@solana/web3.js'
 import type { Argv } from 'yargs'
 
 import type { GlobalOpts } from '../../index.ts'
@@ -103,10 +105,23 @@ async function doCreateTokenAlt(ctx: Ctx, argv: CreateTokenAltArgv) {
   const mgr = SolanaTokenManager.fromChain(solanaChain)
 
   const [, wallet] = await loadChainWallet(chain, argv)
-  // create+extend by default; `poolAddress` argv maps to the new `poolProgramAddress` param.
+
+  // `--pool-address` is the pool STATE PDA (per --help), but the SDK derives the state PDA from
+  // `poolProgramAddress` + mint. A Solana account's on-chain owner IS the program that owns it, so
+  // the pool state PDA's owner is the pool program — resolve it and pass that as poolProgramAddress.
+  const poolStateInfo = await solanaChain.connection.getAccountInfo(new PublicKey(argv.poolAddress))
+  if (!poolStateInfo) {
+    throw new CCIPArgumentInvalidError(
+      'pool-address',
+      `pool state account ${argv.poolAddress} not found on-chain`,
+    )
+  }
+  const poolProgramAddress = poolStateInfo.owner.toBase58()
+
+  // create+extend by default.
   const result = await mgr.createLookupTable({
     tokenAddress: argv.tokenAddress,
-    poolProgramAddress: argv.poolAddress,
+    poolProgramAddress,
     ...(argv.authority && { authority: argv.authority }),
     ...(argv.additionalAddresses && { additionalAddresses: argv.additionalAddresses }),
     wallet,

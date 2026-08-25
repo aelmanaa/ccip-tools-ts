@@ -3,9 +3,6 @@ import { describe, it } from 'node:test'
 
 import { PublicKey } from '@solana/web3.js'
 
-import { ChainFamily } from '../../../../networks.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
-import { createTokenPoolProgram } from '../../programs/token-pool.ts'
 import { AcceptOwnership } from './accept-ownership.ts'
 import {
   AUTHORITY,
@@ -17,6 +14,9 @@ import {
   statePda,
   stubChain,
 } from './test-helpers.ts'
+import { ChainFamily } from '../../../../networks.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
+import { createTokenPoolProgram } from '../../programs/token-pool.ts'
 
 describe('Solana token-pool acceptOwnership', () => {
   it('builds an instruction that matches a direct anchor build', async () => {

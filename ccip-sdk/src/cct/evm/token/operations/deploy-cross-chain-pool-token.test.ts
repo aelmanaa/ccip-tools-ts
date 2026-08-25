@@ -4,10 +4,10 @@ import { describe, it } from 'node:test'
 import { AbiCoder, ZeroAddress, concat, dataLength } from 'ethers'
 
 import { DeployCrossChainPoolToken } from './deploy-cross-chain-pool-token.ts'
-import { CROSS_CHAIN_POOL_TOKEN_BYTECODE } from '../bytecodes/CrossChainPoolToken.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { CROSS_CHAIN_POOL_TOKEN_BYTECODE } from '../bytecodes/CrossChainPoolToken.ts'
 
 const CCIP_ADMIN = '0xa42BA090720aEE0602aD4381FAdcC9380aD3d888'
 const ROUTER = '0xd7bf0e3d34b4c4f7d5f3c4c6b2a1e0f9c8b7a6d5'

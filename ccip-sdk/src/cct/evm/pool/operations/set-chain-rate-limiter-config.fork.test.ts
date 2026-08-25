@@ -64,10 +64,13 @@ describe('EVMTokenManager setChainRateLimiterConfig Fork Tests', { skip, timeout
       name: 'Rate Limiter Config Test Token',
       symbol: 'RLCT',
       decimals: 18,
-      initialSupply: 1_000_000n * 10n ** 18n,
+      preMint: 1_000_000n * 10n ** 18n,
       wallet,
+      maxSupply: 0n,
+      owner: await wallet.getAddress(),
+      preMintRecipient: await wallet.getAddress(),
     })
-    const tokenAddress = tokenResult.tokenAddress
+    const tokenAddress = tokenResult.contractAddress
 
     // 2. Deploy pool (deploys a v2.0 BurnMintTokenPool)
     const poolResult = await mgr.deployPool({
@@ -80,14 +83,15 @@ describe('EVMTokenManager setChainRateLimiterConfig Fork Tests', { skip, timeout
     poolAddress = poolResult.poolAddress
 
     // 3. Propose + accept admin
-    await mgr.proposeAdminRole({
+    await mgr.registerAdmin({
       tokenAddress,
-      registryModuleAddress: SEPOLIA_REGISTRY_MODULE,
-      registrationMethod: 'getCCIPAdmin',
+      registryModule: SEPOLIA_REGISTRY_MODULE,
+      address: SEPOLIA_ROUTER,
+      registrationMethod: 'ccip-admin',
       wallet,
     })
 
-    await mgr.acceptAdminRole({
+    await mgr.acceptAdmin({
       tokenAddress,
       address: SEPOLIA_ROUTER,
       wallet,

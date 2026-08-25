@@ -1,6 +1,7 @@
 import { MULTISIG_SIZE, createInitializeMultisigInstruction } from '@solana/spl-token'
 import { PublicKey, SystemProgram } from '@solana/web3.js'
 
+import { detectMintTokenProgram } from './spl.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
@@ -12,8 +13,8 @@ import {
   SolanaOperation,
 } from '../../operation.ts'
 import { deriveTokenPoolSignerPda } from '../../programs/token-pool.ts'
+import { submit } from '../../submit.ts'
 import { validatePublicKey } from '../../validate.ts'
-import { detectMintTokenProgram } from './spl.ts'
 
 /** SPL Token multisig supports at most 11 signers. */
 const MAX_MULTISIG_SIGNERS = 11
@@ -73,13 +74,12 @@ export type ExecuteCreatePoolMintAuthorityMultisigResult = TransactionHash & {
  */
 export class CreatePoolMintAuthorityMultisig extends SolanaOperation<
   CreatePoolMintAuthorityMultisigParams,
-  GenerateCreatePoolMintAuthorityMultisigResult,
-  ExecuteCreatePoolMintAuthorityMultisigResult
+  GenerateCreatePoolMintAuthorityMultisigResult
 > {
   readonly name = 'createPoolMintAuthorityMultisig'
 
   /** Validates public keys, signer count, and threshold before any RPC. */
-  protected validate(params: GenerateCreatePoolMintAuthorityMultisigParams): void {
+  protected override validate(params: GenerateCreatePoolMintAuthorityMultisigParams): void {
     validatePublicKey(this.name, 'payer', params.payer)
     validatePublicKey(this.name, 'mint', params.mint)
     validatePublicKey(this.name, 'poolProgramId', params.poolProgramId)
@@ -170,13 +170,19 @@ export class CreatePoolMintAuthorityMultisig extends SolanaOperation<
     }
   }
 
-  /** Adds the derived multisig metadata to the execute result. */
-  protected override resultFromGenerated(
-    hash: TransactionHash,
-    tx: GenerateCreatePoolMintAuthorityMultisigResult,
-  ): ExecuteCreatePoolMintAuthorityMultisigResult {
+  /**
+   * Generate, sign, and submit with `wallet.publicKey` as payer; adds the derived multisig
+   * metadata (address, pool signer PDA, ordered signer set) to the confirmed result.
+   */
+  override async execute(
+    chain: SolanaChain,
+    params: ExecuteCreatePoolMintAuthorityMultisigParams,
+  ): Promise<ExecuteCreatePoolMintAuthorityMultisigResult> {
+    const { wallet, computeUnits, parsed } = this.prepareWalletExecution(params)
+    const tx = await this.buildUnsigned(chain, parsed)
+    const { hash } = await submit(chain, wallet, tx, this.name, computeUnits)
     return {
-      ...hash,
+      hash,
       multisigAddress: tx.multisigAddress,
       poolSignerPda: tx.poolSignerPda,
       allSigners: tx.allSigners,

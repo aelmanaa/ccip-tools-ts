@@ -8,19 +8,35 @@ import type { Connection } from '@solana/web3.js'
 
 import type { ChainContext } from '../../chain.ts'
 import type { ChainFamily } from '../../networks.ts'
+import {
+  type MintBurnRolesResult as SolanaMintBurnRolesResult,
+  getMintBurnRoles as getSolanaMintBurnRoles,
+} from './token/get-mint-burn-roles.ts'
 import type { SolanaChain } from '../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../solana/types.ts'
 import { TokenManager } from '../token-manager.ts'
 import { type SerializedSolanaTxEncoding, serializeUnsignedSolanaTx } from './serialize.ts'
 import {
+  type ExecuteCreatePoolMintAuthorityMultisigParams,
+  type ExecuteCreatePoolMintAuthorityMultisigResult,
+  type ExecuteCreatePoolTokenAccountParams,
+  type ExecuteCreatePoolTokenAccountResult,
   type ExecuteCreateTokenAccountParams,
   type ExecuteCreateTokenAccountResult,
   type ExecuteDeployTokenParams,
   type ExecuteDeployTokenResult,
+  type ExecuteGrantMintBurnAccessParams,
+  type ExecuteGrantMintBurnAccessResult,
   type ExecuteMintTokensParams,
   type ExecuteMintTokensResult,
+  type ExecuteRevokeMintBurnAccessParams,
+  type ExecuteRevokeMintBurnAccessResult,
   type ExecuteSetTokenAuthorityParams,
   type ExecuteSetTokenAuthorityResult,
+  type ExecuteTransferMintAuthorityParams,
+  type ExecuteTransferMintAuthorityResult,
+  type GenerateCreatePoolTokenAccountParams,
+  type GenerateCreatePoolTokenAccountResult,
   type GenerateCreateTokenAccountParams,
   type GenerateCreateTokenAccountResult,
   type GenerateDeployTokenParams,
@@ -29,9 +45,14 @@ import {
   type GenerateMintTokensResult,
   type GenerateSetTokenAuthorityParams,
   type GenerateSetTokenAuthorityResult,
+  CreatePoolMintAuthorityMultisig,
+  CreatePoolTokenAccount,
   CreateTokenAccount,
+  GrantMintBurnAccess,
   MintTokens,
+  RevokeMintBurnAccess,
   SetTokenAuthority,
+  TransferMintAuthority,
 } from './token/operations/index.ts'
 import {
   type ExecuteAcceptAdminParams,
@@ -156,6 +177,13 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   readonly #createTokenAccount = new CreateTokenAccount()
   readonly #mintTokens = new MintTokens()
   readonly #setTokenAuthority = new SetTokenAuthority()
+
+  // Productized extras (propose-admin facade): token mint/burn + pool mint-authority multisig
+  readonly #grantMintBurnAccess = new GrantMintBurnAccess()
+  readonly #revokeMintBurnAccess = new RevokeMintBurnAccess()
+  readonly #transferMintAuthority = new TransferMintAuthority()
+  readonly #createPoolMintAuthorityMultisig = new CreatePoolMintAuthorityMultisig()
+  readonly #createPoolTokenAccount = new CreatePoolTokenAccount()
 
   // Token admin registry operations
   readonly #acceptAdmin = new AcceptAdmin()
@@ -1815,6 +1843,100 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
     encoding?: SerializedSolanaTxEncoding,
   ): Promise<string> {
     return serializeUnsignedSolanaTx(this.provider, unsigned, payer, encoding)
+  }
+
+  /** Grants a mint/burn role (or both) on an SPL token to an authority, signing with `opts.wallet`. */
+  grantMintBurnAccess(
+    opts: ExecuteGrantMintBurnAccessParams,
+  ): Promise<ExecuteGrantMintBurnAccessResult> {
+    return this.#grantMintBurnAccess.execute(this.chain, opts)
+  }
+
+  /** Revokes a mint or burn role on an SPL token from an authority, signing with `opts.wallet`. */
+  revokeMintBurnAccess(
+    opts: ExecuteRevokeMintBurnAccessParams,
+  ): Promise<ExecuteRevokeMintBurnAccessResult> {
+    return this.#revokeMintBurnAccess.execute(this.chain, opts)
+  }
+
+  /** Transfers an SPL mint's mint authority to a new authority, signing with `opts.wallet`. */
+  transferMintAuthority(
+    opts: ExecuteTransferMintAuthorityParams,
+  ): Promise<ExecuteTransferMintAuthorityResult> {
+    return this.#transferMintAuthority.execute(this.chain, opts)
+  }
+
+  /** Creates an SPL Token multisig with the pool signer PDA as first signer, signing with `opts.wallet`. */
+  createPoolMintAuthorityMultisig(
+    opts: ExecuteCreatePoolMintAuthorityMultisigParams,
+  ): Promise<ExecuteCreatePoolMintAuthorityMultisigResult> {
+    return this.#createPoolMintAuthorityMultisig.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned instruction set that creates the pool signer PDA's associated token account
+   * (the pool "vault") for a token mint, deriving the pool program from the pool state PDA's
+   * on-chain owner. Idempotent — safe to build even when the ATA already exists.
+   *
+   * @remarks Required one-time setup after `deployTokenPool`: the pool state records
+   * `pool_token_account` = this ATA, but the pool program's `initialize` does not create it, so the
+   * first ccip-send from Solana reverts with `AccountNotInitialized` until it exists. The returned
+   * result carries the derived `poolTokenAccount` and `poolSignerPda`.
+   *
+   * @throws {@link CCTParamsInvalidError} If an address is invalid, or the pool state account is not
+   *   found on-chain.
+   *
+   * @example
+   * ```ts
+   * const cct = SolanaTokenManager.fromChain(chain)
+   * const unsigned = await cct.generateUnsignedCreatePoolTokenAccount({
+   *   payer,
+   *   tokenAddress: mint,
+   *   poolAddress: poolStatePda,
+   * })
+   * ```
+   */
+  generateUnsignedCreatePoolTokenAccount(
+    opts: GenerateCreatePoolTokenAccountParams,
+  ): Promise<GenerateCreatePoolTokenAccountResult> {
+    return this.#createPoolTokenAccount.generate(this.chain, opts)
+  }
+
+  /**
+   * Creates the pool signer PDA's associated token account (the pool "vault") for a token mint,
+   * signing + submitting with `opts.wallet`; resolves to the tx hash plus the created
+   * `poolTokenAccount` and its owning `poolSignerPda`. Idempotent.
+   *
+   * @remarks Run this once after `deployTokenPool` (before the first ccip-send): the pool records
+   * `pool_token_account` = this ATA but does not create it. The pool program is derived from the
+   * pool state PDA's on-chain owner, so pass the pool state PDA as `poolAddress`.
+   *
+   * @see {@link deployTokenPool}
+   *
+   * @throws {@link CCIPWalletInvalidError} If `wallet` cannot sign Solana transactions.
+   * @throws {@link CCTParamsInvalidError} If an address is invalid, or the pool state account is not
+   *   found on-chain.
+   * @throws {@link CCTTxFailedError} If transaction simulation or submission fails.
+   *
+   * @example
+   * ```ts
+   * const cct = SolanaTokenManager.fromChain(chain)
+   * const { hash, poolTokenAccount, poolSignerPda } = await cct.createPoolTokenAccount({
+   *   wallet,
+   *   tokenAddress: mint,
+   *   poolAddress: poolStatePda,
+   * })
+   * ```
+   */
+  createPoolTokenAccount(
+    opts: ExecuteCreatePoolTokenAccountParams,
+  ): Promise<ExecuteCreatePoolTokenAccountResult> {
+    return this.#createPoolTokenAccount.execute(this.chain, opts)
+  }
+
+  /** Reads the mint authority (and multisig detail) for a Solana SPL mint. */
+  getMintBurnRoles(tokenAddress: string): Promise<SolanaMintBurnRolesResult> {
+    return getSolanaMintBurnRoles(this.chain, tokenAddress)
   }
 }
 

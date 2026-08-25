@@ -39,7 +39,7 @@ export class RevokeMintBurnAccess extends SolanaOperation<RevokeMintBurnAccessPa
   readonly name = 'revokeMintBurnAccess'
 
   /** Always throws — role-based revoke is not supported on Solana. */
-  protected validate(_params: GenerateRevokeMintBurnAccessParams): void {
+  protected override validate(_params: GenerateRevokeMintBurnAccessParams): void {
     throw new CCTParamsInvalidError(
       this.name,
       'chain',

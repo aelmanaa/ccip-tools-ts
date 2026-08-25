@@ -65,10 +65,13 @@ describe('EVMTokenManager applyChainUpdates Fork Tests', { skip, timeout: 120_00
       name: 'Apply Chain Updates Test Token',
       symbol: 'ACUT',
       decimals: 18,
-      initialSupply: 1_000_000n * 10n ** 18n,
+      preMint: 1_000_000n * 10n ** 18n,
       wallet,
+      maxSupply: 0n,
+      owner: await wallet.getAddress(),
+      preMintRecipient: await wallet.getAddress(),
     })
-    tokenAddress = tokenResult.tokenAddress
+    tokenAddress = tokenResult.contractAddress
 
     // 2. Deploy pool
     const poolResult = await mgr.deployPool({
@@ -81,14 +84,15 @@ describe('EVMTokenManager applyChainUpdates Fork Tests', { skip, timeout: 120_00
     poolAddress = poolResult.poolAddress
 
     // 3. Propose + accept admin (for setting pool later)
-    await mgr.proposeAdminRole({
+    await mgr.registerAdmin({
       tokenAddress,
-      registryModuleAddress: SEPOLIA_REGISTRY_MODULE,
-      registrationMethod: 'getCCIPAdmin',
+      registryModule: SEPOLIA_REGISTRY_MODULE,
+      address: SEPOLIA_ROUTER,
+      registrationMethod: 'ccip-admin',
       wallet,
     })
 
-    await mgr.acceptAdminRole({
+    await mgr.acceptAdmin({
       tokenAddress,
       address: SEPOLIA_ROUTER,
       wallet,

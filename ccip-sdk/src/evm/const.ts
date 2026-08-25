@@ -13,6 +13,8 @@ import CCIPReceiver_2_0_ABI from './abi/CCIPReceiver_2_0.ts'
 import CCTPVerifier_2_0_ABI from './abi/CCTPVerifier_2_0.ts'
 import CommitStore_1_2_ABI from './abi/CommitStore_1_2.ts'
 import CommitStore_1_5_ABI from './abi/CommitStore_1_5.ts'
+import CrossChainToken_ABI from './abi/CrossChainToken.ts'
+import ERC20LockBox_2_0_ABI from './abi/ERC20LockBox.ts'
 import FeeQuoter_1_6_ABI from './abi/FeeQuoter_1_6.ts'
 import FeeQuoter_2_0_ABI from './abi/FeeQuoter_2_0.ts'
 import TokenPool_1_5_ABI from './abi/LockReleaseTokenPool_1_5.ts'
@@ -28,6 +30,7 @@ import OnRamp_1_6_ABI from './abi/OnRamp_1_6.ts'
 import OnRamp_2_0_ABI from './abi/OnRamp_2_0.ts'
 import PriceRegistry_1_2_ABI from './abi/PriceRegistry_1_2.ts'
 import RMNProxy_ABI from './abi/RMNProxy.ts'
+import RegistryModuleOwnerCustom_1_6_ABI from './abi/RegistryModuleOwnerCustom_1_6.ts'
 import Router_ABI from './abi/Router.ts'
 import TokenAdminRegistry_ABI from './abi/TokenAdminRegistry_1_5.ts'
 import TokenPool_2_0_ABI from './abi/TokenPool_2_0.ts'
@@ -62,6 +65,9 @@ export const TokenPoolAndProxyABI = parseAbi(['function getPreviousPool() view r
 export const interfaces = {
   Router: new Interface(Router_ABI),
   Token: new Interface(Token_ABI),
+  CrossChainToken: new Interface(CrossChainToken_ABI),
+  ERC20LockBox_v2_0: new Interface(ERC20LockBox_2_0_ABI),
+  RegistryModuleOwnerCustom: new Interface(RegistryModuleOwnerCustom_1_6_ABI),
   TokenAdminRegistry: new Interface(TokenAdminRegistry_ABI),
   RMNProxy: new Interface(RMNProxy_ABI),
   FeeQuoter_v1_6: new Interface(FeeQuoter_1_6_ABI),

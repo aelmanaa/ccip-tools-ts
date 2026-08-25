@@ -1,3 +1,4 @@
+import { TransferMintAuthority } from './transfer-mint-authority.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
@@ -8,7 +9,6 @@ import {
   SolanaOperation,
 } from '../../operation.ts'
 import { validatePublicKey } from '../../validate.ts'
-import { TransferMintAuthority } from './transfer-mint-authority.ts'
 
 /**
  * Which role(s) to grant. On Solana, SPL tokens have a single mint authority and burn is
@@ -48,7 +48,7 @@ export class GrantMintBurnAccess extends SolanaOperation<GrantMintBurnAccessPara
   readonly #transfer = new TransferMintAuthority()
 
   /** Validates public keys and rejects the unsupported `'burn'` role before any RPC. */
-  protected validate(params: GenerateGrantMintBurnAccessParams): void {
+  protected override validate(params: GenerateGrantMintBurnAccessParams): void {
     validatePublicKey(this.name, 'payer', params.payer)
     validatePublicKey(this.name, 'tokenAddress', params.tokenAddress)
     validatePublicKey(this.name, 'authority', params.authority)

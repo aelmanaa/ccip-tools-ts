@@ -45,7 +45,7 @@ export class ProposeAdminRole extends SolanaOperation<ProposeAdminRoleParams> {
   readonly name = 'proposeAdminRole'
 
   /** Validates all public keys before any RPC. */
-  protected validate(params: GenerateProposeAdminRoleParams): void {
+  protected override validate(params: GenerateProposeAdminRoleParams): void {
     validatePublicKey(this.name, 'tokenAddress', params.tokenAddress)
     validatePublicKey(this.name, 'administrator', params.administrator)
     validatePublicKey(this.name, 'routerAddress', params.routerAddress)

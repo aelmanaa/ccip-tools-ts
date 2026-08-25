@@ -20,7 +20,55 @@ import {
 } from './lockbox/operations/authorize-callers.ts'
 import { type DeployLockboxParams, DeployLockbox } from './lockbox/operations/deploy-lockbox.ts'
 import type { DeployResult, EVMExecuteParams } from './operation.ts'
+import { type AcceptOwnershipParams, AcceptOwnership } from './pool/operations/accept-ownership.ts'
+import {
+  type AppendRemotePoolAddressesParams,
+  AppendRemotePoolAddresses,
+} from './pool/operations/append-remote-pool-addresses.ts'
+import {
+  type ApplyChainUpdatesParams,
+  ApplyChainUpdates,
+} from './pool/operations/apply-chain-updates.ts'
+import {
+  type DeleteChainConfigParams,
+  DeleteChainConfig,
+} from './pool/operations/delete-chain-config.ts'
+import {
+  type RemoveRemotePoolAddressesParams,
+  RemoveRemotePoolAddresses,
+} from './pool/operations/remove-remote-pool-addresses.ts'
+import {
+  type SetAllowedFinalityConfigParams,
+  SetAllowedFinalityConfig,
+} from './pool/operations/set-allowed-finality-config.ts'
+import {
+  type SetChainRateLimiterConfigParams,
+  SetChainRateLimiterConfig,
+} from './pool/operations/set-chain-rate-limiter-config.ts'
+import { type SetFeeAdminParams, SetFeeAdmin } from './pool/operations/set-fee-admin.ts'
+import {
+  type SetRateLimitAdminParams,
+  SetRateLimitAdmin,
+} from './pool/operations/set-rate-limit-admin.ts'
+import {
+  type SetTokenTransferFeeConfigParams,
+  SetTokenTransferFeeConfig,
+} from './pool/operations/set-token-transfer-fee-config.ts'
+import { type MintBurnRolesResult, getMintBurnRoles } from './token/get-mint-burn-roles.ts'
+import {
+  type DeployCrossChainPoolTokenParams,
+  type DeployCrossChainPoolTokenResult,
+  DeployCrossChainPoolToken,
+} from './token/operations/deploy-cross-chain-pool-token.ts'
 import { type DeployTokenParams, DeployToken } from './token/operations/deploy-token.ts'
+import {
+  type GrantMintBurnAccessParams,
+  GrantMintBurnAccess,
+} from './token/operations/grant-mint-burn-access.ts'
+import {
+  type RevokeMintBurnAccessParams,
+  RevokeMintBurnAccess,
+} from './token/operations/revoke-mint-burn-access.ts'
 import {
   type AcceptAdminParams,
   AcceptAdmin,
@@ -45,6 +93,21 @@ import {
   TransferAdmin,
 } from './token-admin-registry/operations/transfer-admin.ts'
 import {
+  type DeployPoolViaFactoryParams,
+  type DeployPoolViaFactoryResult,
+  DeployPoolViaFactory,
+} from './token-pool/operations/deploy-pool-via-factory.ts'
+import {
+  type DeployPoolParams,
+  type DeployPoolResult,
+  DeployPool,
+} from './token-pool/operations/deploy-pool.ts'
+import {
+  type DeployTokenAndPoolViaFactoryParams,
+  type DeployTokenAndPoolViaFactoryResult,
+  DeployTokenAndPoolViaFactory,
+} from './token-pool/operations/deploy-token-and-pool-via-factory.ts'
+import {
   type DeployTokenPoolParams,
   DeployTokenPool,
 } from './token-pool/operations/deploy-token-pool.ts'
@@ -53,6 +116,10 @@ import {
   type GetTokenPoolStateResult,
   GetTokenPoolState,
 } from './token-pool/operations/get-token-pool-state.ts'
+import {
+  type ProvideLiquidityParams,
+  ProvideLiquidity,
+} from './token-pool/operations/provide-liquidity.ts'
 import {
   type TransferOwnershipParams,
   TransferOwnership,
@@ -80,6 +147,25 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   // Lockbox operations
   readonly #deployLockbox = new DeployLockbox()
   readonly #authorizeLockboxCallers = new AuthorizeLockboxCallers()
+
+  // Productized extras (propose-admin facade): additional pool/token operations
+  readonly #deployPool = new DeployPool()
+  readonly #deployPoolViaFactory = new DeployPoolViaFactory()
+  readonly #deployTokenAndPoolViaFactory = new DeployTokenAndPoolViaFactory()
+  readonly #deployCrossChainPoolToken = new DeployCrossChainPoolToken()
+  readonly #provideLiquidity = new ProvideLiquidity()
+  readonly #grantMintBurnAccess = new GrantMintBurnAccess()
+  readonly #revokeMintBurnAccess = new RevokeMintBurnAccess()
+  readonly #acceptOwnership = new AcceptOwnership()
+  readonly #appendRemotePoolAddresses = new AppendRemotePoolAddresses()
+  readonly #removeRemotePoolAddresses = new RemoveRemotePoolAddresses()
+  readonly #applyChainUpdates = new ApplyChainUpdates()
+  readonly #deleteChainConfig = new DeleteChainConfig()
+  readonly #setChainRateLimiterConfig = new SetChainRateLimiterConfig()
+  readonly #setRateLimitAdmin = new SetRateLimitAdmin()
+  readonly #setAllowedFinalityConfig = new SetAllowedFinalityConfig()
+  readonly #setFeeAdmin = new SetFeeAdmin()
+  readonly #setTokenTransferFeeConfig = new SetTokenTransferFeeConfig()
 
   /** Wraps an {@link EVMChain}; prefer the static factory methods. */
   constructor(chain: EVMChain) {
@@ -571,7 +657,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * pools, or v1.5.0 `*AndProxy` pools, use `cct.chain.getTokenPoolConfig()`, the tolerant
    * transfer-flow read. No pool version exposes a pending-owner getter, so a proposed owner is
    * not readable here.
-   * @remarks The Solana counterpart, `SolanaTokenManager.getTokenPoolState`, returns a different
+   * @remarks The Solana token manager's `getTokenPoolState` counterpart returns a different
    * shape: its fields nest under `state.config` where these are flat, it spells `token` /
    * `tokenDecimals` / `rmnProxy` as `config.mint` / `config.decimals` / `config.rmnRemote`, and its
    * `version` is the account-layout number, not this protocol semver. `owner`, `rateLimitAdmin`
@@ -591,6 +677,215 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    */
   getTokenPoolState(opts: GetTokenPoolStateParams): Promise<GetTokenPoolStateResult> {
     return this.#getTokenPoolState.query(this.chain, opts)
+  }
+
+  /** Builds an unsigned canonical CCT v2.0 token-pool deployment tx (BurnMint or LockRelease). */
+  generateUnsignedDeployPool(opts: DeployPoolParams): Promise<UnsignedEVMTx> {
+    return this.#deployPool.generate(this.chain, opts)
+  }
+
+  /** Deploys a canonical CCT v2.0 token pool (auto-deploys + wires an ERC20LockBox for lock-release). */
+  deployPool(opts: EVMExecuteParams<DeployPoolParams>): Promise<DeployPoolResult> {
+    return this.#deployPool.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `TokenPoolFactory 2.0.0` deploy tx for an existing token (CREATE2). */
+  generateUnsignedDeployPoolViaFactory(opts: DeployPoolViaFactoryParams): Promise<UnsignedEVMTx> {
+    return this.#deployPoolViaFactory.generate(this.chain, opts)
+  }
+
+  /** Deploys a token pool for an existing token via `TokenPoolFactory 2.0.0`. */
+  deployPoolViaFactory(
+    opts: EVMExecuteParams<DeployPoolViaFactoryParams>,
+  ): Promise<DeployPoolViaFactoryResult> {
+    return this.#deployPoolViaFactory.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `TokenPoolFactory 2.0.0` deploy tx creating a new token and its pool. */
+  generateUnsignedDeployTokenAndPoolViaFactory(
+    opts: DeployTokenAndPoolViaFactoryParams,
+  ): Promise<UnsignedEVMTx> {
+    return this.#deployTokenAndPoolViaFactory.generate(this.chain, opts)
+  }
+
+  /** Deploys a new `CrossChainToken` and its pool in one tx via `TokenPoolFactory 2.0.0`. */
+  deployTokenAndPoolViaFactory(
+    opts: EVMExecuteParams<DeployTokenAndPoolViaFactoryParams>,
+  ): Promise<DeployTokenAndPoolViaFactoryResult> {
+    return this.#deployTokenAndPoolViaFactory.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `CrossChainPoolToken` (combined token + pool) deployment tx. */
+  generateUnsignedDeployCrossChainPoolToken(
+    opts: DeployCrossChainPoolTokenParams,
+  ): Promise<UnsignedEVMTx> {
+    return this.#deployCrossChainPoolToken.generate(this.chain, opts)
+  }
+
+  /** Deploys a `CrossChainPoolToken` (the single contract is both the token and its own pool). */
+  deployCrossChainPoolToken(
+    opts: EVMExecuteParams<DeployCrossChainPoolTokenParams>,
+  ): Promise<DeployCrossChainPoolTokenResult> {
+    return this.#deployCrossChainPoolToken.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `provideLiquidity` tx for a lock-release pool (via its ERC20LockBox). */
+  generateUnsignedProvideLiquidity(opts: ProvideLiquidityParams): Promise<UnsignedEVMTx> {
+    return this.#provideLiquidity.generate(this.chain, opts)
+  }
+
+  /** Provides liquidity to a lock-release pool, signing + submitting with `opts.wallet`. */
+  provideLiquidity(opts: EVMExecuteParams<ProvideLiquidityParams>): Promise<TransactionResult> {
+    return this.#provideLiquidity.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `grantMintAndBurnRoles` tx granting mint/burn roles on a CrossChainToken. */
+  generateUnsignedGrantMintBurnAccess(opts: GrantMintBurnAccessParams): Promise<UnsignedEVMTx> {
+    return this.#grantMintBurnAccess.generate(this.chain, opts)
+  }
+
+  /** Grants mint/burn roles on a CrossChainToken, signing + submitting with `opts.wallet`. */
+  grantMintBurnAccess(
+    opts: EVMExecuteParams<GrantMintBurnAccessParams>,
+  ): Promise<TransactionResult> {
+    return this.#grantMintBurnAccess.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned tx revoking a mint or burn role on a CrossChainToken. */
+  generateUnsignedRevokeMintBurnAccess(opts: RevokeMintBurnAccessParams): Promise<UnsignedEVMTx> {
+    return this.#revokeMintBurnAccess.generate(this.chain, opts)
+  }
+
+  /** Revokes a mint or burn role on a CrossChainToken, signing + submitting with `opts.wallet`. */
+  revokeMintBurnAccess(
+    opts: EVMExecuteParams<RevokeMintBurnAccessParams>,
+  ): Promise<TransactionResult> {
+    return this.#revokeMintBurnAccess.execute(this.chain, opts)
+  }
+
+  /** Reads the addresses currently holding the MINTER/BURNER roles on a CrossChainToken. */
+  getMintBurnRoles(tokenAddress: string): Promise<MintBurnRolesResult> {
+    return getMintBurnRoles(this.chain, tokenAddress)
+  }
+
+  /** Builds an unsigned pool `acceptOwnership` tx (step 2 of the 2-step ownership transfer). */
+  generateUnsignedAcceptOwnership(opts: AcceptOwnershipParams): Promise<UnsignedEVMTx> {
+    return this.#acceptOwnership.generate(this.chain, opts)
+  }
+
+  /** Accepts a pending pool ownership transfer, signing + submitting with `opts.wallet`. */
+  acceptOwnership(opts: EVMExecuteParams<AcceptOwnershipParams>): Promise<TransactionResult> {
+    return this.#acceptOwnership.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `appendRemotePoolAddresses` tx adding remote pool addresses for a lane. */
+  generateUnsignedAppendRemotePoolAddresses(
+    opts: AppendRemotePoolAddressesParams,
+  ): Promise<UnsignedEVMTx> {
+    return this.#appendRemotePoolAddresses.generate(this.chain, opts)
+  }
+
+  /** Appends remote pool addresses for a lane, signing + submitting with `opts.wallet`. */
+  appendRemotePoolAddresses(
+    opts: EVMExecuteParams<AppendRemotePoolAddressesParams>,
+  ): Promise<TransactionResult> {
+    return this.#appendRemotePoolAddresses.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `removeRemotePoolAddresses` tx removing remote pool addresses for a lane. */
+  generateUnsignedRemoveRemotePoolAddresses(
+    opts: RemoveRemotePoolAddressesParams,
+  ): Promise<UnsignedEVMTx> {
+    return this.#removeRemotePoolAddresses.generate(this.chain, opts)
+  }
+
+  /** Removes remote pool addresses for a lane, signing + submitting with `opts.wallet`. */
+  removeRemotePoolAddresses(
+    opts: EVMExecuteParams<RemoveRemotePoolAddressesParams>,
+  ): Promise<TransactionResult> {
+    return this.#removeRemotePoolAddresses.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `applyChainUpdates` tx configuring/removing a pool's remote lanes. */
+  generateUnsignedApplyChainUpdates(opts: ApplyChainUpdatesParams): Promise<UnsignedEVMTx> {
+    return this.#applyChainUpdates.generate(this.chain, opts)
+  }
+
+  /** Applies remote-chain lane updates to a pool, signing + submitting with `opts.wallet`. */
+  applyChainUpdates(opts: EVMExecuteParams<ApplyChainUpdatesParams>): Promise<TransactionResult> {
+    return this.#applyChainUpdates.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `deleteChainConfig` tx removing a remote-chain config from a pool. */
+  generateUnsignedDeleteChainConfig(opts: DeleteChainConfigParams): Promise<UnsignedEVMTx> {
+    return this.#deleteChainConfig.generate(this.chain, opts)
+  }
+
+  /** Removes a remote-chain config from a pool, signing + submitting with `opts.wallet`. */
+  deleteChainConfig(opts: EVMExecuteParams<DeleteChainConfigParams>): Promise<TransactionResult> {
+    return this.#deleteChainConfig.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `setChainRateLimiterConfig` tx updating a lane's rate limiter config. */
+  generateUnsignedSetChainRateLimiterConfig(
+    opts: SetChainRateLimiterConfigParams,
+  ): Promise<UnsignedEVMTx> {
+    return this.#setChainRateLimiterConfig.generate(this.chain, opts)
+  }
+
+  /** Updates a lane's rate limiter config on a pool, signing + submitting with `opts.wallet`. */
+  setChainRateLimiterConfig(
+    opts: EVMExecuteParams<SetChainRateLimiterConfigParams>,
+  ): Promise<TransactionResult> {
+    return this.#setChainRateLimiterConfig.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `setRateLimitAdmin` tx setting a pool's rate limit admin. */
+  generateUnsignedSetRateLimitAdmin(opts: SetRateLimitAdminParams): Promise<UnsignedEVMTx> {
+    return this.#setRateLimitAdmin.generate(this.chain, opts)
+  }
+
+  /** Sets a pool's rate limit admin, signing + submitting with `opts.wallet`. */
+  setRateLimitAdmin(opts: EVMExecuteParams<SetRateLimitAdminParams>): Promise<TransactionResult> {
+    return this.#setRateLimitAdmin.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `setAllowedFinalityConfig` tx (EVM v2.0+ pools). */
+  generateUnsignedSetAllowedFinalityConfig(
+    opts: SetAllowedFinalityConfigParams,
+  ): Promise<UnsignedEVMTx> {
+    return this.#setAllowedFinalityConfig.generate(this.chain, opts)
+  }
+
+  /** Sets the allowed finality config on a v2.0+ pool, signing + submitting with `opts.wallet`. */
+  setAllowedFinalityConfig(
+    opts: EVMExecuteParams<SetAllowedFinalityConfigParams>,
+  ): Promise<TransactionResult> {
+    return this.#setAllowedFinalityConfig.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `setFeeAdmin` tx setting a pool's fee admin (EVM v2.0+ pools). */
+  generateUnsignedSetFeeAdmin(opts: SetFeeAdminParams): Promise<UnsignedEVMTx> {
+    return this.#setFeeAdmin.generate(this.chain, opts)
+  }
+
+  /** Sets a v2.0+ pool's fee admin, signing + submitting with `opts.wallet`. */
+  setFeeAdmin(opts: EVMExecuteParams<SetFeeAdminParams>): Promise<TransactionResult> {
+    return this.#setFeeAdmin.execute(this.chain, opts)
+  }
+
+  /** Builds an unsigned `setTokenTransferFeeConfig` tx (EVM v2.0+ pools). */
+  generateUnsignedSetTokenTransferFeeConfig(
+    opts: SetTokenTransferFeeConfigParams,
+  ): Promise<UnsignedEVMTx> {
+    return this.#setTokenTransferFeeConfig.generate(this.chain, opts)
+  }
+
+  /** Sets a v2.0+ pool's token transfer fee config, signing + submitting with `opts.wallet`. */
+  setTokenTransferFeeConfig(
+    opts: EVMExecuteParams<SetTokenTransferFeeConfigParams>,
+  ): Promise<TransactionResult> {
+    return this.#setTokenTransferFeeConfig.execute(this.chain, opts)
   }
 }
 
@@ -632,3 +927,33 @@ export type {
   ExplorerVerificationInput,
 } from './operation.ts'
 export type { TransactionResult } from '../operation.ts'
+
+// Productized extras (propose-admin facade)
+export type { DeployVerification, DeployVerificationTarget } from './deploy-verification.ts'
+export type { AcceptOwnershipParams } from './pool/operations/accept-ownership.ts'
+export type { AppendRemotePoolAddressesParams } from './pool/operations/append-remote-pool-addresses.ts'
+export type { ApplyChainUpdatesParams } from './pool/operations/apply-chain-updates.ts'
+export type { DeleteChainConfigParams } from './pool/operations/delete-chain-config.ts'
+export type { RemoveRemotePoolAddressesParams } from './pool/operations/remove-remote-pool-addresses.ts'
+export type { SetAllowedFinalityConfigParams } from './pool/operations/set-allowed-finality-config.ts'
+export type { SetChainRateLimiterConfigParams } from './pool/operations/set-chain-rate-limiter-config.ts'
+export type { SetFeeAdminParams } from './pool/operations/set-fee-admin.ts'
+export type { SetRateLimitAdminParams } from './pool/operations/set-rate-limit-admin.ts'
+export type { SetTokenTransferFeeConfigParams } from './pool/operations/set-token-transfer-fee-config.ts'
+export type {
+  DeployCrossChainPoolTokenParams,
+  DeployCrossChainPoolTokenResult,
+} from './token/operations/deploy-cross-chain-pool-token.ts'
+export type { GrantMintBurnAccessParams } from './token/operations/grant-mint-burn-access.ts'
+export type { RevokeMintBurnAccessParams } from './token/operations/revoke-mint-burn-access.ts'
+export type { MintBurnRolesResult } from './token/get-mint-burn-roles.ts'
+export type { DeployPoolParams, DeployPoolResult } from './token-pool/operations/deploy-pool.ts'
+export type {
+  DeployPoolViaFactoryParams,
+  DeployPoolViaFactoryResult,
+} from './token-pool/operations/deploy-pool-via-factory.ts'
+export type {
+  DeployTokenAndPoolViaFactoryParams,
+  DeployTokenAndPoolViaFactoryResult,
+} from './token-pool/operations/deploy-token-and-pool-via-factory.ts'
+export type { ProvideLiquidityParams } from './token-pool/operations/provide-liquidity.ts'

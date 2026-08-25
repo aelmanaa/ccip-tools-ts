@@ -1,6 +1,7 @@
 import { AuthorityType, createSetAuthorityInstruction } from '@solana/spl-token'
 import { PublicKey } from '@solana/web3.js'
 
+import { detectMintTokenProgram } from './spl.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
@@ -11,7 +12,6 @@ import {
   SolanaOperation,
 } from '../../operation.ts'
 import { validatePublicKey } from '../../validate.ts'
-import { detectMintTokenProgram } from './spl.ts'
 
 /** Parameters for transferring SPL mint authority. The `payer` must be the current mint authority. */
 type TransferMintAuthorityParams = {
@@ -41,7 +41,7 @@ export class TransferMintAuthority extends SolanaOperation<TransferMintAuthority
   readonly name = 'transferMintAuthority'
 
   /** Validates the mint, new authority, and payer public keys before any RPC. */
-  protected validate(params: GenerateTransferMintAuthorityParams): void {
+  protected override validate(params: GenerateTransferMintAuthorityParams): void {
     validatePublicKey(this.name, 'payer', params.payer)
     validatePublicKey(this.name, 'mint', params.mint)
     validatePublicKey(this.name, 'newMintAuthority', params.newMintAuthority)

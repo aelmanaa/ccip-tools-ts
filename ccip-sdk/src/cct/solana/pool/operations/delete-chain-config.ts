@@ -1,6 +1,11 @@
 import { PublicKey } from '@solana/web3.js'
 import BN from 'bn.js'
 
+import {
+  deriveTokenPoolChainConfigPda,
+  discoverPoolInfo,
+  validateDeleteChainConfig,
+} from './common.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
@@ -12,11 +17,6 @@ import {
 } from '../../operation.ts'
 import { createTokenPoolProgram, deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { validatePublicKey } from '../../validate.ts'
-import {
-  deriveTokenPoolChainConfigPda,
-  discoverPoolInfo,
-  validateDeleteChainConfig,
-} from './common.ts'
 
 /** Parameters shared by token-pool `deleteChainConfig` generation and execution. */
 type DeleteChainConfigParams = {
@@ -45,7 +45,7 @@ export class DeleteChainConfig extends SolanaOperation<DeleteChainConfigParams> 
   readonly name = 'deleteChainConfig'
 
   /** Validates addresses and selector before any RPC. */
-  protected validate(params: GenerateDeleteChainConfigParams): void {
+  protected override validate(params: GenerateDeleteChainConfigParams): void {
     validatePublicKey(this.name, 'poolAddress', params.poolAddress)
     validatePublicKey(this.name, 'payer', params.payer)
     if (params.authority) validatePublicKey(this.name, 'authority', params.authority)

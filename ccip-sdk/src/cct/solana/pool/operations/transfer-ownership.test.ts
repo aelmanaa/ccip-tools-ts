@@ -3,10 +3,6 @@ import { describe, it } from 'node:test'
 
 import { Keypair, PublicKey } from '@solana/web3.js'
 
-import { ChainFamily } from '../../../../networks.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
-import { createTokenPoolProgram } from '../../programs/token-pool.ts'
-import { TransferOwnership } from './transfer-ownership.ts'
 import {
   AUTHORITY,
   MINT,
@@ -17,6 +13,10 @@ import {
   statePda,
   stubChain,
 } from './test-helpers.ts'
+import { TransferOwnership } from './transfer-ownership.ts'
+import { ChainFamily } from '../../../../networks.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
+import { createTokenPoolProgram } from '../../programs/token-pool.ts'
 
 const NEW_OWNER = Keypair.generate().publicKey.toBase58()
 

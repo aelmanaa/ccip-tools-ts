@@ -7,7 +7,7 @@ import type { Argv } from 'yargs'
 
 export const command = 'token'
 export const describe =
-  'Token operations (balance, deploy, create-multisig, transfer-mint-authority, grant-mint-burn-access, revoke-mint-burn-access, get-mint-burn-info)'
+  'Token operations (balance, deploy, create-multisig, create-pool-token-account, transfer-mint-authority, grant-mint-burn-access, revoke-mint-burn-access, get-mint-burn-info)'
 
 /**
  * Yargs builder for the token command group.

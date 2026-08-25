@@ -1,5 +1,6 @@
 import { PublicKey } from '@solana/web3.js'
 
+import { discoverPoolInfo } from './common.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
@@ -11,7 +12,6 @@ import {
 } from '../../operation.ts'
 import { createTokenPoolProgram, deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { validatePublicKey } from '../../validate.ts'
-import { discoverPoolInfo } from './common.ts'
 
 /** Parameters shared by token-pool `acceptOwnership` generation and execution. */
 type AcceptOwnershipParams = {
@@ -38,7 +38,7 @@ export class AcceptOwnership extends SolanaOperation<AcceptOwnershipParams> {
   readonly name = 'acceptOwnership'
 
   /** Validates addresses before any RPC. */
-  protected validate(params: GenerateAcceptOwnershipParams): void {
+  protected override validate(params: GenerateAcceptOwnershipParams): void {
     validatePublicKey(this.name, 'poolAddress', params.poolAddress)
     validatePublicKey(this.name, 'payer', params.payer)
     if (params.authority) validatePublicKey(this.name, 'authority', params.authority)

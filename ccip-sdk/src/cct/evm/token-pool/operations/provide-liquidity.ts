@@ -149,6 +149,14 @@ export class ProvideLiquidity extends EVMOperation<ProvideLiquidityParams> {
         await submitForReceipt(chain, wallet, authUnsigned, `${this.name}: authorizeCaller`)
       }
     }
-    return super.execute(chain, params)
+    // buildUnsigned returns TWO transactions (approve + provideLiquidity); the base
+    // EVMOperation.execute submits only the first, so submit them all here.
+    const { hash } = await submitForReceipt(
+      chain,
+      wallet,
+      await this.generate(chain, params),
+      this.name,
+    )
+    return { hash }
   }
 }

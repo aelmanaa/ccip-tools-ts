@@ -9,10 +9,10 @@ import {
 } from '@solana/spl-token'
 import { Keypair, PublicKey } from '@solana/web3.js'
 
+import { TransferMintAuthority } from './transfer-mint-authority.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { TransferMintAuthority } from './transfer-mint-authority.ts'
 
 const MINT = Keypair.generate().publicKey
 const PAYER = Keypair.generate().publicKey.toBase58()

@@ -230,6 +230,8 @@ export { CCIPSolanaLaneVersionUnsupportedError } from './specialized.ts'
 /** @deprecated Deprecated in v1.7 (2026-05-25). Use {@link CCIPTokenNotRegisteredError}. */
 export { CCIPAptosTokenNotRegisteredError } from './specialized.ts'
 
+// Specialized errors - CCT productized operations (propose-admin facade + verify subsystem)
+
 // Specialized errors - Token Deployment
 export { CCIPTokenDeployFailedError, CCIPTokenDeployParamsInvalidError } from './specialized.ts'
 

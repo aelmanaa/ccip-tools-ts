@@ -9,11 +9,11 @@ import {
 } from '@solana/spl-token'
 import { Keypair, PublicKey } from '@solana/web3.js'
 
+import { CreatePoolTokenAccount } from './create-pool-token-account.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { deriveTokenPoolSignerPda } from '../../programs/token-pool.ts'
-import { CreatePoolTokenAccount } from './create-pool-token-account.ts'
 
 const MINT = Keypair.generate().publicKey
 const POOL_PROGRAM = Keypair.generate().publicKey

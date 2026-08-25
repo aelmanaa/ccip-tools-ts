@@ -1,5 +1,6 @@
 import { PublicKey } from '@solana/web3.js'
 
+import { discoverPoolInfo } from './common.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
@@ -11,7 +12,6 @@ import {
 } from '../../operation.ts'
 import { createTokenPoolProgram, deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { validatePublicKey } from '../../validate.ts'
-import { discoverPoolInfo } from './common.ts'
 
 /** Parameters shared by token-pool `transferOwnership` generation and execution. */
 type TransferOwnershipParams = {
@@ -40,7 +40,7 @@ export class TransferOwnership extends SolanaOperation<TransferOwnershipParams> 
   readonly name = 'transferOwnership'
 
   /** Validates addresses before any RPC. */
-  protected validate(params: GenerateTransferOwnershipParams): void {
+  protected override validate(params: GenerateTransferOwnershipParams): void {
     validatePublicKey(this.name, 'poolAddress', params.poolAddress)
     validatePublicKey(this.name, 'payer', params.payer)
     validatePublicKey(this.name, 'newOwner', params.newOwner)

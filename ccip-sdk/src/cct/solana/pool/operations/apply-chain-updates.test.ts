@@ -1,17 +1,16 @@
 import { Buffer } from 'buffer'
-
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import { PublicKey, SystemProgram } from '@solana/web3.js'
 import BN from 'bn.js'
 
-import { ChainFamily } from '../../../../networks.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
-import { createTokenPoolProgram } from '../../programs/token-pool.ts'
 import { ApplyChainUpdates } from './apply-chain-updates.ts'
-import type { RemoteChainConfig } from './common.ts'
-import { encodeRemoteAddressBytes, encodeRemotePoolAddressBytes } from './common.ts'
+import {
+  type RemoteChainConfig,
+  encodeRemoteAddressBytes,
+  encodeRemotePoolAddressBytes,
+} from './common.ts'
 import {
   MINT,
   PAYER,
@@ -23,6 +22,9 @@ import {
   statePda,
   stubChain,
 } from './test-helpers.ts'
+import { ChainFamily } from '../../../../networks.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
+import { createTokenPoolProgram } from '../../programs/token-pool.ts'
 
 const EVM_TOKEN = '0xa42BA090720aEE0602aD4381FAdcC9380aD3d888'
 const EVM_POOL = '0xd7BF0d8E6C242b6Dde4490Ab3aFc8C1e811ec9aD'

@@ -84,10 +84,13 @@ describe('EVMTokenManager Pool Fork Tests', { skip, timeout: 120_000 }, () => {
       name: 'Pool Test Token',
       symbol: 'PTT',
       decimals: 18,
-      initialSupply: 1_000_000n * 10n ** 18n,
+      preMint: 1_000_000n * 10n ** 18n,
       wallet,
+      maxSupply: 0n,
+      owner: await wallet.getAddress(),
+      preMintRecipient: await wallet.getAddress(),
     })
-    tokenAddress = tokenResult.tokenAddress
+    tokenAddress = tokenResult.contractAddress
   })
 
   after(async () => {

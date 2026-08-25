@@ -5,12 +5,10 @@
 
 import { AptosTokenManager } from '@chainlink/ccip-sdk/src/cct/aptos/index.ts'
 import { EVMTokenManager } from '@chainlink/ccip-sdk/src/cct/evm/index.ts'
-import { SolanaTokenManager } from '@chainlink/ccip-sdk/src/cct/solana/index.ts'
 import {
   type AptosChain,
   type Chain,
   type EVMChain,
-  type SolanaChain,
   type TransferOwnershipParams,
   CCIPChainFamilyUnsupportedError,
   ChainFamily,
@@ -86,8 +84,10 @@ async function transferForChain(
       return mgr.transferOwnership({ ...params, wallet })
     }
     case ChainFamily.Solana: {
-      const mgr = SolanaTokenManager.fromChain(chain as SolanaChain)
-      return mgr.transferOwnership({ ...params, wallet })
+      // MESH-TODO: cct-sdk's Solana transferOwnership takes PoolProgramRef (poolType /
+      // poolProgramAddress) + tokenAddress, not { poolAddress }. Add --pool-type/
+      // --pool-program-address and --token-address options to restore Solana support.
+      throw new CCIPChainFamilyUnsupportedError(chain.network.family)
     }
     case ChainFamily.Aptos: {
       const aptosChain = chain as AptosChain

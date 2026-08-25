@@ -3,9 +3,6 @@ import { describe, it } from 'node:test'
 
 import { Keypair, PublicKey } from '@solana/web3.js'
 
-import { ChainFamily } from '../../../../networks.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
-import { createTokenPoolProgram } from '../../programs/token-pool.ts'
 import { SetRateLimitAdmin } from './set-rate-limit-admin.ts'
 import {
   AUTHORITY,
@@ -17,6 +14,9 @@ import {
   statePda,
   stubChain,
 } from './test-helpers.ts'
+import { ChainFamily } from '../../../../networks.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
+import { createTokenPoolProgram } from '../../programs/token-pool.ts'
 
 const RATE_LIMIT_ADMIN = Keypair.generate().publicKey.toBase58()
 

@@ -4,9 +4,9 @@ import { describe, it } from 'node:test'
 import { Interface, id } from 'ethers'
 
 import { RevokeMintBurnAccess } from './revoke-mint-burn-access.ts'
+import CrossChainTokenABI from '../../../../evm/abi/CrossChainToken.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { ChainFamily } from '../../../../networks.ts'
-import CrossChainTokenABI from '../../../../evm/abi/CrossChainToken.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 
 const TOKEN = '0xa42BA090720aEE0602aD4381FAdcC9380aD3d888'
