@@ -511,7 +511,11 @@ export async function simulateTransaction(
     }
     if (!allowV1) {
       throw new CCIPTransactionTooLargeError(
-        `Transaction too large for v0 (${PACKET_DATA_SIZE} bytes), and the signer can't sign v1`,
+        `Transaction too large for v0 (${PACKET_DATA_SIZE} bytes), and this wallet can't sign v1 ` +
+          `transactions (its supportedTransactionVersions excludes 1 — e.g. a Ledger, which can't ` +
+          `parse v1 yet). Use a keypair wallet, or reduce the message size (fewer/smaller token ` +
+          `transfers or data).`,
+        { context: { reason: 'signer_cannot_sign_v1' } },
       )
     }
 
@@ -663,10 +667,14 @@ function isComputeBudgetError(err: unknown): boolean {
   )
 }
 
-/** How {@link simulateAndSendTxs} may split instructions across transactions. */
+/**
+ * How the Solana send path may split instructions across transactions when one doesn't fit:
+ * `'partial'` splits on any simulation failure, `'resource'` only on transaction-size or
+ * compute-budget failures (program errors are rethrown), `'atomic'` never splits.
+ */
 export type SolanaSplitMode = 'partial' | 'resource' | 'atomic'
 
-/** A transaction confirmed by {@link simulateAndSendTxs}, carrying `instructions[start:end]`. */
+/** A confirmed Solana transaction and the half-open instruction range `[start, end)` it carried. */
 export type SolanaSentSlice = { signature: string; start: number; end: number }
 
 /**
