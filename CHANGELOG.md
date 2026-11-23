@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- SDK: the token rate-limit precheck (`getFee`, `sendMessage`, `ccip-cli send` on the source; the destination preflight of `estimateReceiveExecution` and `ccip-cli send` on the destination) checks the fast-finality bucket of single-token 2.0 pools for a message that requests a non-default finality, as the pool debits it: outbound in `checkSendMessage` (with the pool's allowed finality and the fast-finality fee, as for multi-token pools), inbound in `checkExecute` from the message's `finality`. It checked the finalized bucket, so a fast transfer over the fast bucket was quoted and sent (and failed on chain), and one whose finalized bucket was empty was refused although the fast bucket had room. A disabled fast bucket still falls back to the finalized one; pre-2.0 pools and finalized messages are checked as before
+
 ## [1.18.0] - 2026-11-20
 
 - SDK: export `encodeAddressToAny` and `isCantonPartyId` from the package root. `encodeAddressToAny` encodes an address of any chain family the way CCIP messages carry it, e.g. a Canton party as `keccak256(partyId)`; `isCantonPartyId` checks the `hint::1220<64 hex>` party form it hashes

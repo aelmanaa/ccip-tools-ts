@@ -1727,8 +1727,10 @@ export abstract class Chain<F extends ChainFamily = ChainFamily> {
    * {@link TokenPoolRemote.outboundStatus}), it checks, in this order: pauses, missing config
    * records, the requested finality (`message.extraArgs.finality`) against the token's allowed
    * finality, and the rate limit bucket of the requested finality class for the amount after the
-   * token fee, as the pool consumes it. Other pools keep the check of the default outbound bucket
-   * for the full amount.
+   * token fee, as the pool consumes it. Other 2.0 pools get the same finality, finality-class
+   * bucket and fee checks when the message requests a non-default finality (a fast-finality bucket,
+   * when enabled, is the one the pool debits). Pre-2.0 pools, and finalized messages to
+   * single-token pools, keep the check of the default outbound bucket for the full amount.
    *
    * With a `sender`, it then simulates each source pool's `lockOrBurn` (families with
    * {@link Chain.simulateLockOrBurn}), so the pool's own checks, such as an RMN curse, a hook or a
@@ -1784,7 +1786,15 @@ export abstract class Chain<F extends ChainFamily = ChainFamily> {
         if (status.status === 'paused') throw new CCIPTokenTransferPausedError(status, lane)
         if (status.status === 'incomplete')
           throw new CCIPLaneConfigIncompleteError(status.missing, lane)
-        const { finality, tokenArgs } = getRequestedFinality(message.extraArgs)
+      }
+      const { finality, tokenArgs } = getRequestedFinality(message.extraArgs)
+      // a non-default finality consumes the fast bucket; a disabled one falls back to the
+      // default bucket, as the pool does
+      const fast = encodeFinality(finality) !== 0
+      // pools with a lane status (multi-token) are always checked against their finality, fee and
+      // finality class; other 2.0 pools (which report fast buckets) when fast finality is
+      // requested; pre-2.0 pools keep the default bucket for the full amount
+      if (status || (fast && 'fastOutboundRateLimiterState' in remote)) {
         const { finalityDepth, finalitySafe, tokenTransferFeeConfig } =
           await this.getTokenPoolConfig(tokenPool!, {
             token,
@@ -1795,9 +1805,6 @@ export abstract class Chain<F extends ChainFamily = ChainFamily> {
         const allowed = { finalityDepth: finalityDepth ?? 0, ...(finalitySafe && { finalitySafe }) }
         if (!isFinalityAllowed(finality, allowed))
           throw new CCIPFinalityNotAllowedError(finality, allowed, { context: lane })
-        // a non-default finality consumes the fast bucket; a disabled one falls back to the
-        // default bucket, as the pool does
-        const fast = encodeFinality(finality) !== 0
         if (fast && 'fastOutboundRateLimiterState' in remote && remote.fastOutboundRateLimiterState)
           bucket = remote.fastOutboundRateLimiterState
         const bps = !tokenTransferFeeConfig?.isEnabled
@@ -1816,7 +1823,6 @@ export abstract class Chain<F extends ChainFamily = ChainFamily> {
       }
 
       if (!sender || !this.simulateLockOrBurn) continue
-      const { finality, tokenArgs } = getRequestedFinality(message.extraArgs)
       try {
         onRamp ??= await this.getOnRampForRouter(router, destChainSelector)
         await this.simulateLockOrBurn({
@@ -1842,6 +1848,7 @@ export abstract class Chain<F extends ChainFamily = ChainFamily> {
 
   /**
    * Pre-flight check if the token transfers in a message is supported for dest given lane, and have enough rate limit
+   * (the pool's fast-finality inbound bucket, when enabled, for a message with a non-default `finality`)
    * For LockRelease TPs, also check it has enough liquidity
    * @param opts - Execution options
    * @throws {@link CCIPRateLimitExceededError} if amount exceeds the rate limit (capacity or available) for remote
@@ -1939,7 +1946,16 @@ export abstract class Chain<F extends ChainFamily = ChainFamily> {
         if (status.status === 'paused') throw new CCIPTokenTransferPausedError(status, lane)
         throw new CCIPLaneConfigIncompleteError(status.missing, lane)
       }
-      if (!remote.inboundRateLimiterState) continue
+      // a message with a non-default finality is debited from the pool's fast-finality inbound
+      // bucket when it is enabled (2.0 pools); a disabled one falls back to the default bucket
+      const inbound =
+        message.finality != null &&
+        encodeFinality(message.finality) !== 0 &&
+        'fastInboundRateLimiterState' in remote &&
+        remote.fastInboundRateLimiterState
+          ? remote.fastInboundRateLimiterState
+          : remote.inboundRateLimiterState
+      if (!inbound) continue
       // EVM pools debit the inbound bucket in local units only from 1.6.1
       // (TokenPool._validateReleaseOrMint); 1.5.1 and 1.6.0 consume the source-denominated
       // amount. Every other family debits local units at all versions.
@@ -1947,8 +1963,8 @@ export abstract class Chain<F extends ChainFamily = ChainFamily> {
         this.network.family === ChainFamily.EVM && poolVersion != null && poolVersion < '1.6.1'
           ? ta.amount
           : localAmount
-      if (bucketAmount > remote.inboundRateLimiterState.tokens) {
-        throw new CCIPRateLimitExceededError('INBOUND', remote.inboundRateLimiterState, {
+      if (bucketAmount > inbound.tokens) {
+        throw new CCIPRateLimitExceededError('INBOUND', inbound, {
           token,
           amount: bucketAmount,
           tokenPool: tokenPool!,

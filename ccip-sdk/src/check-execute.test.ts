@@ -5,6 +5,7 @@ import { AbiCoder, getAddress, hexlify, randomBytes } from 'ethers'
 
 import { Chain } from './chain.ts'
 import {
+  CCIPFinalityNotAllowedError,
   CCIPInsufficientBalanceError,
   CCIPRateLimitExceededError,
   CCIPTokenDecimalsInsufficientError,
@@ -286,5 +287,171 @@ void describe('Chain.checkExecute — amount denomination', () => {
       inboundRateLimiterState: { tokens: 10n ** 16n, capacity: 10n ** 18n, rate: 1n },
     })
     assert.equal(await check(chain, [{ amount: 10n ** 15n, extraData: dec(18n) }]), true)
+  })
+})
+
+type Bucket = { tokens: bigint; capacity: bigint; rate: bigint } | null
+const bucketOf = (tokens: bigint): Bucket => ({ tokens, capacity: tokens, rate: 1n })
+
+/**
+ * A chain on `Chain.prototype` with one single-token pool (no lane status). `fast` = the 2.0
+ * fast-finality buckets (`undefined`: a pre-2.0 pool, which reports none).
+ */
+function singleTokenPoolChain(opts: {
+  outbound?: Bucket
+  inbound?: Bucket
+  fast?: { outbound: Bucket; inbound: Bucket }
+  finalityDepth?: number
+  fastFinalityTransferFeeBps?: number
+}) {
+  const getTokenPoolConfig = mock.fn((_pool: string, _opts?: unknown) =>
+    Promise.resolve({
+      typeAndVersion: opts.fast ? 'BurnMintTokenPool 2.0.0' : 'BurnMintTokenPool 1.6.1',
+      lockBox: undefined,
+      finalityDepth: opts.finalityDepth ?? 1,
+      tokenTransferFeeConfig:
+        opts.fastFinalityTransferFeeBps != null
+          ? {
+              isEnabled: true,
+              finalityTransferFeeBps: 0,
+              fastFinalityTransferFeeBps: opts.fastFinalityTransferFeeBps,
+            }
+          : undefined,
+    }),
+  )
+  const chain = Object.create(Chain.prototype) as Chain
+  Object.assign(chain, {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    network: {
+      name: 'ethereum-testnet-sepolia',
+      chainId: 11155111,
+      chainSelector: SOURCE_SELECTOR,
+      family: ChainFamily.EVM,
+      networkType: NetworkType.Testnet,
+    },
+    getTokenAdminRegistryFor: mock.fn(() => Promise.resolve(getAddress(hexlify(randomBytes(20))))),
+    getRegistryTokenConfig: mock.fn(() => Promise.resolve({ tokenPool: POOL })),
+    getTokenPoolConfig,
+    getTokenPoolRemote: mock.fn(() =>
+      Promise.resolve({
+        remoteToken: TOKEN,
+        remotePools: [],
+        outboundRateLimiterState: opts.outbound ?? null,
+        inboundRateLimiterState: opts.inbound ?? null,
+        ...(opts.fast && {
+          fastOutboundRateLimiterState: opts.fast.outbound,
+          fastInboundRateLimiterState: opts.fast.inbound,
+        }),
+      }),
+    ),
+    getBalance: mock.fn(() => Promise.resolve(10n ** 24n)),
+    getTokenInfo: mock.fn(() => Promise.resolve({ decimals: 18, symbol: 'T', name: 'T' })),
+  })
+  return { chain, getTokenPoolConfig }
+}
+
+const send = (chain: Chain, amount: bigint, finality?: 'finalized' | 'safe' | number) =>
+  chain.checkSendMessage({
+    router: OFFRAMP,
+    destChainSelector: DEST_SELECTOR,
+    message: {
+      tokenAmounts: [{ token: TOKEN, amount }],
+      ...(finality != null && { extraArgs: { gasLimit: 0n, finality } }),
+    },
+  })
+
+const receive = (chain: Chain, amount: bigint, finality?: 'finalized' | 'safe' | number) =>
+  chain.checkExecute({
+    offRamp: OFFRAMP,
+    message: {
+      sourceChainSelector: DEST_SELECTOR,
+      tokenAmounts: [{ token: TOKEN, amount }],
+      ...(finality != null && { finality }),
+    },
+  })
+
+void describe('fast-finality buckets of single-token pools', () => {
+  void it('checkSendMessage refuses a fast transfer over the fast outbound bucket', async () => {
+    const { chain } = singleTokenPoolChain({
+      outbound: bucketOf(100_000n),
+      fast: { outbound: bucketOf(10n), inbound: bucketOf(10n) },
+    })
+    await assert.rejects(send(chain, 11n, 1), (err: unknown) => {
+      assert.ok(err instanceof CCIPRateLimitExceededError)
+      assert.equal(err.context['tokens'], 10n)
+      assert.equal(err.context['amount'], 11n)
+      return true
+    })
+    assert.equal(await send(chain, 10n, 1), true)
+    // finalized messages still use the default bucket
+    assert.equal(await send(chain, 11n, 'finalized'), true)
+    assert.equal(await send(chain, 11n), true)
+  })
+
+  void it('checkSendMessage accepts a fast transfer when only the default bucket is empty', async () => {
+    const { chain } = singleTokenPoolChain({
+      outbound: bucketOf(0n),
+      fast: { outbound: bucketOf(10n), inbound: bucketOf(10n) },
+    })
+    assert.equal(await send(chain, 5n, 1), true)
+    await assert.rejects(send(chain, 5n, 'finalized'), CCIPRateLimitExceededError)
+  })
+
+  void it('checkSendMessage falls back to the default bucket when the fast one is disabled', async () => {
+    const { chain } = singleTokenPoolChain({
+      outbound: bucketOf(100n),
+      fast: { outbound: null, inbound: null },
+    })
+    assert.equal(await send(chain, 100n, 1), true)
+    await assert.rejects(send(chain, 101n, 1), (err: unknown) => {
+      assert.ok(err instanceof CCIPRateLimitExceededError)
+      assert.equal(err.context['tokens'], 100n)
+      return true
+    })
+  })
+
+  void it('checkSendMessage checks the fast bucket for the amount after the fast fee, and the allowed finality', async () => {
+    const { chain } = singleTokenPoolChain({
+      outbound: bucketOf(100_000n),
+      fast: { outbound: bucketOf(995n), inbound: null },
+      fastFinalityTransferFeeBps: 50,
+      finalityDepth: 5,
+    })
+    assert.equal(await send(chain, 1000n, 5), true)
+    await assert.rejects(send(chain, 1001n, 5), CCIPRateLimitExceededError)
+    await assert.rejects(send(chain, 1n, 2), CCIPFinalityNotAllowedError)
+  })
+
+  void it('checkSendMessage keeps the pre-2.0 path: default bucket, full amount, no pool config read', async () => {
+    const { chain, getTokenPoolConfig } = singleTokenPoolChain({ outbound: bucketOf(10n) })
+    assert.equal(await send(chain, 10n, 1), true)
+    await assert.rejects(send(chain, 11n, 1), CCIPRateLimitExceededError)
+    assert.equal(getTokenPoolConfig.mock.calls.length, 0)
+  })
+
+  void it('checkExecute refuses a fast message over the fast inbound bucket', async () => {
+    const { chain } = singleTokenPoolChain({
+      inbound: bucketOf(100_000n),
+      fast: { outbound: bucketOf(10n), inbound: bucketOf(10n) },
+    })
+    await assert.rejects(receive(chain, 11n, 1), (err: unknown) => {
+      assert.ok(err instanceof CCIPRateLimitExceededError)
+      assert.equal(err.context['tokens'], 10n)
+      return true
+    })
+    assert.equal(await receive(chain, 10n, 1), true)
+    assert.equal(await receive(chain, 11n, 'finalized'), true)
+    assert.equal(await receive(chain, 11n), true)
+  })
+
+  void it('checkExecute uses the default inbound bucket when the fast one is disabled or absent', async () => {
+    const disabled = singleTokenPoolChain({
+      inbound: bucketOf(100n),
+      fast: { outbound: null, inbound: null },
+    })
+    assert.equal(await receive(disabled.chain, 100n, 1), true)
+    await assert.rejects(receive(disabled.chain, 101n, 1), CCIPRateLimitExceededError)
+    const v16 = singleTokenPoolChain({ inbound: bucketOf(100n) })
+    assert.equal(await receive(v16.chain, 100n, 1), true)
   })
 })
