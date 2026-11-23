@@ -426,6 +426,24 @@ function destroyOnAbort(abort: AbortSignal, provider: JsonRpcApiProvider): void 
 const isValidUIMultiplier = (value: bigint): boolean => value > 0n && value <= MAX_UI_MULTIPLIER
 
 /**
+ * Gas a 2.0 OffRamp `execute` needs for a message, as the message declares it: its
+ * `executionGasLimit`, with the `ccipReceiveGasLimit` share replaced by a larger
+ * `gasLimitOverride`, which is what the callback then gets.
+ * @param message - The decoded message (`executionGasLimit`, `ccipReceiveGasLimit`).
+ * @param gasLimitOverride - The `execute` override; 0 for none.
+ * @returns The execution budget to floor the transaction gas limit at.
+ */
+function v2ExecutionBudget(
+  message: { executionGasLimit: number | bigint; ccipReceiveGasLimit: number | bigint },
+  gasLimitOverride: bigint,
+): bigint {
+  const executionGasLimit = BigInt(message.executionGasLimit)
+  const ccipReceiveGasLimit = BigInt(message.ccipReceiveGasLimit)
+  if (gasLimitOverride <= ccipReceiveGasLimit) return executionGasLimit
+  return executionGasLimit - ccipReceiveGasLimit + gasLimitOverride
+}
+
+/**
  * EVM chain implementation supporting Ethereum-compatible networks.
  *
  * Provides methods for sending CCIP cross-chain messages, querying message
@@ -2236,7 +2254,10 @@ export class EVMChain extends Chain<typeof ChainFamily.EVM> {
         verifierResults,
         gasLimitOverride,
       )
-      // `execute()` swallows inner failures on first-exec; floor at executionGasLimit*1.2.
+      // `execute()` swallows inner failures on first-exec, so estimateGas can converge on the cheap
+      // failure path; floor at 1.2x the message's execution budget. A gasLimitOverride replaces
+      // ccipReceiveGasLimit as the callback's budget (the OffRamp refuses one below it), so it
+      // replaces that share of executionGasLimit in the floor too.
       // On estimateGas failure, leave gasLimit unset and still return the tx so wallets
       // can run their own estimation and surface the native revert reason (mirrors v1.x below).
       try {
@@ -2246,8 +2267,7 @@ export class EVMChain extends Chain<typeof ChainFamily.EVM> {
           verifierResults,
           gasLimitOverride,
         )
-        const declaredBudget = BigInt(message.executionGasLimit)
-        const bufferedFloor = (declaredBudget * 120n) / 100n
+        const bufferedFloor = (v2ExecutionBudget(message, gasLimitOverride) * 120n) / 100n
         execTx.gasLimit = estimated > bufferedFloor ? estimated : bufferedFloor
       } catch (err) {
         this.logger.warn(

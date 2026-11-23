@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- SDK (EVM): manual execution on a 2.0 OffRamp (`generateUnsignedExecute`, `execute`, `ccip-cli manual-exec -L` / `--estimate-gas-limit` without `-G`) sizes the transaction for a callback gas override. The gas limit floor was 1.2x the message's `executionGasLimit`, which counts `ccipReceiveGasLimit`, so a larger override left the callback short and the first execution failed `NotEnoughGasForCall` (state 3, retryable). The floor now replaces the `ccipReceiveGasLimit` share with the override when the override is larger. 1.5/1.6 OffRamps are unchanged
+
 ## [1.18.0] - 2026-11-20
 
 - SDK: export `encodeAddressToAny` and `isCantonPartyId` from the package root. `encodeAddressToAny` encodes an address of any chain family the way CCIP messages carry it, e.g. a Canton party as `keccak256(partyId)`; `isCantonPartyId` checks the `hint::1220<64 hex>` party form it hashes
