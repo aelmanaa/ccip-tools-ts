@@ -13,7 +13,7 @@ import {
 import type { CCIPMessage_V2_0 } from './evm/messages.ts'
 import { discoverOffRamp } from './execution.ts'
 import type { FinalityRequested } from './extra-args.ts'
-import { networkInfo } from './networks.ts'
+import { ChainFamily, networkInfo } from './networks.ts'
 import { buildMessageForDest } from './requests.ts'
 import type { CCIPMessage_V1_6_Solana } from './solana/types.ts'
 import {
@@ -91,6 +91,31 @@ async function discoverDefaultOffRamp(source: Chain, dest: Chain, onRamp: string
     version = (config as { laneVersion?: CCIPVersion }).laneVersion ?? version
   }
   return discoverOffRamp(source, dest, { onRamp, version }, source)
+}
+
+/**
+ * {@link EstimateMessageInput} carries the Solana receiver fields (`tokenReceiver`, `accounts`,
+ * `accountIsWritableBitmap`) at the top level, as a sent Solana message does, while
+ * `buildMessageForDest` reads them from `extraArgs` only. Copies them into `extraArgs` (fields
+ * already in `extraArgs` win), so a data + token estimate to Solana keeps its token receiver.
+ * Only for Solana destinations: elsewhere `tokenReceiver` is a GenericExtraArgsV3 field, and adding
+ * it implicitly would switch the message to V3 extraArgs.
+ */
+function withSolanaReceiverFields(
+  input: MessageInput,
+  fields: Partial<
+    Pick<EstimateMessageInput, 'tokenReceiver' | 'accounts' | 'accountIsWritableBitmap'>
+  >,
+): MessageInput {
+  const lifted = {
+    ...(fields.tokenReceiver != null && { tokenReceiver: fields.tokenReceiver }),
+    ...(fields.accounts != null && { accounts: fields.accounts }),
+    ...(fields.accountIsWritableBitmap != null && {
+      accountIsWritableBitmap: fields.accountIsWritableBitmap,
+    }),
+  }
+  if (!Object.keys(lifted).length) return input
+  return { ...input, extraArgs: { ...lifted, ...input.extraArgs } }
 }
 
 /**
@@ -408,8 +433,14 @@ export async function estimateReceiveExecution({
   // one resolution pass, two payloads: the check consumes the source-pool-reported shape
   // (source-denominated post-fee amount + pool destPoolData, or the emitted fields verbatim),
   // while the gas estimate keeps the dest-denominated tokenAmounts `buildMessageForDest` shaped
+  const buildInput: MessageInput = { ...message, tokenAmounts: destTokenAmounts }
   const baseMessage = {
-    ...buildMessageForDest({ ...message, tokenAmounts: destTokenAmounts }, dest.network.family),
+    ...buildMessageForDest(
+      dest.network.family === ChainFamily.Solana
+        ? withSolanaReceiverFields(buildInput, message)
+        : buildInput,
+      dest.network.family,
+    ),
     messageId: message.messageId ?? hexlify(randomBytes(32)),
     sourceChainSelector: source.network.chainSelector,
   }

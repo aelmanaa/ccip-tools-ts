@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- SDK: `estimateReceiveExecution` to a Solana destination now honours the top-level `tokenReceiver`, `accounts` and `accountIsWritableBitmap` of its message input. They were left out of the `extraArgs` that `buildMessageForDest` reads, so every data + token estimate to Solana failed `ARGUMENT_INVALID tokenReceiver: required when sending tokens with data to Solana`, which made `ccip-cli send` (whose default preflight runs the estimate) refuse every EVM to Solana data + token send with `--token-receiver`. Values already in `extraArgs` win; other destinations are unchanged (there `tokenReceiver` would switch the message to GenericExtraArgsV3)
+
 ## [1.18.0] - 2026-11-20
 
 - SDK: export `encodeAddressToAny` and `isCantonPartyId` from the package root. `encodeAddressToAny` encodes an address of any chain family the way CCIP messages carry it, e.g. a Canton party as `keccak256(partyId)`; `isCantonPartyId` checks the `hint::1220<64 hex>` party form it hashes

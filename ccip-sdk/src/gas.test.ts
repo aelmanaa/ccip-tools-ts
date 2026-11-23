@@ -13,6 +13,7 @@ import { estimateExecGas } from './evm/gas.ts'
 import { EVMChain } from './evm/index.ts'
 import { estimateReceiveExecution, getRequiredCCVs } from './gas.ts'
 import { ChainFamily, NetworkType } from './networks.ts'
+import './solana/index.ts' // registers SolanaChain for buildMessageForDest
 import { CCIPVersion } from './types.ts'
 
 // Test doubles - we create mock chain objects that implement the minimal interface needed
@@ -909,5 +910,87 @@ describe('EVMChain.estimateReceiveExecution({ messageId })', () => {
     const stateOverrides = (sendCall.arguments as any)[1][2]
     const balanceSlot = Object.values(stateOverrides[destTokenAddress].stateDiff)[0] as string
     assert.equal(BigInt(balanceSlot), 1000n)
+  })
+})
+
+describe('estimateReceiveExecution with flat Solana receiver fields', () => {
+  const solanaDevnet = {
+    name: 'solana-devnet',
+    chainId: 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG',
+    chainSelector: 16423721717087811551n,
+    family: ChainFamily.Solana,
+    networkType: NetworkType.Testnet,
+    isTestnet: true,
+  }
+  const receiver = 'DAgzy7XKevQ51X3415fZHTqZCh51CoGq7C57srRki4Vs'
+  const tokenReceiver = 'G92EqWGUtTt87RTv9Z3Txm4jT2SNUhdTSzbMybfbWPaf'
+  const destToken = '5yNbBovsdRPi767nJkvCRnmDFrAkGHqHUwpKhA2yvzC3'
+  const account = 'Ccip842gzYHhvdDkSyi2YVCoAWPbYJoApMFzSxQroE9C'
+
+  function chains() {
+    const onRamp = getAddress(hexlify(randomBytes(20)))
+    const offRamp = getAddress(hexlify(randomBytes(20)))
+    const { mockSourceChain, mockDestChain } = createMockChains(onRamp, offRamp)
+    const estimate = mock.fn(async (_opts: any) => 1234)
+    return {
+      onRamp,
+      source: mockSourceChain,
+      dest: { ...mockDestChain, network: solanaDevnet, estimateReceiveExecution: estimate },
+      estimate,
+    }
+  }
+  const tokenAmounts = [
+    {
+      sourcePoolAddress: getAddress(hexlify(randomBytes(20))),
+      destTokenAddress: destToken,
+      amount: 1n,
+    },
+  ]
+
+  it('keeps a top-level tokenReceiver for a data + token message to Solana', async () => {
+    const { onRamp, source, dest, estimate } = chains()
+    const res = await estimateReceiveExecution({
+      source: source as any,
+      dest: dest as any,
+      routerOrRamp: onRamp,
+      message: { receiver, tokenReceiver, data: '0x1234', tokenAmounts },
+    })
+    assert.equal(res, 1234)
+    const sent = estimate.mock.calls[0]!.arguments[0].message
+    assert.equal(sent.extraArgs.tokenReceiver, tokenReceiver)
+    assert.equal(sent.receiver, receiver)
+  })
+
+  it('carries top-level accounts and writable bitmap into the Solana extraArgs', async () => {
+    const { onRamp, source, dest, estimate } = chains()
+    await estimateReceiveExecution({
+      source: source as any,
+      dest: dest as any,
+      routerOrRamp: onRamp,
+      message: { receiver, data: '0x1234', accounts: [account], accountIsWritableBitmap: 1n },
+    })
+    const sent = estimate.mock.calls[0]!.arguments[0].message
+    assert.deepEqual(sent.extraArgs.accounts, [account])
+    assert.equal(sent.extraArgs.accountIsWritableBitmap, 1n)
+  })
+
+  it('does not move a top-level tokenReceiver into extraArgs for an EVM destination', async () => {
+    const onRamp = getAddress(hexlify(randomBytes(20)))
+    const offRamp = getAddress(hexlify(randomBytes(20)))
+    const { mockSourceChain, mockDestChain } = createMockChains(onRamp, offRamp)
+    const estimate = mock.fn(async (_opts: any) => 1)
+    await estimateReceiveExecution({
+      source: mockSourceChain as any,
+      dest: { ...mockDestChain, estimateReceiveExecution: estimate } as any,
+      routerOrRamp: onRamp,
+      message: {
+        receiver: getAddress(hexlify(randomBytes(20))),
+        tokenReceiver: getAddress(hexlify(randomBytes(20))),
+        data: '0x1234',
+        tokenAmounts: [],
+      },
+    })
+    const sent = estimate.mock.calls[0]!.arguments[0].message
+    assert.equal('tokenReceiver' in sent.extraArgs, false) // stays V2 extraArgs
   })
 })
