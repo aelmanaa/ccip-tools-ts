@@ -30,8 +30,8 @@ import {
   ChainFamily,
   decodeAddress,
   estimateReceiveExecution,
+  getCCVCoverage,
   getDataBytes,
-  getRequiredCCVs,
   jsonParse,
   jsonStringify,
   networkInfo,
@@ -335,11 +335,11 @@ async function sendMessage(
         // sender is optional here; omitting it yields the lane-default (not sender-scoped) CCV view
       }
     }
-    const ccvs = await getRequiredCCVs({
+    const ccvs = await getCCVCoverage({
       source,
       dest,
       routerOrRamp: router,
-      message: { sender: walletAddress, receiver, data, tokenAmounts, ...extraArgs },
+      message: { sender: walletAddress, receiver, data, tokenAmounts, extraArgs },
     })
     if (argv.format === Format.json) {
       output.write(jsonStringify(ccvs, 2))
@@ -347,6 +347,8 @@ async function sendMessage(
       output.write('requiredCCVs      :', ccvs.requiredCCVs)
       output.write('optionalCCVs      :', ccvs.optionalCCVs)
       output.write('optionalThreshold :', ccvs.optionalThreshold)
+      if (ccvs.messageCCVs) output.write('messageCCVs       :', ccvs.messageCCVs)
+      output.write('verdict           :', describeCCVCoverage(ccvs))
     }
     return
   }
@@ -516,6 +518,25 @@ async function sendMessage(
     logger.debug('Balance check skipped:', e)
   }
 
+  // the executor never executes a CCIP 2.0 message carrying fewer CCVs than the destination
+  // requires; warn before paying for it (a check that can't run says nothing)
+  try {
+    const coverage = await getCCVCoverage({
+      source,
+      dest: await getChain(destNetwork.chainSelector),
+      routerOrRamp: router,
+      message: { ...message, sender: walletAddress },
+    })
+    if (coverage.enoughCCVs === false)
+      logger.warn(
+        `CCV coverage: ${describeCCVCoverage(coverage)}. Add the missing CCVs with -x ccvs=[...]` +
+          ' (the zero address keeps the lane defaults), or have the destination requirement changed;' +
+          ' see send --only-ccvs.',
+      )
+  } catch (err) {
+    logger.debug('CCV coverage check skipped:', err)
+  }
+
   const request = await source.sendMessage({
     ...argv,
     router,
@@ -545,4 +566,24 @@ async function sendMessage(
     },
     { request, getChain },
   )
+}
+
+/**
+ * One-line verdict of a {@link getCCVCoverage} result.
+ * @param coverage - The result to describe.
+ * @returns The verdict, e.g. `the message carries 1 CCV; the destination needs 2 ...`.
+ */
+export function describeCCVCoverage(
+  coverage: Pick<
+    Awaited<ReturnType<typeof getCCVCoverage>>,
+    'messageCCVs' | 'needed' | 'enoughCCVs'
+  >,
+): string {
+  const needs = `the destination needs ${coverage.needed} (requiredCCVs + optionalThreshold)`
+  if (!coverage.messageCCVs)
+    return `${needs}; the CCVs the source will put on the message are unknown`
+  const carries = `the message carries ${coverage.messageCCVs.length} CCV${coverage.messageCCVs.length === 1 ? '' : 's'}`
+  return coverage.enoughCCVs
+    ? `${carries}; ${needs}: enough by count`
+    : `NOT ENOUGH: ${carries}; ${needs}: the executor will not execute it`
 }

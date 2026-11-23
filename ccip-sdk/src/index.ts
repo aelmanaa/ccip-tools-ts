@@ -72,6 +72,7 @@ export {
 } from './extra-args.ts'
 export { estimateReceiveExecution, getRequiredCCVs, sourceToDestTokenAddresses } from './gas.ts'
 export type { GetRequiredCCVsMessage, GetRequiredCCVsResult } from './gas.ts'
+export { type CCVCoverage, type GetCCVCoverageOpts, getCCVCoverage } from './ccv-coverage.ts'
 export {
   type LockOrBurnSimInput,
   type PoolInterfaceVersion,

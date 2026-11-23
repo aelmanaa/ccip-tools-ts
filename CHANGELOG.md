@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI: `send` warns before sending a CCIP 2.0 message that carries fewer CCVs than the destination requires (`requiredCCVs` + `optionalThreshold`), which the executor never executes, and `send --only-ccvs` prints the CCVs the message will carry (`messageCCVs`) and that verdict next to the destination's set. The check is by count, as the executor's; it runs for EVM sources (the OnRamp 2.0 resolution of user or default, lane-mandated and pool CCVs) to destinations with a required-CCV view, warns without blocking, and is skipped (debug log) on pre-2.0 lanes or when it can't run. SDK: add `getCCVCoverage`, which returns the destination's requirement, the predicted message CCVs and `enoughCCVs`
+
 ## [1.18.0] - 2026-11-20
 
 - SDK: export `encodeAddressToAny` and `isCantonPartyId` from the package root. `encodeAddressToAny` encodes an address of any chain family the way CCIP messages carry it, e.g. a Canton party as `keccak256(partyId)`; `isCantonPartyId` checks the `hint::1220<64 hex>` party form it hashes

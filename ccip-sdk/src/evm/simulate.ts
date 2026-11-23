@@ -165,7 +165,7 @@ export type SimulateReleaseOrMintOpts = {
   poolInterface?: PoolInterfaceVersion
 }
 
-async function probeSupportsInterface(
+export async function probeSupportsInterface(
   provider: JsonRpcApiProvider,
   pool: string,
   interfaceId: string,
