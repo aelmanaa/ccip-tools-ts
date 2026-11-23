@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI: `send` now sends the receiver limit it prints. Since 1.8.0 the receive-execution estimate was written after `extraArgs` was built, so `--estimate-gas-limit <margin>` printed `estimate + margin` and the message still carried the default `gasLimit` (`computeUnits` for Solana destinations), and receivers needing more ran out of gas. With `--estimate-gas-limit` the message now carries the estimate plus margin; without it (the estimate runs as a preflight by default) the estimate plus 10 % is sent only when it exceeds the default limit, so sends that fit the default keep their limit and fee; `--gas-limit` and `--extra gasLimit=`/`computeUnits=` are never overridden. The status line ends with the limit sent and its source (`estimate`, `default` or `user`), and `--only-estimate --format json` reports the margin actually applied in `bufferPercent` (10 when the flag is omitted, previously 0)
+
 ## [1.18.0] - 2026-11-20
 
 - SDK: export `encodeAddressToAny` and `isCantonPartyId` from the package root. `encodeAddressToAny` encodes an address of any chain family the way CCIP messages carry it, e.g. a Canton party as `keccak256(partyId)`; `isCantonPartyId` checks the `hint::1220<64 hex>` party form it hashes

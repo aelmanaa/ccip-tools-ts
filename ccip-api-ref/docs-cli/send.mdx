@@ -143,6 +143,8 @@ If you're sending tokens without `--data`, the gas limit defaults to `0` — no 
 
 When `--data` is present and `--gas-limit` is omitted, the SDK applies a default of `200,000` for EVM and Solana destinations, or `1,000,000` for Sui. If your receiver needs more gas, set it explicitly or use `--estimate-gas-limit` to auto-calculate with a margin.
 
+Without `--gas-limit`, `send` estimates the receiver execution as a destination preflight. With `--estimate-gas-limit <margin>` the message carries the estimate plus that margin. Without it, the estimate plus 10% is sent only when it exceeds the default above, so a receiver that fits the default keeps it. The status line ends with the limit sent and where it came from (`estimate`, `default` or `user`). An explicit `--gas-limit` or `--extra gasLimit=`/`computeUnits=` is never replaced.
+
 ## Lane-Specific Parameters
 
 | Option                 | EVM→EVM                     | EVM→Solana                       | Solana→EVM     | EVM→Sui             | Canton→EVM                                               |

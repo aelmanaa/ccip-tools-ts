@@ -235,6 +235,71 @@ function parseExtraArgs(extra: readonly string[] | undefined): Record<string, un
   return result
 }
 
+/** Margin added to the receive-execution estimate when `--estimate-gas-limit` is not given. */
+export const DEFAULT_ESTIMATE_MARGIN_PERCENT = 10
+
+/** Name of the receiver execution limit in a destination family's extraArgs. */
+function limitField(destFamily: ChainFamily): 'computeUnits' | 'gasLimit' {
+  return destFamily === ChainFamily.Solana ? 'computeUnits' : 'gasLimit'
+}
+
+/** Receiver execution limit (`gasLimit` or `computeUnits`) of built extraArgs, if any. */
+function readReceiveLimit(extraArgs: object): bigint | undefined {
+  for (const field of ['gasLimit', 'computeUnits'] as const) {
+    if (!(field in extraArgs)) continue
+    const value: unknown = Reflect.get(extraArgs, field)
+    if (typeof value === 'bigint') return value
+    if (typeof value === 'number' || typeof value === 'string') return BigInt(value)
+  }
+  return undefined
+}
+
+/** Where the receiver execution limit of a send comes from. */
+export type ReceiveLimitSource = 'user' | 'estimate' | 'default'
+
+/**
+ * Decides the receiver execution limit (`gasLimit`, or `computeUnits` for Solana destinations) a
+ * send carries once the receive-execution estimate is known.
+ *
+ * - A limit the user set (`--gas-limit`, or `--extra gasLimit=`/`computeUnits=`) is kept; the
+ *   estimate is then only a preflight.
+ * - With `--estimate-gas-limit <margin>` (`explicit`), the estimate plus margin is sent.
+ * - Otherwise the estimate ran as the default preflight: the estimate plus margin is sent only when
+ *   it exceeds the limit the message carries by default, so the default path never lowers the
+ *   limit (or the fee) of a send that fits in it, and raises it for a receiver that needs more.
+ *
+ * @param opts - destination family, extraArgs built from the CLI options, the estimate, its margin,
+ *   whether the estimate was requested explicitly, and the destination's default limit
+ * @returns extraArgs to send, the limit they carry, its field name and where it comes from
+ */
+export function resolveReceiveLimit(opts: {
+  destFamily: ChainFamily
+  extraArgs: Record<string, unknown>
+  estimated: number
+  marginPercent: number
+  explicit: boolean
+  defaultLimit: bigint | undefined
+}): {
+  extraArgs: Record<string, unknown>
+  field: 'computeUnits' | 'gasLimit'
+  limit: bigint | undefined
+  source: ReceiveLimitSource
+} {
+  const field = limitField(opts.destFamily)
+  const userLimit = readReceiveLimit(opts.extraArgs)
+  if (userLimit != null)
+    return { extraArgs: opts.extraArgs, field, limit: userLimit, source: 'user' }
+  const withMargin = BigInt(Math.ceil(opts.estimated * (1 + opts.marginPercent / 100)))
+  if (opts.explicit || (opts.defaultLimit != null && withMargin > opts.defaultLimit))
+    return {
+      extraArgs: { ...opts.extraArgs, [field]: withMargin },
+      field,
+      limit: withMargin,
+      source: 'estimate',
+    }
+  return { extraArgs: opts.extraArgs, field, limit: opts.defaultLimit, source: 'default' }
+}
+
 async function sendMessage(
   ctx: Ctx,
   argv: Awaited<ReturnType<typeof builder>['argv']> & GlobalOpts,
@@ -311,7 +376,7 @@ async function sendMessage(
   // builds a catch-all extraArgs object, which can be massaged by
   // [[Chain.buildMessageForDest]] to create suitable extraArgs with defaults if needed
   // --extra entries are spread last so they take priority over code-generated values
-  const extraArgs = {
+  let extraArgs: Record<string, unknown> = {
     ...(argv.allowOutOfOrderExec != null && {
       allowOutOfOrderExecution: !!argv.allowOutOfOrderExec,
     }),
@@ -375,7 +440,8 @@ async function sendMessage(
           ...extraArgs,
         },
       })
-      argv.gasLimit = Math.ceil(estimated * (1 + (argv.estimateGasLimit ?? 10) / 100))
+      const marginPercent = argv.estimateGasLimit ?? DEFAULT_ESTIMATE_MARGIN_PERCENT
+      const withMargin = Math.ceil(estimated * (1 + marginPercent / 100))
       if (argv.onlyEstimate) {
         // --only-estimate: the estimate IS the data output
         if (argv.format === Format.json) {
@@ -383,8 +449,8 @@ async function sendMessage(
             jsonStringify(
               {
                 estimated,
-                bufferPercent: argv.estimateGasLimit ?? 0,
-                withBuffer: argv.gasLimit,
+                bufferPercent: marginPercent,
+                withBuffer: withMargin,
               },
               2,
             ),
@@ -392,23 +458,57 @@ async function sendMessage(
         } else {
           output.write(
             'Estimated',
-            destNetwork.family === ChainFamily.Solana ? 'computeUnits' : 'gasLimit',
+            limitField(destNetwork.family),
             'for sender =',
             walletAddress && formatDisplayAddress(walletAddress, sourceNetwork.family),
             ':',
             estimated,
-            ...(argv.estimateGasLimit ? ['+', argv.estimateGasLimit, '% =', argv.gasLimit] : []),
+            ...(argv.estimateGasLimit ? ['+', argv.estimateGasLimit, '% =', withMargin] : []),
           )
         }
         return
       }
-      // When continuing to send, the estimate is a status message
+      let defaultLimit
+      try {
+        // the limit the message carries when the CLI does not set one
+        defaultLimit = readReceiveLimit(
+          (dest.constructor as ChainStatic).buildMessageForDest({
+            receiver,
+            data,
+            tokenAmounts,
+            extraArgs,
+          }).extraArgs,
+        )
+      } catch (err) {
+        // unknown default: the default path then leaves the limit to the SDK, as before
+        logger.debug('could not read the default receiver limit:', err)
+      }
+      const decision = resolveReceiveLimit({
+        destFamily: destNetwork.family,
+        extraArgs,
+        estimated,
+        marginPercent,
+        explicit: argv.estimateGasLimit != null,
+        defaultLimit,
+      })
+      extraArgs = decision.extraArgs
+      // When continuing to send, the estimate is a status message; it names the limit the message carries
       logger.info(
-        'Estimated gasLimit for sender =',
+        'Estimated',
+        decision.field,
+        'for sender =',
         walletAddress && formatDisplayAddress(walletAddress, sourceNetwork.family),
         ':',
         estimated,
-        ...(argv.estimateGasLimit ? ['+', argv.estimateGasLimit, '% =', argv.gasLimit] : []),
+        '+',
+        marginPercent,
+        '% =',
+        withMargin,
+        '; sending',
+        decision.field,
+        '=',
+        decision.limit,
+        `(${decision.source})`,
       )
     } catch (err) {
       // if user requested estimation explicitly, surface any error
