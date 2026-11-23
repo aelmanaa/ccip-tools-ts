@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI: `send --fee-token <symbol>` no longer takes whichever fee token the RPC lists first. A symbol carried by several of the router's fee tokens (Solana Devnet lists two `LINK` billing mints, one with a stale price) now fails with `ARGUMENT_INVALID` naming every candidate address, and the fee token is chosen by passing its address. Symbols compare case-insensitively, and the router's native wrapper also answers to its symbol with or without the `W` prefix (`--fee-token WSOL` and `SOL` on Solana, `WETH` and `ETH` on EVM); 1.18.0 refused `WSOL` with `TOKEN_NOT_FOUND`
+
 ## [1.18.0] - 2026-11-20
 
 - SDK: export `encodeAddressToAny` and `isCantonPartyId` from the package root. `encodeAddressToAny` encodes an address of any chain family the way CCIP messages carry it, e.g. a Canton party as `keccak256(partyId)`; `isCantonPartyId` checks the `hint::1220<64 hex>` party form it hashes

@@ -20,8 +20,11 @@
  */
 
 import {
+  type Chain,
   type ChainStatic,
+  type Logger,
   type MessageInput,
+  type TokenInfo,
   CCIPArgumentInvalidError,
   CCIPDestSimulationUnavailableError,
   CCIPInsufficientBalanceError,
@@ -235,6 +238,59 @@ function parseExtraArgs(extra: readonly string[] | undefined): Record<string, un
   return result
 }
 
+/**
+ * Resolves a `--fee-token` given as a symbol to one of the router's fee tokens.
+ *
+ * Symbols compare case-insensitively, and the router's native wrapper also answers to its symbol
+ * with or without the `W` prefix (`WSOL` and `SOL`, `WETH` and `ETH`). A symbol carried by more
+ * than one fee token (Solana Devnet lists two `LINK` billing mints) is refused with the candidates,
+ * instead of picking whichever the RPC listed first.
+ *
+ * @param source - source chain
+ * @param router - router address
+ * @param symbol - the `--fee-token` value, already known not to be an address
+ * @param logger - receives the fee token list at debug level
+ * @returns the fee token address and its info
+ * @throws {@link CCIPTokenNotFoundError} if no fee token carries the symbol
+ * @throws {@link CCIPArgumentInvalidError} if several fee tokens carry it
+ */
+export async function resolveFeeTokenSymbol(
+  source: Pick<Chain, 'getFeeTokens' | 'getNativeTokenForRouter'>,
+  router: string,
+  symbol: string,
+  logger: Pick<Logger, 'debug'> = console,
+): Promise<[string, TokenInfo]> {
+  const feeTokens = await source.getFeeTokens(router)
+  logger.debug('supported feeTokens:', feeTokens)
+  let native: string | undefined
+  try {
+    native = await source.getNativeTokenForRouter(router)
+  } catch (err) {
+    logger.debug('no native token for router', router, err)
+  }
+  const wanted = symbol.toUpperCase()
+  const matches = Object.entries(feeTokens).filter(([token, info]) => {
+    const have = info.symbol.toUpperCase()
+    if (have === 'UNKNOWN') return false
+    if (have === wanted) return true
+    return token === native && (have === `W${wanted}` || `W${have}` === wanted)
+  })
+  const [match, ...others] = matches
+  if (!match) throw new CCIPTokenNotFoundError(symbol)
+  if (others.length)
+    throw new CCIPArgumentInvalidError(
+      'fee-token',
+      `symbol "${symbol}" matches ${matches.length} fee tokens of this router: ${matches
+        .map(([token, info]) => `${token} (${info.symbol}, ${info.decimals} decimals)`)
+        .join(', ')}`,
+      {
+        recovery: 'Pass the fee token address to --fee-token instead of its symbol.',
+        context: { candidates: matches.map(([token]) => token) },
+      },
+    )
+  return match
+}
+
 async function sendMessage(
   ctx: Ctx,
   argv: Awaited<ReturnType<typeof builder>['argv']> & GlobalOpts,
@@ -436,15 +492,7 @@ async function sendMessage(
       feeToken = (source.constructor as ChainStatic).getAddress(argv.feeToken)
       feeTokenInfo = await source.getTokenInfo(feeToken)
     } catch (_) {
-      const feeTokens = await source.getFeeTokens(router)
-      logger.debug('supported feeTokens:', feeTokens)
-      for (const [token, info] of Object.entries(feeTokens)) {
-        if (info.symbol === 'UNKNOWN' || info.symbol !== argv.feeToken) continue
-        feeToken = token
-        feeTokenInfo = info
-        break
-      }
-      if (!feeTokenInfo) throw new CCIPTokenNotFoundError(argv.feeToken)
+      ;[feeToken, feeTokenInfo] = await resolveFeeTokenSymbol(source, router, argv.feeToken, logger)
     }
   } else {
     const nativeToken = await source.getNativeTokenForRouter(router)

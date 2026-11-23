@@ -42,7 +42,7 @@ The `send` command constructs and submits a CCIP message to transfer data and/or
 | `--receiver`        | `--to` | string   | -       | Receiver address on destination. Defaults to sender if same chain family. Required for cross-family transfers.                                                                                                                                                        |
 | `--data`            | -      | string   | -       | Message data payload. Hex byte arrays (`0x...`) and base64 strings are decoded as raw bytes. Prefix with `0x:` to ABI-encode as a Solidity `string` (e.g., `--data "0x:hello"` produces `abi.encode(["string"], ["hello"])`). All other values are raw UTF-8 encoded. |
 | `--transfer-tokens` | `-t`   | string[] | -       | Token transfers as `token=amount`. See [Token Amount Format](#token-amount-format).                                                                                                                                                                                   |
-| `--fee-token`       | -      | string   | Native  | Fee token address or symbol (e.g., `LINK`). Omit to pay in native token.                                                                                                                                                                                              |
+| `--fee-token`       | -      | string   | Native  | Fee token address or symbol (e.g., `LINK`, case-insensitive; the native wrapper also as `SOL`/`WSOL`). A symbol shared by several fee tokens is refused; pass the address. Omit to pay in native token.                                                               |
 
 ### Gas & Execution
 
