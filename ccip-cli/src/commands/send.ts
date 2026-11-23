@@ -28,7 +28,9 @@ import {
   CCIPMethodUnsupportedError,
   CCIPTokenNotFoundError,
   ChainFamily,
+  SVMTokenReceiverUsage,
   decodeAddress,
+  encodeSVMExecutorArgsV1,
   estimateReceiveExecution,
   getDataBytes,
   getRequiredCCVs,
@@ -50,6 +52,13 @@ import {
   logParsedError,
   parseTokenAmounts,
 } from './utils.ts'
+
+/** `--token-receiver-usage` choices, mapped to the `useATA` of `SVMExecutorArgsV1`. */
+const TOKEN_RECEIVER_USAGES = {
+  'derive-and-create': SVMTokenReceiverUsage.DeriveAtaAndCreate,
+  derive: SVMTokenReceiverUsage.DeriveAtaDontCreate,
+  'as-is': SVMTokenReceiverUsage.UseAsIs,
+} as const satisfies Record<string, SVMTokenReceiverUsage>
 
 export const command = 'send'
 export const describe = 'Send a CCIP message from source to destination chain'
@@ -134,6 +143,15 @@ export const builder = (yargs: Argv) =>
         string: true,
         describe: 'Solana accounts (append =rw for writable) or Sui object IDs',
       },
+      'token-receiver-usage': {
+        type: 'string',
+        choices: ['derive-and-create', 'derive', 'as-is'] as const,
+        describe:
+          "Solana destination, CCIP 2.0 lane: where the tokens go. derive-and-create: the token receiver's " +
+          'associated token account, created if missing (the default when omitted); derive: that ' +
+          'account, which must exist; as-is: the token receiver itself, which must be a token account. ' +
+          'Encoded with the --account list into the executorArgs',
+      },
       extra: {
         alias: 'x',
         type: 'array',
@@ -195,6 +213,47 @@ export async function handler(argv: Awaited<ReturnType<typeof builder>['argv']> 
       if (!logParsedError.call(ctx, err)) ctx.logger.error(err)
     })
     .finally(destroy)
+}
+
+/**
+ * Encodes `--token-receiver-usage` as the `executorArgs` (`SVMExecutorArgsV1`) of a message to
+ * Solana. The blob also carries the receiver accounts, so it is built here with the `--account`
+ * list: an `executorArgs` passed alone replaces the one the SDK would build from the accounts.
+ * @param opts - The chosen usage (none: leave `executorArgs` to the SDK), the destination family,
+ *   the parsed `--account` list with its writable bitmap, and the parsed `--extra` entries.
+ * @returns The 0x-hex `executorArgs`, or `undefined` when no usage is chosen.
+ * @throws {@link CCIPArgumentInvalidError} for a non-Solana destination, or when `--extra`
+ *   already sets `executorArgs`.
+ */
+export function tokenReceiverUsageExecutorArgs({
+  usage,
+  destFamily,
+  accounts = [],
+  accountIsWritableBitmap = 0n,
+  extra = {},
+}: {
+  usage: keyof typeof TOKEN_RECEIVER_USAGES | undefined
+  destFamily: ChainFamily
+  accounts?: readonly string[]
+  accountIsWritableBitmap?: bigint
+  extra?: Record<string, unknown>
+}): string | undefined {
+  if (usage == null) return
+  if (destFamily !== ChainFamily.Solana)
+    throw new CCIPArgumentInvalidError(
+      'token-receiver-usage',
+      `only applies to Solana destinations, not ${destFamily}`,
+    )
+  if ('executorArgs' in extra)
+    throw new CCIPArgumentInvalidError(
+      'token-receiver-usage',
+      'conflicts with --extra executorArgs, which already sets the destination blob',
+    )
+  return encodeSVMExecutorArgsV1({
+    useAta: TOKEN_RECEIVER_USAGES[usage],
+    accounts,
+    accountIsWritableBitmap,
+  })
 }
 
 /**
@@ -308,6 +367,15 @@ async function sendMessage(
     receiver = walletAddress // send to self if same family
   }
 
+  const extra = parseExtraArgs(argv.extra)
+  const executorArgs = tokenReceiverUsageExecutorArgs({
+    usage: argv.tokenReceiverUsage,
+    destFamily: destNetwork.family,
+    accounts,
+    accountIsWritableBitmap,
+    extra,
+  })
+
   // builds a catch-all extraArgs object, which can be massaged by
   // [[Chain.buildMessageForDest]] to create suitable extraArgs with defaults if needed
   // --extra entries are spread last so they take priority over code-generated values
@@ -322,7 +390,8 @@ async function sendMessage(
         : { gasLimit: BigInt(argv.gasLimit) }),
     ...(!!argv.tokenReceiver && { tokenReceiver: argv.tokenReceiver }),
     ...(!!accounts && { accounts, accountIsWritableBitmap }), // accounts also used as Sui receiverObjectIds
-    ...parseExtraArgs(argv.extra),
+    ...(executorArgs != null && { executorArgs }),
+    ...extra,
   }
 
   if (argv.onlyCcvs) {

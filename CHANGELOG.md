@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI: `send --token-receiver-usage derive-and-create|derive|as-is` chooses how a message to Solana on a CCIP 2.0 lane delivers its tokens: to the token receiver's associated token account, created if missing (what the SDK encodes when the option is omitted), to that account only if it exists, or to the token receiver itself as a token account (e.g. a program-owned token account). It encodes the `useATA` of the `SVMExecutorArgsV1` `executorArgs` together with the `--account` list; before, the only way was a hand-encoded `-x executorArgs=0x1a2b3c4d…` that also had to re-encode the accounts. It refuses a non-Solana destination and an `--extra executorArgs` alongside it. SDK: export `encodeSVMExecutorArgsV1` and `SVMTokenReceiverUsage` from the package root
+
 ## [1.18.0] - 2026-11-20
 
 - SDK: export `encodeAddressToAny` and `isCantonPartyId` from the package root. `encodeAddressToAny` encodes an address of any chain family the way CCIP messages carry it, e.g. a Canton party as `keccak256(partyId)`; `isCantonPartyId` checks the `hint::1220<64 hex>` party form it hashes

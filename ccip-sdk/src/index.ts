@@ -165,6 +165,7 @@ export {
 } from './evm/messageCodec.ts'
 import { SolanaChain } from './solana/index.ts'
 export type { SolanaSentSlice, SolanaSplitMode, UnsignedSolanaTx } from './solana/index.ts'
+export { SVMTokenReceiverUsage, encodeSVMExecutorArgsV1 } from './solana/extra-args.ts'
 import { SuiChain } from './sui/index.ts'
 export type { UnsignedSuiTx } from './sui/index.ts'
 export type { SuiClientLike } from './sui/client.ts'

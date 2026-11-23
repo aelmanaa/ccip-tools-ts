@@ -79,12 +79,13 @@ For array fields (`ccvs`, `ccvArgs`, `tokenArgs`), repeating a key creates an ar
 
 ### Chain-Specific
 
-| Option             | Alias                  | Type     | Description                                                                                                                             |
-| ------------------ | ---------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `--token-receiver` | -                      | string   | Solana token receiver address if different from program receiver. **Required** when sending tokens + data to Solana.                    |
-| `--account`        | `--receiver-object-id` | string[] | Solana accounts (append `=rw` for writable) or Sui receiver object IDs.                                                                 |
-| `--canton-config`  | -                      | string   | Path to Canton config JSON file (required when source or dest is Canton). See [Configuration](/cli/configuration#canton-configuration). |
-| `--indexer`        | -                      | string[] | CCIP v2 indexer URLs for CCV verifications (used when lane involves Canton).                                                            |
+| Option                   | Alias                  | Type     | Description                                                                                                                                          |
+| ------------------------ | ---------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--token-receiver`       | -                      | string   | Solana token receiver address if different from program receiver. **Required** when sending tokens + data to Solana.                                 |
+| `--account`              | `--receiver-object-id` | string[] | Solana accounts (append `=rw` for writable) or Sui receiver object IDs.                                                                              |
+| `--token-receiver-usage` | -                      | string   | Solana destination on a CCIP 2.0 lane: `derive-and-create` (default), `derive` or `as-is`. See [Token receiver usage](#token-receiver-usage-solana). |
+| `--canton-config`        | -                      | string   | Path to Canton config JSON file (required when source or dest is Canton). See [Configuration](/cli/configuration#canton-configuration).              |
+| `--indexer`              | -                      | string[] | CCIP v2 indexer URLs for CCV verifications (used when lane involves Canton).                                                                         |
 
 ### Wallet
 
@@ -221,6 +222,31 @@ ccip-cli send \
   --data "instruction-data" \
   --wallet ledger
 ```
+
+### Token receiver usage (Solana)
+
+On a CCIP 2.0 lane to Solana, `--token-receiver-usage` chooses where the tokens go. It sets the `useATA` byte of the
+message's `executorArgs` (`SVMExecutorArgsV1`), encoded together with the `--account` list.
+
+| Value               | Tokens go to                                                                                 |
+| ------------------- | -------------------------------------------------------------------------------------------- |
+| `derive-and-create` | The token receiver's associated token account, created if missing. Default when omitted.     |
+| `derive`            | The token receiver's associated token account, which must already exist.                     |
+| `as-is`             | The token receiver itself, which must be a token account (e.g. owned by a program or a PDA). |
+
+```bash
+ccip-cli send \
+  -s ethereum-testnet-sepolia \
+  -r 0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59 \
+  -d solana-devnet \
+  --to <SOLANA_WALLET_OR_PROGRAM> \
+  --token-receiver <TOKEN_ACCOUNT> \
+  --token-receiver-usage as-is \
+  -t 0xToken=1.0
+```
+
+If the account the mode needs does not exist, or is not a token account, the message is accepted on the source chain
+but cannot be executed on Solana until it does.
 
 ### Solana to EVM
 
