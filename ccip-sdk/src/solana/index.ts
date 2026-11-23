@@ -1933,9 +1933,12 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
     }
 
     const router = await this.getRouterForOffRamp(opts_.offRamp, opts_.message.sourceChainSelector)
+    // a 2.x OffRamp calls `ccip_receive_v2` on receivers registered v2 in the Router; 1.6 never does
+    const [, offRampVersion] = await this.typeAndVersion(opts_.offRamp)
     return estimateExecComputeUnits({
       connection: this.connection,
       router,
+      offRampVersion,
       ...opts_,
       logger: this.logger,
     })

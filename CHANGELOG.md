@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Solana: `estimateReceiveExecution` (so `ccip-cli send`, `send --only-get-fee`, `send --only-estimate` and `manual-exec --only-estimate` to Solana) simulates the entrypoint the OffRamp will call. Behind a 2.0 OffRamp, a receiver registered as v2 in the Router's `ReceiverRegistry` (PDA `["receiver_registry", receiver]`) gets `ccip_receive_v2` with the v2 message (at most one token transfer, with its token receiver, and the EVM sender as 32 bytes, as the OffRamp delivers it). It simulated the v1 `ccip_receive` for every receiver, so every v2 receiver failed with `InstructionFallbackNotFound` (Anchor 101) and the CLI refused to quote or send to it. Unregistered receivers, receivers registered as v1 and 1.6 OffRamps keep the `ccip_receive` simulation unchanged
+
 ## [1.18.0] - 2026-11-20
 
 - SDK: export `encodeAddressToAny` and `isCantonPartyId` from the package root. `encodeAddressToAny` encodes an address of any chain family the way CCIP messages carry it, e.g. a Canton party as `keccak256(partyId)`; `isCantonPartyId` checks the `hint::1220<64 hex>` party form it hashes

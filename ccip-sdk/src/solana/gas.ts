@@ -11,16 +11,28 @@ import type { BytesLike } from 'ethers'
 
 import type { WithLogger } from '../types.ts'
 import { bytesToBuffer, getAddressBytes, getDataBytes, toLeArray } from '../utils.ts'
-import { newProgram } from './coder.ts'
+import { newProgram, sizedCoder } from './coder.ts'
 import { IDL as RECEIVER_IDL } from './idl/1.6.0/CCIP_RECEIVER.ts'
+import { IDL as RECEIVER_V2_IDL } from './idl/2.0.0/CCIP_RECEIVER.ts'
 import { resolveATA, simulateTransaction, simulationProvider } from './utils.ts'
 
 const SIMULATION_PAYER = new PublicKey('11111111111111111111111111111112')
+
+/** Schema version of the Router's `ReceiverRegistry` account the OffRamp accepts. */
+const RECEIVER_REGISTRY_SCHEMA_VERSION = 1
+/** `ReceiverRegistry.receiverVersion` of a receiver exposing `ccip_receive_v2`. */
+const RECEIVER_INTERFACE_V2 = 2
 
 type EstimateExecComputeUnitsOpts = {
   connection: Parameters<typeof simulationProvider>[0]['connection']
   router: string
   offRamp: string
+  /**
+   * Version of `offRamp` (from `typeAndVersion`). A 2.x OffRamp delivers to receivers registered v2
+   * in the Router's `ReceiverRegistry` through `ccip_receive_v2`; any other value (or none) keeps the
+   * v1 `ccip_receive` simulation, which is what a 1.6 OffRamp always calls.
+   */
+  offRampVersion?: string
   message: {
     sourceChainSelector: bigint
     messageId: string
@@ -106,16 +118,74 @@ async function getTokenSetupInstructions({
 }
 
 /**
- * Estimate compute units consumed by a Solana receiver `ccip_receive` callback.
+ * Reads which CCIP receiver interface the 2.0 OffRamp will call on `receiver`, the way the OffRamp
+ * decides it: from the Router-owned `ReceiverRegistry` PDA `[b"receiver_registry", receiver]`.
+ * An absent (or not Router-owned) account means v1 `ccip_receive`; a registry entry with
+ * `receiverVersion == 2` means `ccip_receive_v2`.
+ *
+ * @param opts - `connection`, the destination `router` and the `receiver` program.
+ * @returns `2` for a receiver registered v2, `1` otherwise.
+ */
+export async function getReceiverInterfaceVersion({
+  connection,
+  router,
+  receiver,
+  logger = console,
+}: {
+  connection: EstimateExecComputeUnitsOpts['connection']
+  router: string
+  receiver: string
+} & WithLogger): Promise<1 | 2> {
+  const routerProgram = new PublicKey(router)
+  const [registry] = PublicKey.findProgramAddressSync(
+    [Buffer.from('receiver_registry'), new PublicKey(receiver).toBuffer()],
+    routerProgram,
+  )
+  const info = await connection.getAccountInfo(registry)
+  if (!info?.owner.equals(routerProgram)) return 1
+  try {
+    const decoded = sizedCoder(RECEIVER_V2_IDL).accounts.decode<{
+      version: number
+      receiverVersion: number
+    }>('ReceiverRegistry', info.data)
+    if (decoded.version !== RECEIVER_REGISTRY_SCHEMA_VERSION) {
+      logger.debug('Unknown ReceiverRegistry schema version; assuming a v1 receiver:', decoded)
+      return 1
+    }
+    return decoded.receiverVersion === RECEIVER_INTERFACE_V2 ? 2 : 1
+  } catch (err) {
+    logger.debug('Undecodable ReceiverRegistry account; assuming a v1 receiver:', registry, err)
+    return 1
+  }
+}
+
+/**
+ * The `sender` bytes the OffRamp hands to the receiver: a non-Solana sender shorter than 32 bytes
+ * (an EVM address) arrives left-padded to 32 bytes (`abi.encode(address)`), as receivers seeding
+ * approved-sender PDAs with it expect.
+ */
+function receiverSenderBytes(sender: string | undefined): Buffer {
+  if (!sender) return Buffer.alloc(0)
+  const bytes = getAddressBytes(sender)
+  if (bytes.length >= 32) return bytesToBuffer(bytes)
+  return Buffer.concat([Buffer.alloc(32 - bytes.length), bytesToBuffer(bytes)])
+}
+
+/**
+ * Estimate compute units consumed by a Solana receiver `ccip_receive` (v1) or `ccip_receive_v2`
+ * callback.
  *
  * This intentionally simulates the receiver callback directly, not full OffRamp execution. The first
  * three accounts follow the standard Solana CCIP receiver convention: OffRamp external execution
- * authority PDA, OffRamp program id, and Router allowed-offramp PDA.
+ * authority PDA, OffRamp program id, and Router allowed-offramp PDA. With a 2.x `offRampVersion`,
+ * the entrypoint and payload follow the receiver's `ReceiverRegistry` entry, as the OffRamp does
+ * (see {@link getReceiverInterfaceVersion}).
  */
 export async function estimateExecComputeUnits({
   connection,
   router,
   offRamp,
+  offRampVersion,
   message,
   logger = console,
 }: EstimateExecComputeUnitsOpts): Promise<number> {
@@ -135,31 +205,64 @@ export async function estimateExecComputeUnits({
     ],
     new PublicKey(router),
   )
-  const program = newProgram(RECEIVER_IDL, receiver, simulationProvider({ connection, logger }))
-  const receiverMessage = {
-    messageId: Array.from(getDataBytes(message.messageId)),
-    sourceChainSelector: new BN(message.sourceChainSelector.toString()),
-    sender: bytesToBuffer(message.sender ? getAddressBytes(message.sender) : []),
-    data: bytesToBuffer(message.data ? getDataBytes(message.data) : []),
-    tokenAmounts: (message.destTokenAmounts ?? []).map((tokenAmount) => ({
-      token: new PublicKey(
-        'token' in tokenAmount ? tokenAmount.token : tokenAmount.destTokenAddress,
-      ),
-      amount: new BN(tokenAmount.amount.toString()),
-    })),
-  }
+  const receiverInterface =
+    offRampVersion != null && Number(offRampVersion.split('.')[0]) >= 2
+      ? await getReceiverInterfaceVersion({
+          connection,
+          router,
+          receiver: message.receiver,
+          logger,
+        })
+      : 1
+  const provider = simulationProvider({ connection, logger })
+  const accounts = { authority, offrampProgram: offRampProgram, allowedOfframp }
+  const remainingAccounts = getReceiverRemainingAccounts(
+    message.accounts,
+    message.accountIsWritableBitmap,
+  )
+  const destTokenAmounts = (message.destTokenAmounts ?? []).map((tokenAmount) => ({
+    token: new PublicKey('token' in tokenAmount ? tokenAmount.token : tokenAmount.destTokenAddress),
+    amount: new BN(tokenAmount.amount.toString()),
+  }))
 
-  const receiveIx = await program.methods
-    .ccipReceive(receiverMessage)
-    .accounts({
-      authority,
-      offrampProgram: offRampProgram,
-      allowedOfframp,
-    })
-    .remainingAccounts(
-      getReceiverRemainingAccounts(message.accounts, message.accountIsWritableBitmap),
-    )
-    .instruction()
+  let receiveIx
+  if (receiverInterface === 2) {
+    // the 2.0 OffRamp's `Any2SVMMessageV2`: at most one token transfer, with where it was delivered
+    if (destTokenAmounts.length > 1)
+      logger.debug('v2 receivers take one token transfer; estimating with the first only')
+    const [tokenAmount] = destTokenAmounts
+    receiveIx = await newProgram(RECEIVER_V2_IDL, receiver, provider)
+      .methods.ccipReceiveV2({
+        messageId: Array.from(getDataBytes(message.messageId)),
+        sourceChainSelector: new BN(message.sourceChainSelector.toString()),
+        sender: receiverSenderBytes(message.sender),
+        data: bytesToBuffer(message.data ? getDataBytes(message.data) : []),
+        tokenTransfer: tokenAmount
+          ? {
+              tokenAmount,
+              tokenReceiver: message.tokenReceiver
+                ? new PublicKey(message.tokenReceiver)
+                : PublicKey.default,
+              tokenReceiverUsage: { deriveAtaAndCreate: {} },
+            }
+          : null,
+      })
+      .accounts(accounts)
+      .remainingAccounts(remainingAccounts)
+      .instruction()
+  } else {
+    receiveIx = await newProgram(RECEIVER_IDL, receiver, provider)
+      .methods.ccipReceive({
+        messageId: Array.from(getDataBytes(message.messageId)),
+        sourceChainSelector: new BN(message.sourceChainSelector.toString()),
+        sender: bytesToBuffer(message.sender ? getAddressBytes(message.sender) : []),
+        data: bytesToBuffer(message.data ? getDataBytes(message.data) : []),
+        tokenAmounts: destTokenAmounts,
+      })
+      .accounts(accounts)
+      .remainingAccounts(remainingAccounts)
+      .instruction()
+  }
 
   const setupIxs = await getTokenSetupInstructions({
     connection,

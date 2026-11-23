@@ -18,7 +18,7 @@ The SDK provides two ways to estimate the gas needed to execute a CCIP message o
 On EVM, both simulate the `ccipReceive` call on the destination chain and return the estimated gas units, with the base transaction cost (21,000 gas) subtracted — it represents the execution cost only, suitable for use as `gasLimit` in `extraArgs` or `execute`. On Solana the same methods estimate the compute units of the OffRamp's `execute` instead (see the note below).
 
 :::note
-`estimateReceiveExecution` is implemented on **EVM** (returns `ccipReceive` gas units) and **Solana** (returns compute units — Solana meters execution in CU, not gas). Aptos, Sui, TON, and Canton do not implement it.
+`estimateReceiveExecution` is implemented on **EVM** (returns `ccipReceive` gas units) and **Solana** (returns compute units — Solana meters execution in CU, not gas). Aptos, Sui, TON, and Canton do not implement it. On Solana it simulates the receiver callback the OffRamp will call: `ccip_receive_v2` for a receiver registered as v2 in the Router's `ReceiverRegistry`, when the OffRamp is 2.0, and `ccip_receive` otherwise.
 :::
 
 :::tip
