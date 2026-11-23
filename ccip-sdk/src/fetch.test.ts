@@ -22,6 +22,7 @@ import {
   parseRetryAfter,
   parseTopicLimitError,
   redactEndpointUrl,
+  redactUrlsInText,
   registerEndpointBase,
   setEndpointLogRange,
   setEndpointTopicLimit,
@@ -1462,6 +1463,45 @@ describe('endpoint topic limit', () => {
   })
 })
 
+describe('redactUrlsInText', () => {
+  const KEY = 'K3yAbcdefghijklmnop21'
+
+  it('redacts every URL embedded in free text, inspected objects and JSON strings', () => {
+    const text = [
+      `server response 401 (info={ "requestUrl": "https://a.example/v2/${KEY}" })`,
+      `requestUrl: 'https://a.example/v2/${KEY}',`,
+      `body: "{\\"url\\":\\"https://a.example/v2/${KEY}\\"}"`,
+      `Failed to connect to TONv2 endpoint https://a.example/v2/${KEY}/jsonRPC: 404`,
+      `GET https://b.example/?api-key=${KEY} failed (wss://c.example/ws/${KEY})`,
+    ].join('\n')
+    const out = redactUrlsInText(text)
+    assert.ok(!out.includes(KEY), out)
+    assert.equal(
+      out,
+      [
+        `server response 401 (info={ "requestUrl": "https://a.example/v2/***" })`,
+        `requestUrl: 'https://a.example/v2/***',`,
+        `body: "{\\"url\\":\\"https://a.example/v2/***\\"}"`,
+        `Failed to connect to TONv2 endpoint https://a.example/v2/***/jsonRPC: 404`,
+        `GET https://b.example/ failed (wss://c.example/ws/***)`,
+      ].join('\n'),
+    )
+  })
+
+  it('leaves URLs with nothing to hide byte-for-byte unchanged', () => {
+    const text = 'see https://evm.astar.network and https://docs.chain.link/ccip/api, no key'
+    assert.equal(redactUrlsInText(text), text)
+    assert.equal(redactUrlsInText('no url here'), 'no url here')
+  })
+
+  it('drops userinfo', () => {
+    assert.equal(
+      redactUrlsInText('at https://user:pass@rpc.example.com/v1.'),
+      'at https://rpc.example.com/v1.',
+    )
+  })
+})
+
 describe('redactEndpointUrl', () => {
   it('drops the query string, where keyed gateways carry their key', () => {
     assert.equal(
@@ -1483,6 +1523,17 @@ describe('redactEndpointUrl', () => {
     )
   })
 
+  it('masks keys as short as 21 characters (newer alchemy keys)', () => {
+    assert.equal(
+      redactEndpointUrl('https://eth-sepolia.g.alchemy.com/v2/K3yAbcdefghijklmnop21'),
+      'https://eth-sepolia.g.alchemy.com/v2/***',
+    )
+    assert.equal(
+      redactEndpointUrl('https://solana-devnet.g.alchemy.com/v2/abcdefghijklmnop'),
+      'https://solana-devnet.g.alchemy.com/v2/***',
+    )
+  })
+
   it('keeps ordinary public paths intact', () => {
     assert.equal(
       redactEndpointUrl('https://gateway.tenderly.co/public/sepolia'),
@@ -1499,6 +1550,13 @@ describe('redactEndpointUrl', () => {
     assert.equal(redactEndpointUrl('not a url'), '***')
     assert.equal(redactEndpointUrl(undefined), '***')
     assert.equal(redactEndpointUrl(new URL('https://ok.example/path')), 'https://ok.example/path')
+  })
+
+  it('keeps ordinary segments shorter than 16 characters', () => {
+    assert.equal(
+      redactEndpointUrl('https://rpc.ankr.com/eth_sepolia/v2/jsonRPC'),
+      'https://rpc.ankr.com/eth_sepolia/v2/jsonRPC',
+    )
   })
 
   it('never logs credentials from the endpoint URL through the fetch logger', async () => {

@@ -12,8 +12,9 @@ import {
 } from '@chainlink/ccip-sdk/src/index.ts'
 
 import type { Ctx } from '../commands/index.ts'
+import { formatCCIPError } from '../commands/utils.ts'
 import { resolveCliIndexer } from './canton/index.ts'
-import { fetchChainsFromRpcs } from './index.ts'
+import { fetchChainsFromRpcs, summarizeTxLookupErrors } from './index.ts'
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -417,6 +418,39 @@ describe('fetchChainsFromRpcs', () => {
     }
   })
 
+  it('txHash: tx not found summarizes each attempt without the RPC key', async () => {
+    const KEY = 'K3yAbcdefghijklmnop21' // 21 chars, like newer alchemy keys
+    const keyed = `https://eth-sepolia.g.alchemy.com/v2/${KEY}`
+    const { FakeChain } = makeChainClass({
+      family: ChainFamily.EVM,
+      networkName: 'ethereum-testnet-sepolia',
+      connectReject: (url) => url === keyed, // message embeds the url, like ethers' requestUrl
+    })
+    const restore = setupSupportedChains({ [ChainFamily.EVM]: FakeChain })
+    const [ctx, ac] = makeCtx()
+    try {
+      const [, txResult] = fetchChainsFromRpcs(
+        ctx,
+        { rpcs: [keyed, 'http://rpc1.example'], rpcsFile: '', api: false, cantonConfig: undefined },
+        TX_HASH,
+      )
+      await assert.rejects(txResult, (err: unknown) => {
+        assert.ok(err instanceof CCIPTransactionNotFoundError, String(err))
+        assert.deepEqual(err.context.attempts, [
+          'EVM: Error: connection refused: https://eth-sepolia.g.alchemy.com/v2/***',
+          `EVM: CCIPTransactionNotFoundError: Transaction not found: ${TX_HASH}`,
+        ])
+        assert.ok(!('aggregateErr' in err.context))
+        assert.ok(err.cause instanceof AggregateError, 'raw rejection stays reachable as cause')
+        assert.ok(!formatCCIPError(err, true)!.includes(KEY), 'formatted error leaks the key')
+        return true
+      })
+    } finally {
+      restore()
+      ac.abort()
+    }
+  })
+
   it('txHash: tx not found names RPCs on unregistered chain ids', async () => {
     const { FakeChain } = makeChainClass({
       family: ChainFamily.EVM,
@@ -649,6 +683,32 @@ describe('fetchChainsFromRpcs', () => {
       restore()
       ac.abort()
     }
+  })
+})
+
+describe('summarizeTxLookupErrors', () => {
+  it('labels each family, flattens nested aggregates, dedupes, redacts and truncates', () => {
+    const KEY = 'K3yAbcdefghijklmnop21'
+    const leak = new Error(
+      `server response 401 (info={ "requestUrl": "https://r.example/v2/${KEY}" })`,
+    )
+    const err = new AggregateError(
+      [
+        new AggregateError([leak, leak, new Error('line one\nline two')]),
+        'plain string rejection',
+        new Error('x'.repeat(400)),
+      ],
+      'All promises were rejected',
+    )
+    const lines = summarizeTxLookupErrors(err, ['EVM', 'SVM'])
+    assert.deepEqual(lines.slice(0, 3), [
+      'EVM: Error: server response 401 (info={ "requestUrl": "https://r.example/v2/***" })',
+      'EVM: Error: line one',
+      'SVM: plain string rejection',
+    ])
+    assert.equal(lines[3]!.length, 300)
+    assert.ok(lines[3]!.startsWith('unknown: Error: xxx'))
+    assert.ok(lines.every((l) => !l.includes(KEY)))
   })
 })
 

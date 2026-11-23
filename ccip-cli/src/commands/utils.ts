@@ -21,6 +21,7 @@ import {
   getDataBytes,
   getSourceTokenFromExtraData,
   networkInfo,
+  redactUrlsInText,
   resolveTokenDecimals,
   supportedChains,
   toUIAmount,
@@ -707,6 +708,9 @@ export function prettyReceipt(
 
 /**
  * Format a CCIPError with recovery hints for user-friendly display.
+ * Every URL in the result is redacted (see `redactUrlsInText`): context values are
+ * `util.inspect`ed, and nested third-party errors (e.g. ethers' `requestUrl`) carry
+ * full RPC URLs with their API keys.
  * @param err - Error to format.
  * @param verbose - If true, include stack trace for debugging.
  * @returns Formatted error string if CCIPError, null otherwise.
@@ -746,7 +750,7 @@ export function formatCCIPError(err: unknown, verbose = false): string | null {
     }
   }
 
-  return lines.join('\n')
+  return redactUrlsInText(lines.join('\n'))
 }
 
 /**
@@ -871,6 +875,19 @@ export async function* yieldResolved<T>(promises: Iterable<Promise<T>>): AsyncGe
 }
 
 /**
+ * Wraps a console method so its arguments are formatted the way `console` would format them
+ * (`util.formatWithOptions`, colors only on a color-capable stderr) and every URL in the
+ * result is redacted before it is written.
+ * @param write - Bound console method to forward the redacted line to.
+ * @returns A log function with the same call signature.
+ */
+export function redactingLogFn(write: (line: string) => void): (...args: unknown[]) => void {
+  const colors = !!process.stderr.isTTY && process.stderr.hasColors()
+  return (...args: unknown[]) =>
+    write(redactUrlsInText(util.formatWithOptions({ colors }, ...args)))
+}
+
+/**
  * Create context for command execution.
  *
  * Output architecture (following Vercel CLI / gws / gh patterns):
@@ -885,13 +902,14 @@ export function getCtx(argv: {
 }): [ctx: Ctx, destroy: (reason?: unknown) => void] {
   const ac = new AbortController()
 
-  // Logger: always stderr
+  // Logger: always stderr, with every URL redacted (errors from RPC libraries embed full
+  // endpoint URLs, API keys included, and users paste these logs into issues)
   const stderrConsole = new Console(process.stderr, process.stderr, true)
   const logger: Ctx['logger'] = {
-    info: stderrConsole.info.bind(stderrConsole),
-    warn: stderrConsole.warn.bind(stderrConsole),
-    error: stderrConsole.error.bind(stderrConsole),
-    debug: argv.verbose ? stderrConsole.debug.bind(stderrConsole) : () => {},
+    info: redactingLogFn(stderrConsole.info.bind(stderrConsole)),
+    warn: redactingLogFn(stderrConsole.warn.bind(stderrConsole)),
+    error: redactingLogFn(stderrConsole.error.bind(stderrConsole)),
+    debug: argv.verbose ? redactingLogFn(stderrConsole.debug.bind(stderrConsole)) : () => {},
   }
 
   // Output: always stdout

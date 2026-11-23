@@ -21,6 +21,7 @@ import {
   formatUIMultiplier,
   parseTokenAmounts,
   prettyFormat,
+  redactingLogFn,
   yieldResolved,
 } from './utils.ts'
 
@@ -102,6 +103,44 @@ describe('formatCCIPError', () => {
 
     assert.ok(formatted)
     assert.doesNotMatch(formatted, /Stack trace:/)
+  })
+})
+
+describe('RPC credentials in CLI error output', () => {
+  const KEY = 'K3yAbcdefghijklmnop21' // 21 chars, like newer alchemy keys
+  const url = `https://eth-sepolia.g.alchemy.com/v2/${KEY}`
+  const ethersErr = makeError('server response 401 Unauthorized', 'SERVER_ERROR', {
+    request: undefined as never,
+    response: undefined as never,
+    info: { requestUrl: url, responseStatus: '401 Unauthorized' },
+  })
+
+  it('formatCCIPError redacts URLs nested in inspected context values', () => {
+    const err = new CCIPChainNotFoundError('12345', {
+      context: {
+        aggregateErr: new AggregateError([ethersErr]),
+        helius: `https://mainnet.helius-rpc.com/?api-key=${KEY}`,
+      },
+    })
+    for (const verbose of [false, true]) {
+      const formatted = formatCCIPError(err, verbose)!
+      assert.ok(!formatted.includes(KEY), `key leaked (verbose=${verbose})`)
+      assert.ok(formatted.includes('https://eth-sepolia.g.alchemy.com/v2/***'))
+      assert.ok(formatted.includes("helius: 'https://mainnet.helius-rpc.com/'"))
+    }
+  })
+
+  it('redactingLogFn redacts URLs in every logged argument, errors included', () => {
+    const written: string[] = []
+    const log = redactingLogFn((line) => written.push(line))
+    log('failed:', ethersErr, { url }, `see ${url}`)
+    assert.equal(written.length, 1)
+    assert.ok(!written[0]!.includes(KEY), 'key leaked')
+    assert.ok(written[0]!.startsWith('failed: Error: server response 401 Unauthorized'))
+    assert.ok(written[0]!.includes('see https://eth-sepolia.g.alchemy.com/v2/***'))
+    // printf-style formatting and plain URLs are unchanged
+    log('%s at %d', 'ok', 3, 'https://evm.astar.network')
+    assert.equal(written[1], 'ok at 3 https://evm.astar.network')
   })
 })
 

@@ -144,6 +144,8 @@ export {
   getCCIPExplorerUrl,
 } from './explorer.ts'
 
+export { redactEndpointUrl, redactUrlsInText } from './fetch.ts'
+
 // errors
 export * from './errors/index.ts'
 export * from './cct/errors.ts'

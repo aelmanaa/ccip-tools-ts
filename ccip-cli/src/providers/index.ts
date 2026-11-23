@@ -20,6 +20,7 @@ import {
   ChainFamily,
   NetworkType,
   networkInfo,
+  redactUrlsInText,
   signalToPromise,
   supportedChains,
 } from '@chainlink/ccip-sdk/src/index.ts'
@@ -421,20 +422,56 @@ export function fetchChainsFromRpcs(ctx: Ctx, argv: FetchGlobalArgs, txHash?: st
   if (!txHash) return chainGetter
 
   // truty txHash means txs$ return branch of loadChainFamily
+  const txFamilies = Object.values(supportedChains)
+    .filter((C) => C.isTxHash(txHash))
+    .map((C) => C.family)
   const txResult = Promise.any(
-    Object.values(supportedChains)
-      .filter((C) => C.isTxHash(txHash))
-      .map((C) => loadChainFamily(C.family, txHash) as Promise<[Chain, ChainTransaction]>),
-  ).catch((err) => {
+    txFamilies.map((F) => loadChainFamily(F, txHash) as Promise<[Chain, ChainTransaction]>),
+  ).catch((err: unknown) => {
     const recovery = unregisteredHint()
     return Promise.reject(
       new CCIPTransactionNotFoundError(txHash, {
-        context: { aggregateErr: err },
+        // a one-line summary per attempt: the raw AggregateError dump is long and its
+        // third-party errors (ethers' requestUrl) embed full RPC URLs with API keys
+        context: { attempts: summarizeTxLookupErrors(err, txFamilies) },
+        ...(err instanceof Error && { cause: err }),
         ...(recovery && { recovery }),
       }),
     )
   })
   return [chainGetter, txResult]
+}
+
+const MAX_ATTEMPT_LINE_LENGTH = 300
+
+/**
+ * Summarizes the rejection of a transaction lookup raced across chain families: one line per
+ * distinct failure, `<family>: <error name>: <first line of its message>`, with every URL
+ * redacted and long lines truncated.
+ * @param err - Rejection of `Promise.any` over the families (an `AggregateError` whose errors are
+ *   in `families` order, each possibly an `AggregateError` over that family's endpoints).
+ * @param families - Family of each racer, in the order they were raced.
+ * @returns Distinct summary lines, in race order.
+ */
+export function summarizeTxLookupErrors(err: unknown, families: readonly string[]): string[] {
+  const leaves = (e: unknown): unknown[] => {
+    if (!(e instanceof AggregateError)) return [e]
+    const errors: unknown[] = e.errors
+    return errors.flatMap(leaves)
+  }
+  const perFamily: unknown[] = err instanceof AggregateError ? err.errors : [err]
+  const lines = new Set<string>()
+  perFamily.forEach((familyErr, i) => {
+    for (const leaf of leaves(familyErr)) {
+      const text = leaf instanceof Error ? `${leaf.name}: ${leaf.message}` : String(leaf)
+      // redact before truncating, so a cut can never leave part of a key behind
+      let line = redactUrlsInText(`${families[i] ?? 'unknown'}: ${text.split('\n', 1)[0]}`)
+      if (line.length > MAX_ATTEMPT_LINE_LENGTH)
+        line = `${line.slice(0, MAX_ATTEMPT_LINE_LENGTH - 1)}…`
+      lines.add(line)
+    }
+  })
+  return [...lines]
 }
 
 /**

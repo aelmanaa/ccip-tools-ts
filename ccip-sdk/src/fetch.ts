@@ -614,19 +614,36 @@ function extractMethod(init?: RequestInit): string | undefined {
 }
 
 /**
+ * Shortest path segment {@link redactEndpointUrl} masks. Keyed-path providers embed keys of 21
+ * (alchemy, newer keys) to 64 characters (ankr); ordinary RPC path segments (`v2`, `jsonRPC`,
+ * `public`, `sepolia`, `eth_sepolia`) stay well below it.
+ */
+const SECRET_PATH_SEGMENT_MIN_LENGTH = 16
+
+/**
  * Renders an endpoint URL for logs without leaking credentials. The query
  * string is dropped entirely (keyed gateways carry their key there, e.g.
- * toncenter's `?api_key=`), path segments of 24+ characters are masked
- * (keyed-path providers embed the key there, e.g. alchemy/infura/quiknode),
- * and rebuilding from `origin` drops any userinfo. Non-URL input degrades to
- * `***` — never echo the raw value back.
+ * toncenter's `?api_key=`), path segments of 16+ characters are masked
+ * (keyed-path providers embed the key there, e.g. alchemy/infura/quiknode;
+ * alchemy keys can be as short as 21 characters), and rebuilding from
+ * `origin` drops any userinfo. Non-URL input degrades to `***` — never echo
+ * the raw value back.
+ *
+ * @param input - Endpoint URL (string or `URL`); anything else is stringified first.
+ * @returns The URL without query, userinfo or key-like path segments.
+ *
+ * @example
+ * ```typescript
+ * redactEndpointUrl('https://eth-sepolia.g.alchemy.com/v2/abcdefghijklmnopqrstu')
+ * // 'https://eth-sepolia.g.alchemy.com/v2/***'
+ * ```
  */
 export function redactEndpointUrl(input: unknown): string {
   try {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : String(input))
     const path = url.pathname
       .split('/')
-      .map((segment) => (segment.length >= 24 ? '***' : segment))
+      .map((segment) => (segment.length >= SECRET_PATH_SEGMENT_MIN_LENGTH ? '***' : segment))
       .join('/')
     // non-special schemes (e.g. `grpc://`) have an opaque `origin` of "null"
     const origin = url.origin !== 'null' ? url.origin : `${url.protocol}//${url.host}`
@@ -634,6 +651,46 @@ export function redactEndpointUrl(input: unknown): string {
   } catch {
     return '***'
   }
+}
+
+/**
+ * Matches a URL with an explicit scheme inside free text. It stops at whitespace, quotes,
+ * brackets, commas and backslashes, so URLs inside inspected objects (`'…'`), JSON strings
+ * (`"…"`, `\"…\"`) and parentheses end where the quoting does.
+ */
+const URL_IN_TEXT_RE = /\b[a-z][\w+.-]*:\/\/[^\s'"`<>()[\]{}\\,]+/gi
+
+/**
+ * Replaces every URL found in `text` with its {@link redactEndpointUrl} rendering, for text that
+ * was not built by this SDK and may embed endpoint URLs: third-party error messages (ethers puts
+ * `requestUrl` in every `SERVER_ERROR`), inspected error objects and stack dumps. URLs with
+ * nothing to hide (no query, userinfo or key-like path segment) are left byte-for-byte as they
+ * were.
+ *
+ * @param text - Any text, e.g. a formatted error or a `util.inspect` dump.
+ * @returns The same text with credentials removed from every URL in it.
+ *
+ * @example
+ * ```typescript
+ * redactUrlsInText('server response 401 (requestUrl="https://rpc.example/v2/abcdefghijklmnopqrstu")')
+ * // 'server response 401 (requestUrl="https://rpc.example/v2/***")'
+ * ```
+ */
+export function redactUrlsInText(text: string): string {
+  return text.replace(URL_IN_TEXT_RE, (match) => {
+    let url: URL
+    try {
+      url = new URL(match)
+    } catch {
+      return match // not parseable as a URL: nothing that redactEndpointUrl would keep either
+    }
+    const hidden =
+      url.search !== '' ||
+      url.username !== '' ||
+      url.password !== '' ||
+      url.pathname.split('/').some((s) => s.length >= SECRET_PATH_SEGMENT_MIN_LENGTH)
+    return hidden ? redactEndpointUrl(url) : match
+  })
 }
 
 /**

@@ -20,6 +20,7 @@ import https from 'node:https'
 import util from 'node:util'
 import { pathToFileURL } from 'url'
 
+import { redactUrlsInText } from '@chainlink/ccip-sdk/src/index.ts'
 import updateNotifier from 'update-notifier'
 import yargs, { type ArgumentsCamelCase, type InferredOptionTypes } from 'yargs'
 import { hideBin } from 'yargs/helpers'
@@ -204,7 +205,7 @@ if (import.meta.main || wasCalledAsScript()) {
       // errors thrown before a command handler runs (e.g. --chain-selectors parsing, in middleware)
       // never reach the per-command Ctx logger, so format them here too
       const verbose = process.argv.includes('-v') || process.argv.includes('--verbose')
-      console.error(formatCCIPError(err, verbose) ?? err)
+      console.error(formatCCIPError(err, verbose) ?? redactUrlsInText(util.inspect(err)))
       throw err
     })
     .finally(() => {

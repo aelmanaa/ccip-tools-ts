@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI: error output and logs no longer show RPC API keys. Every URL the CLI writes to stderr (formatted `CCIPError`s with their inspected context, other errors, `ctx.logger` lines) goes through the new SDK `redactUrlsInText`, which drops the query string and userinfo and masks key-like path segments. Before, a `TRANSACTION_NOT_FOUND` (e.g. `show <messageId> --no-api`, or an RPC answering 401) printed ethers' `requestUrl` and the SDK's Aptos/Sui/TON messages with full keyed URLs. That error's context now lists one line per failed attempt (`attempts`, e.g. `EVM: Error: server response 401 Unauthorized ...`) instead of the raw `aggregateErr` dump; the `AggregateError` is kept as the error's `cause`. SDK: `redactEndpointUrl` masks path segments of 16 or more characters (was 24), which covers 21-character Alchemy keys, and both it and `redactUrlsInText` are exported from the package root
+
 ## [1.18.0] - 2026-11-20
 
 - SDK: export `encodeAddressToAny` and `isCantonPartyId` from the package root. `encodeAddressToAny` encodes an address of any chain family the way CCIP messages carry it, e.g. a Canton party as `keccak256(partyId)`; `isCantonPartyId` checks the `hint::1220<64 hex>` party form it hashes
