@@ -165,6 +165,48 @@ export class CCIPTxOutcomeUnavailableError extends CCIPError {
 }
 
 /**
+ * Thrown when a transaction was sent but its outcome could not be determined: the confirmation
+ * subscription failed or timed out and a status lookup of the signature found it neither
+ * confirmed nor provably dropped (or the lookup itself failed). The transaction may have
+ * landed, so this is not retryable as is: look up `context.signature` before resending, or a
+ * CCIP send may be duplicated. The confirmation error is kept as `cause`.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await chain.sendMessage({ router, destChainSelector, message, wallet })
+ * } catch (error) {
+ *   if (error instanceof CCIPConfirmationUnavailableError) {
+ *     const { value } = await connection.getSignatureStatuses([error.context.signature as string], {
+ *       searchTransactionHistory: true,
+ *     })
+ *     console.log('status:', value[0]?.confirmationStatus ?? 'not found')
+ *   }
+ * }
+ * ```
+ */
+export class CCIPConfirmationUnavailableError extends CCIPError {
+  override readonly name = 'CCIPConfirmationUnavailableError'
+  /** Creates a sent-but-unconfirmed transaction error. */
+  constructor(signature: string, options?: CCIPErrorOptions & { confirmationStatus?: string }) {
+    const { confirmationStatus, ...rest } = options ?? {}
+    super(
+      CCIPErrorCode.TX_CONFIRMATION_UNAVAILABLE,
+      `Transaction ${signature} was sent but not confirmed${confirmationStatus ? ` (last seen ${confirmationStatus})` : ''}; it may still land, check it before resending`,
+      {
+        ...rest,
+        isTransient: false,
+        context: {
+          ...rest.context,
+          signature,
+          ...(confirmationStatus && { confirmationStatus }),
+        },
+      },
+    )
+  }
+}
+
+/**
  * Thrown when a transaction exceeds the wire size limits of its version
  * (1232 bytes for legacy/v0, 4096 bytes for v1) or the account/instruction
  * capacity of its message format.

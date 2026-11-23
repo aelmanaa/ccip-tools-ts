@@ -25,6 +25,8 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
     'Transaction exceeds its version wire size limit (1232 bytes for v0, 4096 for v1). Reduce the message data or split into smaller transactions.',
   PARTIAL_TRANSACTION_SUBMISSION:
     'Inspect committedSlices (and pendingSignature, if set) before reconciling state. Retrying replays the whole submission.',
+  TX_CONFIRMATION_UNAVAILABLE:
+    'The transaction was sent but its outcome could not be confirmed. Look up context.signature (e.g. getSignatureStatuses or an explorer) before resending: it may have landed, and resending would duplicate it.',
 
   MESSAGE_INVALID: 'Verify the message format matches the expected CCIP message structure.',
   MESSAGE_DECODE_FAILED:

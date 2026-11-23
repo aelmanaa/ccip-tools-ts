@@ -20,6 +20,7 @@ import nacl from 'tweetnacl'
 
 import {
   CCIPArgumentInvalidError,
+  CCIPConfirmationUnavailableError,
   CCIPPartialTransactionSubmissionError,
   CCIPTransactionTooLargeError,
 } from '../errors/index.ts'
@@ -910,6 +911,10 @@ describe('Solana v1 transaction support (SIMD-0385)', () => {
         if (++confirmations === 2) throw new TransactionExpiredTimeoutError('sig-2', 30)
         return { value: { err: null } }
       }
+      // the RPC doesn't know the signature either: the outcome is unknown
+      ;(
+        connection as unknown as { getSignatureStatuses: () => Promise<{ value: null[] }> }
+      ).getSignatureStatuses = async () => ({ value: [null] })
 
       await assert.rejects(
         simulateAndSendTxs({ connection }, wallet, {
@@ -919,7 +924,9 @@ describe('Solana v1 transaction support (SIMD-0385)', () => {
         (error: unknown) => {
           assert.ok(error instanceof CCIPPartialTransactionSubmissionError)
           assert.equal(error.context.pendingSignature, 'sig-2')
-          assert.ok(error.cause instanceof TransactionExpiredTimeoutError)
+          assert.ok(error.cause instanceof CCIPConfirmationUnavailableError)
+          assert.equal(error.cause.context.signature, 'sig-2')
+          assert.ok(error.cause.cause instanceof TransactionExpiredTimeoutError)
           return true
         },
       )

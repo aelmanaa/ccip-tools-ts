@@ -8,6 +8,8 @@ import {
   type AccountInfo,
   type AddressLookupTableAccount,
   type Connection,
+  type SignatureResult,
+  type SignatureStatus,
   type Signer,
   type SimulateTransactionConfig,
   type SimulatedTransactionResponse,
@@ -18,6 +20,7 @@ import {
   PublicKey,
   SendTransactionError,
   SolanaJSONRPCError,
+  TransactionExpiredBlockheightExceededError,
   TransactionMessage,
   VersionedTransaction,
 } from '@solana/web3.js'
@@ -27,6 +30,7 @@ import { dataLength, dataSlice, encodeBase64, hexlify } from 'ethers'
 import type { RateLimiterState } from '../chain.ts'
 import {
   CCIPArgumentInvalidError,
+  CCIPConfirmationUnavailableError,
   CCIPDataFormatUnsupportedError,
   CCIPPartialTransactionSubmissionError,
   CCIPTokenMintInvalidError,
@@ -806,6 +810,91 @@ function nextSliceEnd(
   if (next > start) return next
 }
 
+/** How often {@link confirmTransaction} checks the signature status over HTTP. */
+const CONFIRMATION_POLL_INTERVAL_MS = 2_000
+
+const isConfirmed = ({ confirmationStatus }: SignatureStatus): boolean =>
+  confirmationStatus === 'confirmed' || confirmationStatus === 'finalized'
+
+/**
+ * Waits until a sent transaction is `confirmed` (or `finalized`), or its blockhash expires.
+ *
+ * web3.js `confirmTransaction` only checks the signature over HTTP once its `signatureSubscribe`
+ * websocket subscription is up, and throws on block-height expiry without a last check; with a
+ * websocket that never connects (e.g. an RPC answering 429) a landed transaction is reported as
+ * expired. So the subscription is raced with `getSignatureStatuses` polling over HTTP, and a
+ * subscription failure is checked against the signature's status before it is reported.
+ *
+ * @param ctx - Context object containing connection and logger
+ * @param confirm - The sent transaction's signature and the blockhash it was signed with
+ * @param pollIntervalMs - Interval of the HTTP status polling
+ * @returns The transaction's result (`err` set if it landed but failed)
+ * @throws {@link TransactionExpiredBlockheightExceededError} If the blockhash expired and the
+ *   signature is unknown to the RPC (the transaction can no longer land)
+ * @throws {@link CCIPConfirmationUnavailableError} If the outcome can't be determined (the
+ *   confirmation failed otherwise and the signature isn't confirmed, or its lookup failed); the
+ *   confirmation error is the `cause`
+ */
+export async function confirmTransaction(
+  { connection, logger = console }: { connection: Connection } & WithLogger,
+  {
+    signature,
+    blockhash,
+    lastValidBlockHeight,
+  }: { signature: string; blockhash: string; lastValidBlockHeight: number },
+  pollIntervalMs = CONFIRMATION_POLL_INTERVAL_MS,
+): Promise<SignatureResult> {
+  const abort = new AbortController()
+  const subscription = connection
+    .confirmTransaction(
+      { signature, blockhash, lastValidBlockHeight, abortSignal: abort.signal },
+      'confirmed',
+    )
+    .then(({ value }) => value)
+  // settles only once the status is confirmed; stops polling once the race is decided
+  const polled = new Promise<SignatureResult>((resolve) => {
+    void (async () => {
+      for (;;) {
+        await sleep(pollIntervalMs, abort.signal)
+        if (abort.signal.aborted) return
+        try {
+          const [status] = (await connection.getSignatureStatuses([signature])).value
+          if (status && isConfirmed(status)) return resolve({ err: status.err })
+        } catch (err) {
+          logger.debug('confirmTransaction: status poll failed for', signature, err)
+        }
+      }
+    })()
+  })
+  try {
+    return await Promise.race([subscription, polled])
+  } catch (err) {
+    // web3.js rejects with the transaction's own error (not an Error) when it landed and failed
+    if (!(err instanceof Error)) throw err
+    let status: SignatureStatus | null | undefined
+    try {
+      ;[status] = (
+        await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })
+      ).value
+    } catch (lookupErr) {
+      logger.debug('confirmTransaction: status lookup failed for', signature, lookupErr)
+      throw new CCIPConfirmationUnavailableError(signature, { cause: err })
+    }
+    if (status && isConfirmed(status)) {
+      logger.debug('confirmTransaction: confirmed over HTTP after', err, signature)
+      return { err: status.err }
+    }
+    // an expired blockhash the RPC has no record of: the transaction can no longer land
+    if (!status && err instanceof TransactionExpiredBlockheightExceededError) throw err
+    throw new CCIPConfirmationUnavailableError(signature, {
+      cause: err,
+      ...(status?.confirmationStatus && { confirmationStatus: status.confirmationStatus }),
+    })
+  } finally {
+    abort.abort()
+  }
+}
+
 /**
  * Sign, simulate, send and confirm as many instructions as possible on each transaction.
  * Each slice is confirmed before the next one is simulated, so a failure in a later slice leaves
@@ -937,11 +1026,8 @@ export async function simulateAndSendTxs(
         )
       }
       pendingSignature = signature
-      const confirmation = await connection.confirmTransaction(
-        { signature, ...blockhash },
-        'confirmed',
-      )
-      if (confirmation.value.err) throw confirmation.value.err
+      const confirmation = await confirmTransaction(ctx, { signature, ...blockhash })
+      if (confirmation.err) throw confirmation.err
       pendingSignature = undefined
       slices.push({ signature, start, end })
       if (includesMain) hash = signature

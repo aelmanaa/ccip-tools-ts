@@ -14,6 +14,7 @@ import {
 } from '@solana/web3.js'
 
 import {
+  CCIPConfirmationUnavailableError,
   CCIPPartialTransactionSubmissionError,
   CCIPWalletInvalidError,
   shouldRetry,
@@ -110,6 +111,7 @@ function isTransientSubmitError(error: unknown): boolean {
 
 function isNotConfirmedError(error: unknown): boolean {
   return (
+    error instanceof CCIPConfirmationUnavailableError ||
     error instanceof TransactionExpiredBlockheightExceededError ||
     error instanceof TransactionExpiredNonceInvalidError ||
     error instanceof TransactionExpiredTimeoutError ||
@@ -124,6 +126,10 @@ function getReason(error: unknown): string {
 }
 
 function getSignature(error: unknown): string | undefined {
+  if (error instanceof CCIPConfirmationUnavailableError) {
+    const { signature } = error.context
+    return typeof signature === 'string' ? signature : undefined
+  }
   if (!error || typeof error !== 'object' || !('signature' in error)) return undefined
   return typeof error.signature === 'string' && error.signature.length > 0
     ? error.signature

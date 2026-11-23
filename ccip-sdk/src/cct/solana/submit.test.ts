@@ -11,7 +11,10 @@ import {
   TransactionInstruction,
 } from '@solana/web3.js'
 
-import { CCIPPartialTransactionSubmissionError } from '../../errors/index.ts'
+import {
+  CCIPConfirmationUnavailableError,
+  CCIPPartialTransactionSubmissionError,
+} from '../../errors/index.ts'
 import { ChainFamily } from '../../networks.ts'
 import type { SolanaChain } from '../../solana/index.ts'
 import type { Wallet } from '../../solana/types.ts'
@@ -37,6 +40,16 @@ describe('Submit error mapping (cct/solana)', () => {
 
     assert.ok(err instanceof CCTTxNotConfirmedError)
     assert.equal(err.context.txHash, 'def')
+  })
+
+  it('maps an unknown confirmation outcome to not-confirmed with its signature', () => {
+    const cause = new CCIPConfirmationUnavailableError('mno', {
+      cause: new TransactionExpiredTimeoutError('mno', 30),
+    })
+    const err = createCCTSubmitError(OP, cause)
+
+    assert.ok(err instanceof CCTTxNotConfirmedError)
+    assert.equal(err.context.txHash, 'mno')
   })
 
   it('maps SendTransactionError with a signature to not-confirmed', () => {

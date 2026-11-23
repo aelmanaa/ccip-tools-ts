@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Solana: a sent transaction is confirmed by polling `getSignatureStatuses` over HTTP alongside web3.js's websocket subscription, and a subscription failure is checked against the signature's status before it is reported. With a websocket that never connected (e.g. an RPC answering 429), `sendMessage`, `execute` and every other Solana submission threw `TransactionExpiredBlockheightExceededError` for a transaction that had landed, so a retry duplicated the CCIP message; they now return its signature. Block-height expiry of a signature the RPC doesn't know is still thrown as before; an outcome that can't be determined throws the new `CCIPConfirmationUnavailableError` (code `TX_CONFIRMATION_UNAVAILABLE`, not transient) with the signature in `context.signature` and the confirmation error as `cause`, which the Solana CCT operations report as `CCTTxNotConfirmedError`
+
 ## [1.18.0] - 2026-11-20
 
 - SDK: export `encodeAddressToAny` and `isCantonPartyId` from the package root. `encodeAddressToAny` encodes an address of any chain family the way CCIP messages carry it, e.g. a Canton party as `keccak256(partyId)`; `isCantonPartyId` checks the `hint::1220<64 hex>` party form it hashes
