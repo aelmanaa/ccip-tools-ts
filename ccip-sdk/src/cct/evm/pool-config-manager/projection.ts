@@ -804,6 +804,21 @@ export function requiredMultiTokenPoolProviderAnswers(
   return [...needed.values()]
 }
 
+/** Every remote chain a record names: inline records, and policy records other than the default. @internal */
+export function multiTokenPoolRecordChains(
+  state: Pick<MultiTokenPoolRecordState, 'tokens' | 'policies'>,
+): bigint[] {
+  const chains = new Set<bigint>()
+  for (const t of state.tokens)
+    for (const type of LANE_RECORD_TYPES)
+      for (const r of t.inline[type]) chains.add(r.remoteChainSelector)
+  // a policy record on chain 0 is the default, not a chain
+  for (const type of LANE_RECORD_TYPES)
+    for (const r of state.policies[type])
+      if (r.remoteChainSelector !== 0n) chains.add(r.remoteChainSelector)
+  return [...chains]
+}
+
 /**
  * Every remote chain a set of changes names (record keys, pauses), so a reader can include chains no
  * record names yet: a chain can be paused before any record exists.

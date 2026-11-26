@@ -12,7 +12,12 @@ import { decodeRemotePools } from '../../../evm/multi-token-pool.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
 import { nullableAddress } from '../multi-token-pool/contracts.ts'
 import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
-import { type MultiTokenPoolLaneKey, type PolicyName, decodePolicyName } from './contracts.ts'
+import {
+  type MultiTokenPoolLaneKey,
+  type PolicyName,
+  decodePolicyName,
+  policyNameOf,
+} from './contracts.ts'
 import type {
   ConnectionPolicyRecord,
   DestOverheadPolicyRecord,
@@ -97,7 +102,7 @@ export function decodePolicyRecordKey(c: {
 }): PolicyRecordKey {
   return {
     // a record always belongs to a named policy, so the zero word never appears here
-    policyName: decodePolicyName(c.policyName) ?? c.policyName,
+    policyName: policyNameOf(c.policyName),
     remoteChainSelector: BigInt(c.remoteChainSelector),
   }
 }

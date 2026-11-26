@@ -8,6 +8,10 @@
 import { type Result, getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
+import {
+  type DecodedTokenProfile,
+  decodeTokenProfileFields,
+} from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import {
@@ -18,7 +22,7 @@ import {
   nullableAddress,
 } from '../multi-token-pool/contracts.ts'
 import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
-import { decodePolicyName } from './contracts.ts'
+import { decodePolicyName, policyNameOf } from './contracts.ts'
 import {
   INLINE_RECORD_DECODERS,
   POLICY_RECORD_DECODERS,
@@ -29,20 +33,10 @@ import type { MultiTokenPoolRateLimitBucket, MultiTokenPoolRecordChange } from '
 
 const OPERATION = 'decodeMultiTokenPoolWrite'
 
-/** A token profile a `applyTokenProfileUpdates` call sets. @internal */
-export type DecodedTokenProfileUpdate = {
+/** A token profile a `applyTokenProfileUpdates` call sets: the shared profile decode, keyed by token. @internal */
+export type DecodedTokenProfileUpdate = DecodedTokenProfile & {
   /** The token. */
   tokenAddress: string
-  /** Decimals. */
-  localDecimals: number
-  /** The `LockOrBurnFlavor` value. */
-  lockOrBurnFlavor: number
-  /** The allowed finality, as the raw `bytes4`. */
-  allowedFinalityConfig: string
-  /** Burn sink or lock box, or `null`. */
-  lockOrBurnAddress: string | null
-  /** Additional pool data provider, or `null`. */
-  additionalPoolDataProvider: string | null
 }
 
 /** A decoded PCM write. @internal */
@@ -55,7 +49,7 @@ export type DecodedMultiTokenPoolWrite = {
   profiles?: { remove: string[]; set: DecodedTokenProfileUpdate[] }
 }
 
-const policy = (word: unknown) => decodePolicyName(String(word)) ?? String(word)
+const policy = (word: unknown) => policyNameOf(String(word))
 const keys = (list: Result) => list.map((r) => resultToObject(r) as Record<string, unknown>)
 
 /** `PauseDirection` (Outbound, Inbound, Both) to the directions it sets. */
@@ -277,11 +271,7 @@ export function decodeMultiTokenPoolWrite(
           remove: (args[0] as Result).map((t) => getAddress(String(t))),
           set: keys(args[1] as Result).map((r) => ({
             tokenAddress: getAddress(String(r.localToken)),
-            localDecimals: Number(r.localDecimals),
-            lockOrBurnFlavor: Number(r.lockOrBurnFlavor),
-            allowedFinalityConfig: String(r.allowedFinalityConfig),
-            lockOrBurnAddress: nullableAddress(String(r.lockOrBurnAddress)),
-            additionalPoolDataProvider: nullableAddress(String(r.additionalPoolDataProvider)),
+            ...decodeTokenProfileFields(r as Parameters<typeof decodeTokenProfileFields>[0]),
           })),
         },
       }

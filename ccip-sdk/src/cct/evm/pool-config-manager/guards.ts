@@ -24,6 +24,7 @@ import {
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
   laneKey,
+  multiTokenPoolRecordChains,
   multiTokenPoolSupportedChains,
   policyKey,
   resolveMultiTokenPoolLanes,
@@ -116,17 +117,8 @@ export const guardPoolKey = (remoteChainSelector: bigint, address: string) =>
 
 /** Every (token, chain) a state names, for the lanes a write could reach. */
 function candidateLanes(states: readonly MultiTokenPoolRecordState[]): MultiTokenPoolLaneKey[] {
-  const tokens = new Set<string>()
-  const chains = new Set<bigint>()
-  for (const s of states) {
-    for (const t of s.tokens) {
-      tokens.add(getAddress(t.tokenAddress))
-      for (const type of LANE_RECORD_TYPES)
-        for (const r of t.inline[type]) chains.add(r.remoteChainSelector)
-    }
-    for (const type of LANE_RECORD_TYPES)
-      for (const r of s.policies[type]) if (r.remoteChainSelector) chains.add(r.remoteChainSelector)
-  }
+  const tokens = new Set(states.flatMap((s) => s.tokens.map((t) => getAddress(t.tokenAddress))))
+  const chains = new Set(states.flatMap(multiTokenPoolRecordChains))
   return [...tokens].flatMap((tokenAddress) =>
     [...chains].map((remoteChainSelector) => ({ tokenAddress, remoteChainSelector })),
   )

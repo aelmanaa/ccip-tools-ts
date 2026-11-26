@@ -5,14 +5,10 @@
  * @packageDocumentation
  */
 
-import { ZeroAddress, getAddress, isError } from 'ethers'
+import { getAddress, isError } from 'ethers'
 
 import type { EVMChain } from '../../../evm/index.ts'
-import {
-  LANE_RECORD_TYPES,
-  decodeLaneConnection,
-  isZeroHex,
-} from '../../../evm/multi-token-pool.ts'
+import { LANE_RECORD_TYPES, isZeroHex } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
 import {
@@ -24,12 +20,11 @@ import {
 import {
   type MultiTokenPoolLaneKey,
   LANE_BATCH_SIZE,
-  decodePolicyName,
+  policyNameOf,
+  readChainPauseFlags,
   readConfiguredTokens,
   readInBatches,
-  readLaneBatches,
   readPoolConfigManagerStaticConfig,
-  toAbiLaneKey,
 } from './contracts.ts'
 import { decodeTokenPolicies } from './decode.ts'
 import {
@@ -37,6 +32,7 @@ import {
   type MultiTokenPoolProviderAnswer,
   type MultiTokenPoolRecordState,
   type MultiTokenPoolTokenRecords,
+  multiTokenPoolRecordChains,
   multiTokenPoolSupportedChains,
   requiredMultiTokenPoolProviderAnswers,
 } from './projection.ts'
@@ -139,7 +135,7 @@ export async function readMultiTokenPoolRecordState(
       const words = (nameLists[t] ?? []).map(String)
       await Promise.all(
         words.map(async (word) => {
-          const policyName = decodePolicyName(word) ?? word
+          const policyName = policyNameOf(word)
           if (type === 'connection') {
             const read = await POLICY_RECORD_READERS.connection(pcm, word, at)
             if (read.remoteTokenAddressProvider)
@@ -167,31 +163,14 @@ export async function readMultiTokenPoolRecordState(
   )
 
   // pauses: one lane read per chain any record names (the zero token has no records of its own)
-  const chains = new Set<bigint>(extraChains)
-  for (const t of tokenRecords)
-    for (const type of LANE_RECORD_TYPES)
-      for (const r of t.inline[type]) chains.add(r.remoteChainSelector)
-  for (const type of LANE_RECORD_TYPES)
-    for (const r of policies[type])
-      if (r.remoteChainSelector !== 0n) chains.add(r.remoteChainSelector)
-  const chainList = [...(chains.size ? chains : [0n])]
-  const flags = await readLaneBatches(
-    chainList.map((remoteChainSelector) => ({ tokenAddress: ZeroAddress, remoteChainSelector })),
-    async (chunk) =>
-      (await pcm.getLaneConnectionBatch(chunk.map(toAbiLaneKey), at)).map((c) =>
-        decodeLaneConnection(resultToObject(c), String),
-      ),
-  )
+  const chainList = [
+    ...new Set([...extraChains, ...multiTokenPoolRecordChains({ tokens: tokenRecords, policies })]),
+  ]
+  const pauses = await readChainPauseFlags(pcm, address, chainList, blockNumber)
 
   const state: MultiTokenPoolRecordState = {
-    isGloballyPaused: flags.some((f) => f.isGloballyPaused),
-    chainPauses: chainList
-      .map((remoteChainSelector, i) => ({
-        remoteChainSelector,
-        outbound: flags[i]!.isChainOutboundPaused,
-        inbound: flags[i]!.isChainInboundPaused,
-      }))
-      .filter((p) => p.remoteChainSelector !== 0n && (p.outbound || p.inbound)),
+    isGloballyPaused: pauses.global,
+    chainPauses: pauses.chains.filter((p) => p.outbound || p.inbound),
     tokens: tokenRecords,
     policies,
     providerAnswers: [],

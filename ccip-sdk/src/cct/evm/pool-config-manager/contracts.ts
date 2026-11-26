@@ -8,6 +8,7 @@
 import {
   type Interface,
   type LogDescription,
+  ZeroAddress,
   ZeroHash,
   decodeBytes32String,
   encodeBytes32String,
@@ -19,6 +20,7 @@ import {
 
 import type { EVMChain } from '../../../evm/index.ts'
 import {
+  decodeLaneConnection,
   decodePoolConfigManagerStaticConfig,
   decodeTokenProfileFields,
 } from '../../../evm/multi-token-pool.ts'
@@ -337,6 +339,15 @@ export function decodePolicyName(value: string): PolicyName | null {
   return value.toLowerCase()
 }
 
+/**
+ * A policy word as a name, where the word always names a policy (a record key, a decoded write):
+ * {@link decodePolicyName}, with the zero word kept as it is rather than read as "unassigned".
+ * @internal
+ */
+export function policyNameOf(word: string): PolicyName {
+  return decodePolicyName(word) ?? word
+}
+
 /** One token lane: a local token and a remote chain. The PCM's `LaneKey`. */
 export type MultiTokenPoolLaneKey = {
   /** Local token. */
@@ -429,6 +440,41 @@ export async function readPoolConfigManagerStaticConfig(
 
 /** The PCM handle the batch and policy readers get. @internal */
 export type PoolConfigManagerReader = ReturnType<typeof poolConfigManagerContract>
+
+/**
+ * The global pause flag and each chain's pause flags, from one zero-token lane read per chain (the
+ * global flag rides on every lane; selector `0` answers it when no chain is given).
+ * @internal
+ */
+export async function readChainPauseFlags(
+  pcm: PoolConfigManagerReader,
+  address: string,
+  selectors: readonly bigint[],
+  blockTag: number,
+): Promise<{
+  global: boolean
+  chains: { remoteChainSelector: bigint; outbound: boolean; inbound: boolean }[]
+}> {
+  const lanes = (selectors.length ? selectors : [0n]).map((remoteChainSelector) => ({
+    tokenAddress: ZeroAddress,
+    remoteChainSelector,
+  }))
+  const flags = await readLaneBatches(lanes, async (chunk) => {
+    const read = (await pcm.getLaneConnectionBatch(chunk.map(toAbiLaneKey), { blockTag })).map(
+      (c) => decodeLaneConnection(resultToObject(c), String),
+    )
+    assertResultCount(address, 'getLaneConnectionBatch', read, chunk.length)
+    return read
+  })
+  return {
+    global: flags.some((f) => f.isGloballyPaused),
+    chains: selectors.map((remoteChainSelector, i) => ({
+      remoteChainSelector,
+      outbound: flags[i]!.isChainOutboundPaused,
+      inbound: flags[i]!.isChainInboundPaused,
+    })),
+  }
+}
 
 /**
  * Decodes an on-chain enum value through its SDK tuple (index = on-chain value).

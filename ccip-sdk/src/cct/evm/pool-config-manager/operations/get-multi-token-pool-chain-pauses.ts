@@ -5,11 +5,7 @@
  * @packageDocumentation
  */
 
-import { ZeroAddress } from 'ethers'
-
 import type { EVMChain } from '../../../../evm/index.ts'
-import { decodeLaneConnection } from '../../../../evm/multi-token-pool.ts'
-import { resultToObject } from '../../../../evm/types.ts'
 import {
   getMultiTokenPoolInterface,
   poolConfigManagerContract,
@@ -18,12 +14,10 @@ import { EVMQuery } from '../../query.ts'
 import {
   type LogScanParams,
   type PoolConfigManagerTarget,
-  assertResultCount,
-  readLaneBatches,
+  readChainPauseFlags,
   readPoolConfigManagerStaticConfig,
   resolvePoolConfigManagerTarget,
   scanLogs,
-  toAbiLaneKey,
   validateLogScanParams,
   validatePoolConfigManagerTarget,
 } from '../contracts.ts'
@@ -104,28 +98,15 @@ export class GetMultiTokenPoolChainPauses extends EVMQuery<
     })
     const selectors = [...new Set(logs.map((log) => BigInt(log.args[0])))]
 
-    // the global flag is in every lane read; one with selector 0 answers it when no chain was found
-    const lanes = (selectors.length ? selectors : [0n]).map((remoteChainSelector) => ({
-      tokenAddress: ZeroAddress,
-      remoteChainSelector,
-    }))
-    const pcm = poolConfigManagerContract(chain, address, version)
-    const connections = await readLaneBatches(lanes, async (chunk) => {
-      const read = (
-        await pcm.getLaneConnectionBatch(chunk.map(toAbiLaneKey), { blockTag: scanned.toBlock })
-      ).map((c) => decodeLaneConnection(resultToObject(c), String))
-      assertResultCount(address, 'getLaneConnectionBatch', read, chunk.length)
-      return read
-    })
+    const pauses = await readChainPauseFlags(
+      poolConfigManagerContract(chain, address, version),
+      address,
+      selectors,
+      scanned.toBlock,
+    )
     return {
-      global: connections.some((c) => c.isGloballyPaused),
-      chains: selectors.length
-        ? lanes.map((l, i) => ({
-            remoteChainSelector: l.remoteChainSelector,
-            outbound: connections[i]!.isChainOutboundPaused,
-            inbound: connections[i]!.isChainInboundPaused,
-          }))
-        : [],
+      global: pauses.global,
+      chains: pauses.chains,
       scanned,
       complete,
     }
