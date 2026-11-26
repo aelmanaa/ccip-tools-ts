@@ -86,19 +86,21 @@ export type DeployResult = TransactionResult & {
  * EVM CCT write base. Subclasses supply {@link prepare} and
  * {@link buildUnsigned}; {@link execute} signs and submits, returning the confirmed tx hash. Ops
  * that resolve to more (e.g. a deployed address) extend {@link EVMDeployOperation}.
+ *
+ * @typeParam Tx - The unsigned shape {@link generate} returns, as on `SolanaOperation` (third here,
+ * after `Parsed`, so every existing subclass that passes `Parsed` positionally keeps compiling). Defaults to
+ * {@link UnsignedEVMTx}; an op that returns more (e.g. affected lanes or warnings next to the
+ * transaction) widens it, but it is still exactly one transaction, which is what {@link submit}
+ * sends. An op whose `execute` resolves to more than the hash overrides it with a narrower return
+ * type, as {@link EVMDeployOperation} does.
  */
-export abstract class EVMOperation<P extends { sender?: string }, Parsed = P> extends Operation<
-  EVMChain,
-  P,
-  UnsignedEVMTx,
-  TransactionResult,
-  Parsed
-> {
+export abstract class EVMOperation<
+  P extends { sender?: string },
+  Parsed = P,
+  Tx extends UnsignedEVMTx = UnsignedEVMTx,
+> extends Operation<EVMChain, P, Tx, TransactionResult, Parsed> {
   /** Build calldata into an unsigned tx; versioned ops resolve their encoder here. */
-  protected abstract buildUnsigned(
-    chain: EVMChain,
-    params: Parsed,
-  ): Promise<UnsignedEVMTx> | UnsignedEVMTx
+  protected abstract buildUnsigned(chain: EVMChain, params: Parsed): Promise<Tx> | Tx
 
   /**
    * Run {@link prepare} and {@link buildUnsigned}, applying optional `sender`; no signing.
@@ -107,7 +109,7 @@ export abstract class EVMOperation<P extends { sender?: string }, Parsed = P> ex
    * construction). This is the one point every CCT builder and both `execute` paths pass
    * through; unpinned, ethers would infer the chain from the eventual signer's provider.
    */
-  async generate(chain: EVMChain, params: P): Promise<UnsignedEVMTx> {
+  async generate(chain: EVMChain, params: P): Promise<Tx> {
     const parsed = this.prepare(params)
     if (params.sender !== undefined) validateAddress(this.name, 'sender', params.sender)
     const unsigned = await this.buildUnsigned(chain, parsed)

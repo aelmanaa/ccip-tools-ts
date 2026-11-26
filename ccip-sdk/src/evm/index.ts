@@ -185,6 +185,7 @@ import { getV12LeafHasher, getV16LeafHasher } from './hasher.ts'
 import { type EVMEndBlockTag, getEvmLogs } from './logs.ts'
 import { type MessageV1TokenTransfer, encodeMessageV1 } from './messageCodec.ts'
 import type { CCIPMessage_V1_6_EVM, CleanAddressable } from './messages.ts'
+import { isMultiTokenPoolType } from './multi-token-pool.ts'
 import {
   encodeEVMOffchainTokenData,
   encodeEVMTokenCcvData,
@@ -272,14 +273,6 @@ function toRateLimiterState(b: RateLimiterBucket): RateLimiterState {
 
 /** `IPoolConfigManager.LockOrBurnFlavor.Lock`: the pool locks the token on send, in its lock box. */
 const MULTI_TOKEN_POOL_LOCK_FLAVOR = 4
-
-/**
- * Whether a pool type serves multiple tokens and keeps their configuration in a PoolConfigManager
- * (e.g. `BurnMintMultiTokenPool`); these pools need the local token for every config read.
- */
-function isMultiTokenPoolType(type: string): boolean {
-  return type.includes('MultiTokenPool')
-}
 
 /**
  * The record types of `PoolConfigManager.getLaneRecordLevelBatch`, in the order of its outputs;

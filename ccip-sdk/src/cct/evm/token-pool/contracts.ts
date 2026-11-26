@@ -1733,9 +1733,34 @@ export function resolveEncoder<F>(
   version: TokenPoolVersion,
   op: string,
 ): F {
-  const versions = Object.values(TokenPoolVersion)
-  for (let i = versions.indexOf(version); i >= 0; i--) {
-    const encoder = encoders[versions[i]!]
+  return resolveEncoderIn(Object.values(TokenPoolVersion), encoders, version, op)
+}
+
+/**
+ * {@link resolveEncoder} over any ordered version list: walks `order` down from `version` to the
+ * first registered encoder, with the same absent-key inheritance and `null` removal ceilings.
+ *
+ * @remarks Lets a contract family with its own version allowlist (e.g. multi-token pools, whose
+ * versions are not {@link TokenPoolVersion}s) reuse the floor-match rule without widening
+ * {@link TokenPoolVersion}. A `version` that is not in `order` matches nothing.
+ *
+ * @param order - Every known version of the family, low to high.
+ * @param encoders - Sparse table keyed by entries of `order`; `null` marks a removal ceiling.
+ * @param version - The resolved on-chain version to encode for.
+ * @param op - Operation name, for the error.
+ * @throws {@link CCTOperationUnsupportedError} if nothing is registered at or below `version`, or
+ * if the walk hits an explicit `null` ceiling first
+ */
+export function resolveEncoderIn<V extends string, F>(
+  order: readonly V[],
+  encoders: Partial<Record<V, F | null>>,
+  version: V,
+  op: string,
+): F {
+  for (let i = order.indexOf(version); i >= 0; i--) {
+    const v = order[i]
+    if (v === undefined) break
+    const encoder = encoders[v]
     // removed here — do not inherit the lower encoder downward
     if (encoder === null) break
     if (encoder !== undefined) return encoder

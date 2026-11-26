@@ -19,7 +19,6 @@ import { resultToObject } from '../../../evm/types.ts'
 import {
   CCTContractTypeInvalidError,
   CCTContractVersionUnsupportedError,
-  CCTOperationUnsupportedError,
   CCTParamsInvalidError,
 } from '../../errors.ts'
 import FACTORY_BURN_MINT_ERC20_V1_5_1_ABI from '../artifacts/abi/V1_5_1/factory-burn-mint-erc20.ts'
@@ -28,6 +27,7 @@ import CROSS_CHAIN_TOKEN_V2_0_0_ABI from '../artifacts/abi/V2_0_0/cross-chain-to
 import CROSS_CHAIN_TOKEN_V2_0_0_BYTECODE from '../artifacts/bytecode/V2_0_0/cross-chain-token.ts'
 import type { DeployArtifact } from '../operation.ts'
 import { getTypedContract, isMissingFunction } from '../query.ts'
+import { resolveEncoderIn } from '../token-pool/contracts.ts'
 
 /**
  * Known token versions, low to high. `2.0.0` is `CrossChainToken`; `1.5.1` / `1.6.2`
@@ -101,13 +101,7 @@ export function resolveTokenEncoder<F>(
   version: TokenVersion,
   operation: string,
 ): F {
-  const versions = Object.values(TokenVersion)
-  for (let i = versions.indexOf(version); i >= 0; i--) {
-    const encoder = encoders[versions[i]!]
-    if (encoder === null) break
-    if (encoder !== undefined) return encoder
-  }
-  throw new CCTOperationUnsupportedError(operation, version)
+  return resolveEncoderIn(Object.values(TokenVersion), encoders, version, operation)
 }
 
 /**

@@ -32,6 +32,7 @@ import {
   isTokenPoolVersion,
   parseTokenPoolVersion,
   resolveEncoder,
+  resolveEncoderIn,
 } from './contracts.ts'
 
 const ADDR = '0x' + '11'.repeat(20)
@@ -1019,5 +1020,58 @@ describe('resolveEncoder', () => {
       () => resolveEncoder({}, TokenPoolVersion.V1_6_1, 'op'),
       CCTOperationUnsupportedError,
     )
+  })
+})
+
+describe('resolveEncoderIn', () => {
+  // a family with its own allowlist, including a pre-release version that sorts below its release
+  const ORDER = ['2.1.0-dev', '2.1.0', '2.2.0'] as const
+
+  it('floor-matches within the given order, independent of TokenPoolVersion', () => {
+    const encoders = { '2.1.0-dev': () => 'dev', '2.2.0': () => 'next' }
+    assert.equal(resolveEncoderIn(ORDER, encoders, '2.1.0-dev', 'op')(), 'dev')
+    assert.equal(resolveEncoderIn(ORDER, encoders, '2.1.0', 'op')(), 'dev')
+    assert.equal(resolveEncoderIn(ORDER, encoders, '2.2.0', 'op')(), 'next')
+  })
+
+  it('honours null ceilings and reports the version when nothing matches', () => {
+    const encoders = { '2.1.0-dev': () => 'dev', '2.1.0': null }
+    assert.throws(
+      () => resolveEncoderIn(ORDER, encoders, '2.2.0', 'op'),
+      (error: unknown) =>
+        error instanceof CCTOperationUnsupportedError &&
+        error.context.operation === 'op' &&
+        error.context.version === '2.2.0',
+    )
+  })
+
+  it('matches nothing for a version outside the order', () => {
+    assert.throws(
+      () =>
+        resolveEncoderIn<string, () => string>(ORDER, { '2.1.0-dev': () => 'dev' }, '9.9.9', 'op'),
+      CCTOperationUnsupportedError,
+    )
+  })
+
+  it('backs resolveEncoder: the same answer for every TokenPoolVersion', () => {
+    const encoders = {
+      [TokenPoolVersion.V1_5_0]: () => 'a',
+      [TokenPoolVersion.V1_6_1]: null,
+      [TokenPoolVersion.V2_0_0]: () => 'b',
+    }
+    for (const version of Object.values(TokenPoolVersion)) {
+      const viaIn = () =>
+        resolveEncoderIn(Object.values(TokenPoolVersion), encoders, version, 'op')()
+      const via = () => resolveEncoder(encoders, version, 'op')()
+      let expected: string | undefined
+      try {
+        expected = via()
+      } catch (error) {
+        assert.ok(error instanceof CCTOperationUnsupportedError)
+        assert.throws(viaIn, CCTOperationUnsupportedError)
+        continue
+      }
+      assert.equal(viaIn(), expected)
+    }
   })
 })

@@ -32,6 +32,7 @@ import {
 } from '../errors/index.ts'
 import { networkInfo } from '../networks.ts'
 import { interfaces } from './const.ts'
+import { isMultiTokenPoolType } from './multi-token-pool.ts'
 import { EVMChain } from './index.ts'
 
 const POOL = '0x' + '11'.repeat(20)
@@ -814,5 +815,14 @@ describe('EVMChain multi-token pool send preflight', () => {
         return true
       },
     )
+  })
+})
+
+describe('isMultiTokenPoolType', () => {
+  it('matches multi-token pool types by name, synchronously and without RPC', () => {
+    assert.equal(isMultiTokenPoolType('BurnMintMultiTokenPool'), true)
+    assert.equal(isMultiTokenPoolType('LockReleaseMultiTokenPool'), true)
+    assert.equal(isMultiTokenPoolType('BurnMintTokenPool'), false)
+    assert.equal(isMultiTokenPoolType('PoolConfigManager'), false)
   })
 })
