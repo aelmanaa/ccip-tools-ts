@@ -30,6 +30,7 @@ import { ZeroAddress, getAddress } from 'ethers'
 import type { LaneRecordType, TokenTransferFeeConfig } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
+import type { RateLimitConfig } from '../token-pool/rate-limit.ts'
 import { type MultiTokenPoolLaneKey, type PolicyName, encodePolicyName } from './contracts.ts'
 import type { GetMultiTokenPoolInlineConfigsResult } from './operations/get-multi-token-pool-inline-configs.ts'
 import type { MultiTokenPoolLaneConnection } from './operations/get-multi-token-pool-lane-connections.ts'
@@ -144,6 +145,9 @@ export type MultiTokenPoolRecordState = {
   providerAnswers: MultiTokenPoolProviderAnswer[]
 }
 
+/** One of a rate limit record's four buckets. @internal */
+export type MultiTokenPoolRateLimitBucket = keyof MultiTokenPoolRateLimits
+
 // ─── Changes ────────────────────────────────────────────────────────────────────────────────
 
 /** The inline record of each type, as reads return and writes take it. @internal */
@@ -238,6 +242,22 @@ export type MultiTokenPoolRecordChange =
       /** The provider, or `null`. */
       provider: string | null
     }
+  | (MultiTokenPoolLaneKey & {
+      /** Set one bucket of a token's inline rate limit record (a missing record: no-op, the store reverts). */
+      kind: 'setInlineRateLimitBucket'
+      /** The bucket. */
+      bucket: MultiTokenPoolRateLimitBucket
+      /** Its config. */
+      config: RateLimitConfig
+    })
+  | (PolicyRecordKey & {
+      /** Set one bucket of a rate limit policy record (a missing record: no-op, the store reverts). */
+      kind: 'setPolicyRateLimitBucket'
+      /** The bucket. */
+      bucket: MultiTokenPoolRateLimitBucket
+      /** Its config. */
+      config: RateLimitConfig
+    })
   | {
       /** Set the PCM-wide pause. */
       kind: 'setGlobalPause'
@@ -439,6 +459,22 @@ export function applyMultiTokenPoolRecordChanges(
           change.provider === null || getAddress(change.provider) === ZeroAddress
             ? others
             : [...others, { policyName: change.policyName, provider: getAddress(change.provider) }]
+        break
+      }
+      case 'setInlineRateLimitBucket': {
+        const key = laneKey(change.tokenAddress, change.remoteChainSelector)
+        const record = tokenOf(change.tokenAddress).inline.rateLimit.find(
+          (r) => laneKey(r.tokenAddress, r.remoteChainSelector) === key,
+        )
+        if (record) record.rateLimits[change.bucket] = structuredClone(change.config)
+        break
+      }
+      case 'setPolicyRateLimitBucket': {
+        const key = recordKey(change.policyName, change.remoteChainSelector, param)
+        const record = next.policies.rateLimit.find(
+          (r) => recordKey(r.policyName, r.remoteChainSelector, param) === key,
+        )
+        if (record) record.rateLimits[change.bucket] = structuredClone(change.config)
         break
       }
       case 'setGlobalPause':
