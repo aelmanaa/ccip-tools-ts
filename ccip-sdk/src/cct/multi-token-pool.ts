@@ -266,7 +266,13 @@ export type MultiTokenPoolLane = {
  * - `POOL_CANNOT_MINT_BURN`: the pool lacks mint or burn on the token.
  * - `REMOTE_LANE_MISMATCH`: the remote side does not point back at this lane, or its registry's pool
  *   is not among the trusted ones.
- * - `LANE_PAUSED`: a pause stops the lane in a direction.
+ * - `LANE_PAUSED`: a global, chain or token pause holds the lane in a direction; lift it with the
+ *   matching unpause.
+ * - `LANE_STOPPED`: an EVM lane stop holds a direction: its rate limit bucket is enabled with no
+ *   capacity and no rate. Not a pause: lift it by writing a non-zero bucket (`liftMultiTokenPoolLaneStops`).
+ * - `REMOTE_UNREADABLE`: a fact the check needs could not be read (no `getChain`, or a remote family
+ *   the SDK cannot read yet), so the check fails closed; pass `getChain`, or a `remoteAttestations`
+ *   entry where one applies.
  * - `CCVS_NOT_SYNCED`, `LANE_NOT_ADMITTED`, `ACCOUNT_LOCKS_EXCEEDED`: Solana pool-group lane states.
  * - `REMOTE_ATTESTED`: a remote fact came from an attestation, not a read (a warning).
  */
@@ -291,6 +297,8 @@ export const MULTI_TOKEN_POOL_LANE_CHECKS = [
   'POOL_CANNOT_MINT_BURN',
   'REMOTE_LANE_MISMATCH',
   'LANE_PAUSED',
+  'LANE_STOPPED',
+  'REMOTE_UNREADABLE',
   'CCVS_NOT_SYNCED',
   'LANE_NOT_ADMITTED',
   'ACCOUNT_LOCKS_EXCEEDED',
@@ -364,7 +372,14 @@ export type MultiTokenPoolLaneCheckResult = {
   lane: MultiTokenPoolLane
   /** Every finding, errors and warnings. */
   findings: MultiTokenPoolLaneFinding[]
-  /** Whether the remote side could be read. */
+  /**
+   * The remote side, tri-state:
+   * - `'known'`: read and checked;
+   * - `'missing'`: read, and the remote side lacks what the lane needs (e.g. no pool registered);
+   * - `'unknown'`: not read: the SDK cannot read that chain, `getChain` is missing, or the lane has no
+   *   connection to check.
+   * `ok` already counts anything but `'known'` as a failure (fail closed): gate on `ok`.
+   */
   remote: MultiTokenPoolFact
   /** `true` when no finding is an error. */
   ok: boolean
@@ -394,7 +409,10 @@ export type MultiTokenPoolTransferQuote = {
   feeDeducted: bigint
   /** Amount the receiver gets: `amount - feeDeducted`. */
   netAmount: bigint
-  /** Whether a fee record resolves; without one a send reverts. */
+  /**
+   * Whether a fee record resolves. Always `true` in a returned quote: a lane without one makes the
+   * quote throw, since a send would revert.
+   */
   hasFeeRecord: boolean
 }
 
@@ -449,7 +467,7 @@ export type MultiTokenPoolExpectedSnapshot = {
 export type MultiTokenPoolSnapshotCheck = {
   /** `true` when nothing moved and no error finding remains. */
   ok: boolean
-  /** Paths whose value moved. */
+  /** What moved: `guardInputsHash` when any input the guard reads has moved (rebuild the proposal). */
   changed: CCTStateChange[]
   /** The guard re-run on the exact calldata against current state: error findings make `ok` false. */
   findings: MultiTokenPoolLaneFinding[]

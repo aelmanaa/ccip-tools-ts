@@ -232,6 +232,8 @@ export function longPoolDataBytes(extra: number): number {
 export type MultiTokenPoolGuardFactFailure = MultiTokenPoolLaneKey & {
   /** `'missing'` or `'unknown'`. */
   status: 'missing' | 'unknown'
+  /** Whether the fact is about the remote side of the lane, or a local contract (a hook). */
+  scope: 'remote' | 'local'
   /** What could not be read. */
   reason: string
 }
@@ -287,7 +289,12 @@ export function evaluateMultiTokenPoolGuards({
     // a lane the write closes strands in-flight inbound messages
     if (before.connection.hasConnection && !c.hasConnection) {
       if (confirmed.has(guardLaneKey(key)))
-        add('LANE_CLOSED', 'warning', 'the write closes this lane (confirmed in confirmClosing)')
+        add(
+          'LANE_CLOSED',
+          'warning',
+          'the write closes this lane (confirmed in confirmClosing)',
+          'connection',
+        )
       else
         add(
           'LANE_CLOSED',
@@ -374,6 +381,7 @@ export function evaluateMultiTokenPoolGuards({
         factFailures.push({
           ...key,
           status: 'unknown',
+          scope: 'local',
           reason: `hook ${lane.verification.hook} callers were not read`,
         })
       else {
@@ -411,6 +419,7 @@ export function evaluateMultiTokenPoolGuards({
       if (!pool || pool.status !== 'known') {
         factFailures.push({
           ...key,
+          scope: 'remote',
           status: pool?.status ?? 'unknown',
           reason: pool?.status ? pool.reason : `remote pool ${p.address} was not read`,
         })
@@ -430,6 +439,7 @@ export function evaluateMultiTokenPoolGuards({
     if (!remote || remote.status !== 'known') {
       factFailures.push({
         ...key,
+        scope: 'remote',
         status: remote?.status ?? 'unknown',
         reason: remote?.status ? remote.reason : 'the remote side of this lane was not read',
       })

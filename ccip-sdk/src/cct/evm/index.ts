@@ -4455,11 +4455,11 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @remarks Works at every pool version. `true` only for the one token set in the pool's
    * constructor, the `token` that {@link getTokenPoolState} returns.
    * @returns `true` if `tokenAddress` is the pool's token.
+   * @remarks On a multi-token pool: the token is registered with its PoolConfigManager and its
+   * lock-or-burn flavor is served.
    * @throws {@link CCTParamsInvalidError} if `poolAddress` or `tokenAddress` is not a valid
    * address
    * @throws {@link CCTContractTypeInvalidError} if the pool's reported type is not supported
-   * @remarks On a multi-token pool: the token is registered with its PoolConfigManager and its
-   * lock-or-burn flavor is served.
    * @throws {@link CCTContractVersionUnsupportedError} if the pool reports an unknown version
    * @example
    * ```typescript
@@ -5226,7 +5226,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   tokenAddress: '0xToken...',
    *   remoteChainSelector: 16015286601757825753n,
    * })
-   * if (lane.outboundStatus.status !== 'ok') console.log('outbound blocked:', lane.outboundStatus)
+   * // a stop (an enabled 0/0 bucket) is not a pause: check both
+   * if (lane.outboundStatus.status !== 'ok' || lane.stopped.outbound)
+   *   console.log('outbound held:', lane.outboundStatus, lane.stopped)
    * ```
    */
   getMultiTokenPoolLane(opts: MultiTokenPoolLaneParams): Promise<MultiTokenPoolLane> {
@@ -5241,7 +5243,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @remarks Reports, never refuses: `ok` is `false` when any finding is an error. Fails closed: a
    * remote fact that cannot be read (no `getChain`, a family the SDK cannot read yet) is an error
    * finding, and `remote` says why. A provider can change its remote token with no PCM write; only
-   * this check catches that. Directions not in `expectOpen` report pauses as warnings.
+   * this check catches that. Directions not in `expectOpen` report pauses and stops as warnings.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), or the registry names
    * no pool for the token
    * @throws {@link CCTContractTypeInvalidError} if the pool is not a multi-token pool
@@ -5271,8 +5273,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * the pool charges it.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the lane has no fee
    * record, or the token does not allow the requested finality
-   * @throws {@link CCIPLocalTokenRequiredError} if the pool serves multiple tokens and no token is given
    * @throws {@link CCTContractTypeInvalidError} if the pool is not a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
    * @example
    * ```typescript
    * const { feeDeducted, netAmount } = await cct.getMultiTokenPoolTransferQuote({
@@ -5296,10 +5298,15 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * delayed proposal is protected only by this check. It applies the thresholds and confirmations the
    * write was built with (sealed in the snapshot), simulates the call from `sender`, and cross-checks
    * the projection with `eth_simulateV1` where the RPC has it. `ok` is `false` when anything the guard
-   * read has moved, or an error finding remains.
+   * read has moved, or an error finding remains. `changed` lists `guardInputsHash` when a guard input
+   * moved: rebuild the proposal. The values the write keeps are bound by the snapshot's hash and
+   * re-checked by the op itself when it sends with `expectedSnapshot`. Unlike
+   * `checkMultiTokenPoolLane`, which reports an unreadable remote side as a finding, this throws on
+   * one: a proposal is never judged without every fact.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the snapshot is not
    * the one returned with `transaction`, a remote fact cannot be read (pass `getChain`), or the call
    * reverts when `sender` executes it
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
    * @throws {@link CCTContractTypeInvalidError} if the transaction does not call a PoolConfigManager
    * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
    * @example
@@ -5310,7 +5317,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   sender: SAFE,
    *   getChain,
    * })
-   * if (!ok) throw new Error(`reject the proposal: ${JSON.stringify({ changed, findings })}`)
+   * // jsonStringify (from '@chainlink/ccip-sdk') writes bigints; JSON.stringify throws on them
+   * if (!ok) throw new Error(`reject the proposal: ${jsonStringify({ changed, findings })}`)
    * ```
    */
   checkMultiTokenPoolSnapshot(

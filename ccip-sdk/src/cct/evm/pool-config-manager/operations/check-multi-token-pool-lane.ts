@@ -148,11 +148,20 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
         },
       })
       findings.push(...evaluated.findings)
-      // fail closed: a remote fact that could not be read is an error finding, never a pass
+      // fail closed: a fact that could not be read is an error finding, never a pass
       for (const f of evaluated.factFailures)
-        add('REMOTE_LANE_MISMATCH', 'error', `the remote side could not be checked: ${f.reason}`)
+        add(
+          'REMOTE_UNREADABLE',
+          'error',
+          f.scope === 'remote'
+            ? `the remote side could not be checked (${f.reason}): pass getChain for ${key.remoteChainSelector}, or a remoteAttestations entry where the family has no reader`
+            : `a local fact could not be read: ${f.reason}`,
+        )
       const read = facts.remoteLanes.get(guardLaneKey(key))
-      remote = evaluated.factFailures[0]?.status ?? read?.status ?? 'unknown'
+      remote =
+        evaluated.factFailures.find((f) => f.scope === 'remote')?.status ??
+        read?.status ??
+        'unknown'
       // a remote burst the local inbound cannot absorb waits here until the bucket refills
       const local = lane.rateLimits.inbound
       const theirs = read?.status === 'known' ? read.remoteOutbound : undefined
@@ -170,12 +179,16 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
       const status = direction === 'outbound' ? lane.outboundStatus : lane.inboundStatus
       const severity = expected.has(direction) ? 'error' : 'warning'
       if (status.status === 'paused')
-        add('LANE_PAUSED', severity, `${direction} is paused (${status.scope} pause)`)
-      else if (lane.stopped[direction])
         add(
           'LANE_PAUSED',
           severity,
-          `${direction} is stopped: its rate limit bucket is enabled with no capacity`,
+          `${direction} is paused (${status.scope} pause): lift it with the matching unpause`,
+        )
+      else if (lane.stopped[direction])
+        add(
+          'LANE_STOPPED',
+          severity,
+          `${direction} is stopped: its rate limit bucket is enabled with no capacity and no rate; lift it by writing a non-zero bucket (liftMultiTokenPoolLaneStops)`,
         )
     }
 

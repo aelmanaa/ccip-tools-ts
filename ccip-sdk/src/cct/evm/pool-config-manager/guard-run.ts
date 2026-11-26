@@ -91,6 +91,8 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   blockTag?: number
   /** Return error findings in `findings` instead of refusing (the snapshot check reports them). */
   reportFindings?: boolean
+  /** The op named in errors, when it is not `operation` (the snapshot check re-runs another op's guard). */
+  errorOperation?: string
 }
 
 /** What a guarded write reports (the fields of `MultiTokenPoolUnsignedTx`). @internal */
@@ -124,6 +126,7 @@ export async function runMultiTokenPoolGuards(
   input: RunMultiTokenPoolGuardsInput,
 ): Promise<MultiTokenPoolGuardResult> {
   const { chain, operation, poolConfigManager, version, data, sender } = input
+  const errorOperation = input.errorOperation ?? operation
   const decoded = decodeMultiTokenPoolWrite(data, version)
   const blockNumber = input.blockTag ?? (await chain.provider.getBlockNumber())
   const [{ state: before }, { tokenAdminRegistry }] = await Promise.all([
@@ -165,7 +168,7 @@ export async function runMultiTokenPoolGuards(
   if (factFailures.length) {
     const unknown = factFailures.some((f) => f.status === 'unknown')
     throw new CCTParamsInvalidError(
-      operation,
+      errorOperation,
       unknown ? 'getChain' : 'remoteSide',
       `cannot check ${factFailures.length} affected lane(s), and a guard never passes on a fact it could not read: ${factFailures
         .map((f) => `${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
@@ -176,7 +179,7 @@ export async function runMultiTokenPoolGuards(
   const errors = findings.filter((f) => f.severity === 'error')
   if (errors.length && !input.reportFindings)
     throw new CCTParamsInvalidError(
-      operation,
+      errorOperation,
       'guards',
       `the write would leave ${errors.length} problem(s) on the lanes it changes: ${errors
         .map((f) => `${f.check} on ${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
@@ -193,7 +196,7 @@ export async function runMultiTokenPoolGuards(
     )
     if (!sim.success)
       throw new CCTParamsInvalidError(
-        operation,
+        errorOperation,
         'sender',
         `the write reverts when ${sender} executes it: ${sim.errorName ?? sim.revertData}`,
         {

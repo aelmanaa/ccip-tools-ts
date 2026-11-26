@@ -101,6 +101,7 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
       ...options,
       chain,
       operation: snapshot.operation,
+      errorOperation: this.name,
       poolConfigManager: address,
       version,
       data: tx.data as string,
