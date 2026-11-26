@@ -1,7 +1,7 @@
 /**
  * The lane view and the lane check on live Sepolia lanes, read-only: a healthy mttp-core lane to Fuji,
- * the v5v9 lane whose Fuji side does not exist, and a v5v9 lane to Solana devnet (whose remote side
- * the SDK cannot read yet, so the check fails closed).
+ * the v5v9 lane whose Fuji side does not exist, and a v5v9 lane to Solana Devnet, read through the
+ * pool-groups reader (and failing closed without a Devnet RPC).
  *
  * Skips (does not fail) when a pool is no longer a multi-token pool; RPC errors still fail.
  */
@@ -14,12 +14,13 @@ import { useResource } from '../../../../../../scripts/useResource.ts'
 import type { ChainGetter } from '../../../../chain.ts'
 import { CCIPLocalTokenRequiredError } from '../../../../errors/index.ts'
 import { EVMChain } from '../../../../evm/index.ts'
+import { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { EVMTokenManager } from '../../index.ts'
 
 const skip = !!process.env.SKIP_INTEGRATION_TESTS
 
-await useResource(['sepolia', 'fuji'])
+await useResource(['sepolia', 'fuji', 'solana-devnet'])
 
 const testLogger = new Console(process.stdout, process.stderr)
 if (!process.env.VERBOSE) testLogger.debug = () => {}
@@ -45,6 +46,7 @@ const V5V9_SOLANA = {
 describe('MTTP lane view and lane check (Sepolia, read-only)', { skip, timeout: 600_000 }, () => {
   let cct: EVMTokenManager
   let getChain: ChainGetter
+  let withSolana: ChainGetter
   let deployed = false
 
   before(async () => {
@@ -63,6 +65,12 @@ describe('MTTP lane view and lane check (Sepolia, read-only)', { skip, timeout: 
       if (BigInt(selector) === fuji.network.chainSelector) return fuji
       throw new CCTParamsInvalidError('test', 'getChain', `no RPC for ${selector}`)
     }
+    const solana = await SolanaChain.fromUrl(await reachableRpcEndpoint('RPC_SOLANA_DEVNET'), {
+      apiClient: null,
+      logger: testLogger,
+    })
+    withSolana = async (selector) =>
+      BigInt(selector) === solana.network.chainSelector ? solana : getChain(selector)
     deployed =
       (await cct.isMultiTokenPool({ poolAddress: CORE.poolAddress })) &&
       (await cct.isMultiTokenPool({ poolAddress: V5V9_FUJI.poolAddress }))
@@ -96,11 +104,20 @@ describe('MTTP lane view and lane check (Sepolia, read-only)', { skip, timeout: 
     assert.ok(r.findings.some((f) => f.check === 'NO_REMOTE_POOL' && f.severity === 'error'))
   })
 
-  it('fails closed on a remote side it cannot read', async (t) => {
+  it('fails closed on a Solana remote side without a Devnet RPC', async (t) => {
     if (!deployed) return t.skip('stacks not deployed')
     const r = await cct.checkMultiTokenPoolLane({ ...V5V9_SOLANA, getChain })
     assert.equal(r.ok, false)
     assert.equal(r.remote, 'unknown')
+  })
+
+  it('reads a Solana remote side through the pool-groups reader', async (t) => {
+    if (!deployed) return t.skip('stacks not deployed')
+    const r = await cct.checkMultiTokenPoolLane({ ...V5V9_SOLANA, getChain: withSolana })
+    assert.equal(r.remote, 'known')
+    assert.equal(r.ok, true, JSON.stringify(r.findings.map((f) => f.reason)))
+    // a policy governs the Solana lane's RATE_LIMIT, unread until S1b: said, never passed silently
+    assert.ok(r.findings.some((f) => f.check === 'REMOTE_UNREADABLE' && f.severity === 'warning'))
   })
 
   it('quotes a transfer with the token fee the Router leaves out, rounded down as the pool does', async (t) => {

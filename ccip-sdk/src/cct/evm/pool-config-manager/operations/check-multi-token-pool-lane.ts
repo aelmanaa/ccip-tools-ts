@@ -164,6 +164,12 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
         'unknown'
       // a remote burst the local inbound cannot absorb waits here until the bucket refills; the
       // remote limit is in remote token units, so compare in local units
+      if (read?.status === 'known' && read.remoteOutboundUnknownReason !== undefined)
+        add(
+          'REMOTE_UNREADABLE',
+          'warning',
+          `the remote outbound limit could not be read (${read.remoteOutboundUnknownReason}), so the inbound limit was not compared with it`,
+        )
       const local = lane.rateLimits.inbound
       const theirs = read?.status === 'known' ? read.remoteOutbound : undefined
       const remoteDecimals = read?.status === 'known' ? read.remoteDecimals : undefined

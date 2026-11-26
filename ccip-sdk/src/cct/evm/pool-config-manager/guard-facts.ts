@@ -71,7 +71,7 @@ export type ReadMultiTokenPoolGuardFactsInput = {
 }
 
 /** A remote family the SDK reads the remote side of (attestations are refused for it). */
-const READABLE_FAMILIES: ReadonlySet<string> = new Set([ChainFamily.EVM])
+const READABLE_FAMILIES: ReadonlySet<string> = new Set([ChainFamily.EVM, ChainFamily.Solana])
 /** Families that always need `getChain`, readable or not yet: attestations never stand in for them. */
 const GET_CHAIN_FAMILIES: ReadonlySet<string> = new Set([ChainFamily.EVM, ChainFamily.Solana])
 
@@ -237,7 +237,11 @@ async function remoteChainOf(
       status: 'unknown',
       reason: `pass getChain to read the remote ${family} side of the lane`,
     }
-  return getChain(remoteChainSelector)
+  // a getter that cannot serve the chain leaves the side unread: fail closed, as with no getter
+  return getChain(remoteChainSelector).catch((err: unknown) => ({
+    status: 'unknown' as const,
+    reason: `getChain could not serve ${family} chain ${remoteChainSelector}: ${err instanceof Error ? err.message : String(err)}`,
+  }))
 }
 
 /** Checks an attestation against the attestation rules; returns why it is refused, or `undefined`. */
@@ -290,6 +294,8 @@ async function readRemoteLane(
       status: 'missing',
       reason: 'the lane trusts no remote pool, so its remote registry cannot be found',
     }
+  if (laneFamilyOf(lane.remoteChainSelector) === ChainFamily.Solana)
+    return readSolanaRemoteLane(input, lane, localSelector, servingPools, remote)
   const registry = await remote.getTokenAdminRegistryFor(trusted[0]!)
   const registryPool = await remote.getRegistryTokenConfig(registry, remoteToken).then(
     ({ tokenPool }) => (tokenPool ? getAddress(tokenPool) : null),
@@ -354,10 +360,57 @@ async function readRemotePool(
 ): Promise<MultiTokenPoolRemotePoolFacts> {
   const remote = await remoteChainOf(input, remoteChainSelector)
   if ('status' in remote) return remote
+  if (laneFamilyOf(remoteChainSelector) === ChainFamily.Solana) {
+    const { readSolanaRemotePoolFacts } = await import('../../solana/pool-group/remote-lane.ts')
+    // the Solana reader keys the lane by its remote: this (EVM) chain
+    return readSolanaRemotePoolFacts(remote, {
+      remoteChainSelector: input.chain.network.chainSelector,
+      poolAddress: address,
+    })
+  }
   const [type] = await remote.typeAndVersion(address).catch((err: unknown) => {
     // a pool that reports no typeAndVersion is not a multi-token pool
     if (isError(err, 'CALL_EXCEPTION') || isError(err, 'BAD_DATA')) return ['']
     throw err
   })
   return { status: 'known', isMultiTokenPool: reportsMultiTokenPool(type) }
+}
+
+/**
+ * The remote side of a lane to Solana, from the pool-groups reader (loaded on first use, so EVM-only
+ * callers never load the Solana stack), mapped to the facts the rules read.
+ */
+async function readSolanaRemoteLane(
+  input: ReadMultiTokenPoolGuardFactsInput,
+  lane: ProjectedMultiTokenPoolLane,
+  localSelector: bigint,
+  servingPools: readonly string[],
+  remote: Chain,
+): Promise<MultiTokenPoolRemoteLaneFacts> {
+  const { readSolanaRemoteLaneFacts } = await import('../../solana/pool-group/remote-lane.ts')
+  const facts = await readSolanaRemoteLaneFacts(remote, {
+    // the Solana lane's remote is this chain: never the Solana selector
+    remoteChainSelector: localSelector,
+    mint: lane.connection.remoteToken!,
+    trustedPools: lane.connection.remotePools.map((p) => p.address),
+    ...(input.readRemoteRateLimits && { readRateLimits: true }),
+  })
+  if (facts.status !== 'known') return facts
+  const { back } = facts
+  // a back lane enforces the token its ChainConfig names, toward a pool this chain serves from
+  const pointsBack =
+    !!back &&
+    getAddress(back.remoteToken) === getAddress(lane.tokenAddress) &&
+    back.remotePools.some((p) => servingPools.includes(getAddress(p)))
+  return {
+    status: 'known',
+    readsLongData: facts.readsLongData,
+    registryPool: facts.registryPool,
+    mapsBack: lane.connection.poolDataFormat === 'legacy' ? pointsBack : true,
+    ...(input.readRemoteRateLimits &&
+      back &&
+      (back.outboundRateLimiterState !== undefined
+        ? { remoteOutbound: back.outboundRateLimiterState, remoteDecimals: back.remoteDecimals }
+        : { remoteOutboundUnknownReason: back.outboundUnknownReason ?? 'not returned' })),
+  }
 }

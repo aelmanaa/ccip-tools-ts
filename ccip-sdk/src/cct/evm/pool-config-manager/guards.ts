@@ -16,6 +16,7 @@ import { canonicalJson } from '../../canonical.ts'
 import {
   type MultiTokenPoolLaneFinding,
   type MultiTokenPoolRemoteAttestation,
+  type MultiTokenPoolRemoteFact,
   sortFindings,
 } from '../../multi-token-pool.ts'
 import type { MultiTokenPoolLaneKey } from './contracts.ts'
@@ -51,15 +52,8 @@ export type MultiTokenPoolGuardOptions = Pick<
   | 'migrationWindowChains'
 >
 
-/** A remote fact: read, absent on the remote chain, or unreadable. @internal */
-export type MultiTokenPoolRemoteFact<T> =
-  | ({ status: 'known' } & T)
-  | {
-      /** `'missing'`: the remote side lacks it; `'unknown'`: the SDK cannot read that chain. */
-      status: 'missing' | 'unknown'
-      /** What is missing or why it cannot be read. */
-      reason: string
-    }
+// the family-neutral remote fact; re-exported so EVM importers keep their path
+export type { MultiTokenPoolRemoteFact } from '../../multi-token-pool.ts'
 
 /** What the remote side of one lane does. @internal */
 export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
@@ -75,6 +69,8 @@ export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   remoteOutbound?: RateLimiterState
   /** Decimals of the remote token (read with `remoteOutbound`), to compare the limits in one unit. */
   remoteDecimals?: number
+  /** Why the remote outbound bucket could not be read, when it was asked for and the lane back exists. */
+  remoteOutboundUnknownReason?: string
   /** The attestation the long-data fact came from, for a family the SDK cannot read. */
   attestation?: MultiTokenPoolRemoteAttestation
 }>

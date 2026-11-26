@@ -152,7 +152,7 @@ describe('MTTP post-state guard (Sepolia v5v9, read-only)', { skip, timeout: 600
     )
   })
 
-  it('fails closed on a lane whose remote side it cannot read (Solana, until its reader lands)', async (t) => {
+  it('fails closed on a Solana lane when getChain cannot serve Devnet', async (t) => {
     if (!deployed) return t.skip('v5v9 multi-token pool not deployed')
     const data = PCM_IFACE.encodeFunctionData('applyInlineFeeConfigUpdates', [
       [],

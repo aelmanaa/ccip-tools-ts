@@ -345,6 +345,20 @@ export function sortFindings<F extends MultiTokenPoolFinding<string>>(findings: 
   )
 }
 
+/**
+ * A remote fact, family-neutral: read, absent on the remote chain, or unreadable. Each family's
+ * remote reader returns it.
+ * @internal
+ */
+export type MultiTokenPoolRemoteFact<T> =
+  | ({ status: 'known' } & T)
+  | {
+      /** `'missing'`: the remote side lacks it; `'unknown'`: the SDK cannot read that chain. */
+      status: 'missing' | 'unknown'
+      /** What is missing or why it cannot be read. */
+      reason: string
+    }
+
 /** Tri-state fact: `'unknown'` is never treated as `'missing'`. */
 export type MultiTokenPoolFact = 'known' | 'missing' | 'unknown'
 
