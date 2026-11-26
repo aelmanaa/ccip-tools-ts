@@ -4,51 +4,48 @@
  * of that pool's lane back toward the EVM chain, and what that lane trusts and allows.
  *
  * Loaded lazily by the EVM guard, only for a Solana remote, so `cct/evm` takes no static Solana
- * import. Uses only `getAccountInfo`, `getMultipleAccountsInfo` and `getAddressLookupTable`.
+ * import. Reads accounts only, plus the Router's `type_version` when no Router is given.
  *
  * @packageDocumentation
  */
 
 import { Buffer } from 'buffer'
 
-import { type AccountInfo, type Connection, PublicKey } from '@solana/web3.js'
+import { type AccountInfo, PublicKey } from '@solana/web3.js'
 
 import type { Chain, RateLimiterState } from '../../../chain.ts'
-import { decodeTokenAdminRegistryConfig } from '../../../solana/token-admin-registry.ts'
 import {
-  type TokenPoolChainConfig,
-  decodeTokenPoolChainConfig,
+  CCIPDataFormatUnsupportedError,
+  CCIPError,
+  CCIPTokenNotConfiguredError,
+} from '../../../errors/index.ts'
+import type { SolanaChain } from '../../../solana/index.ts'
+import { getTokenAdminRegistryConfig } from '../../../solana/token-admin-registry.ts'
+import {
+  type TokenPoolStateConfig,
   decodeTokenPoolStateConfig,
-  deriveTokenPoolChainConfigV2Pda,
 } from '../../../solana/token-pool.ts'
-import { convertRateLimiter } from '../../../solana/utils.ts'
-import { CCTDataDecodeError } from '../../errors.ts'
+import { isSimulationFailure } from '../../../solana/utils.ts'
+// TODO(track merge): import MultiTokenPoolRemoteFact from '../../multi-token-pool.ts' (moved on the
+// EVM stack at 9e0bfb9d; guards.ts re-exports it)
 import type { MultiTokenPoolRemoteFact } from '../../evm/pool-config-manager/guards.ts'
 import type { PoolDataFormat } from '../../multi-token-pool.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
-import { deriveTokenAdminRegistryPda } from '../programs/router.ts'
-import { deriveTokenPoolChainConfigPda, deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
+import { deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
+import type { PoolGroupLaneMarker } from './accounts.ts'
 import {
-  type PolicyChainRecordAccount,
-  type PoolGroupClass,
-  type PoolGroupLaneExt,
-  type PoolGroupLaneMarker,
-  decodePoolGroupChainConfigV2,
-  decodePoolGroupIdlAccount,
-  decodePoolGroupLaneMarker,
-  poolGroupChainAdmits,
-  poolGroupPdas,
-} from './accounts.ts'
-
-/** Index of the pool `State` in a registry's pool lookup table. */
-const LOOKUP_TABLE_TOKEN_POOL_INDEX = 3
-/** `PolicyClass::bit` of each class carried by a policy chain record. */
-const CLASS_BIT: Record<PoolGroupClass, number> = {
-  connection: 1,
-  fee: 2,
-  rateLimit: 4,
-  security: 8,
-}
+  type Unread,
+  isUnread,
+  laneFailsClosed,
+  laneFormat,
+  laneOutboundRateLimiter,
+  lanePauses,
+  laneSectionsFor,
+  missing,
+  readPoolGroupLaneState,
+  tryDecode,
+  unknown,
+} from './lane.ts'
 
 /** What the EVM guard asks about one EVM → Solana lane. @internal */
 export type SolanaRemoteLaneQuery = {
@@ -58,28 +55,67 @@ export type SolanaRemoteLaneQuery = {
   mint: string
   /** The pool `State` PDAs the EVM lane trusts (base58); the first one names the Router. */
   trustedPools: readonly string[]
+  /**
+   * The CCIP Router of the Solana chain, when the caller knows it: the trusted pool's Router must
+   * be this one. Without it, the trusted pool's Router must report a `Router` `type_version`.
+   */
+  router?: string
   /** Also read the lane back's outbound bucket (for the lane check). */
   readRateLimits?: boolean
+}
+
+/** One EVM pool the Solana lane accepts. @internal */
+export type SolanaRemoteLanePool = {
+  /** Checksummed `0x` EVM address. */
+  address: string
+  /** The stored bytes as `0x` hex: the program compares these, byte for byte. */
+  raw: string
+  /** The lane's own list, or its CONNECTION policy record's. */
+  source: 'own' | 'policy'
+  /**
+   * Whether the lane accepts legacy (empty or 32-byte) pool data from this pool
+   * (`validate_source_pool_data`): never when the lane sends the long format or has a UID; else
+   * always from its own pools, and from a policy pool only with the record's
+   * `allow_legacy_pool_data`.
+   */
+  allowLegacyPoolData: boolean
 }
 
 /** The Solana lane back toward the EVM chain. @internal */
 export type SolanaRemoteLaneBack = {
   /** The EVM token the Solana lane names, as a checksummed `0x` address. */
   remoteToken: string
+  /**
+   * The stored remote token bytes as `0x` hex. Long pool data must name exactly these as its
+   * source token (`SourceTokenMismatch`): the EVM multi-token pool sends `abi.encode(address)`, 32
+   * bytes, so a 20-byte entry here refuses every long transfer.
+   */
+  remoteTokenRaw: string
+  /** The remote decimals the lane stores; inbound pool data must report these. */
+  remoteTokenDecimals: number
   /** The mint's decimals (the pool `State`'s), to convert rate limits into local units. */
   remoteDecimals: number
-  /** The EVM pools the lane accepts: its own and, when `CONNECTION` comes from a policy, the policy's. */
-  remotePools: string[]
-  /** Outbound bucket, `null` when disabled; read with `readRateLimits` when `RATE_LIMIT` is inline. */
+  /** The EVM pools the lane accepts, each with its stored bytes and legacy acceptance. */
+  remotePools: SolanaRemoteLanePool[]
+  /**
+   * Outbound bucket as transfers consume it, `null` when disabled; read with `readRateLimits`. With
+   * RATE_LIMIT from a policy record, the stored tokens under that record's config.
+   */
   outboundRateLimiterState?: RateLimiterState
-  /** Why `outboundRateLimiterState` is absent although `readRateLimits` was set. */
-  outboundUnknownReason?: string
-  /** Paused toward the EVM chain: the group, its chain record, the lane, or driven lanes paused. */
+  /**
+   * Paused toward the EVM chain: the group, its chain record, the lane, and on a driven lane
+   * `driven_lanes_paused` or a chain record that does not admit the member.
+   */
   pausedOutbound: boolean
   /** Paused from the EVM chain, likewise. */
   pausedInbound: boolean
   /** Group-driven lanes: whether the group's chain record admits the member now. */
   admitted?: boolean
+  /**
+   * Set when every transfer on the lane reverts in both directions although it is not paused: a
+   * stale SECURITY record or an unsynced CCV copy. Treat the lane as not live.
+   */
+  failsClosed?: string
 }
 
 /**
@@ -98,6 +134,11 @@ export type SolanaRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   laneKind: PoolGroupLaneMarker | 'none'
   /** The format the lane sends (effective `CONNECTION`); `'legacy'` on a standard lane. */
   poolDataFormat?: PoolDataFormat
+  /**
+   * The lane's factory UID as `0x` hex, or `null`. A lane with a UID requires it as the additional
+   * data of every inbound long transfer (`InvalidAdditionalPoolData`) and refuses legacy data.
+   */
+  uid?: string | null
   /**
    * Whether the registry pool reads long pool data from the EVM chain, by the design rule (§7.2):
    * interface 2, a marked (linked or driven) lane, and an effective format of `'long'`.
@@ -124,24 +165,6 @@ export type SolanaRemotePoolFacts = MultiTokenPoolRemoteFact<{
   isMultiTokenPool: boolean
 }>
 
-type Unread = { status: 'missing' | 'unknown'; reason: string }
-const unknown = (reason: string): Unread => ({ status: 'unknown', reason })
-const missing = (reason: string): Unread => ({ status: 'missing', reason })
-
-/** Runs a decoder, turning a decode failure into an `'unknown'` reason. */
-function tryDecode<T>(what: string, decode: () => T): T | Unread {
-  try {
-    return decode()
-  } catch (err) {
-    const reason = err instanceof CCTDataDecodeError ? err.context.reason : undefined
-    const why =
-      typeof reason === 'string' ? reason : err instanceof Error ? err.message : String(err)
-    return unknown(`${what} cannot be decoded: ${why}`)
-  }
-}
-const isUnread = (v: unknown): v is Unread =>
-  typeof v === 'object' && v !== null && 'status' in v && 'reason' in v
-
 function parseKey(value: string, what: string): PublicKey | Unread {
   try {
     return new PublicKey(value)
@@ -150,241 +173,134 @@ function parseKey(value: string, what: string): PublicKey | Unread {
   }
 }
 
-type RegistryRead = {
-  registryPool: PublicKey | null
-  interfaceVersion?: number
+/** A pool `State` at its PDA under its owner. */
+type PoolState = { address: PublicKey; program: PublicKey; state: TokenPoolStateConfig }
+
+/** Decodes a pool `State` and checks it sits at its PDA under the program that owns it. */
+function poolState(
+  address: PublicKey,
+  account: AccountInfo<Buffer>,
+  what: string,
+): PoolState | Unread {
+  const state = tryDecode(what, () => decodeTokenPoolStateConfig(account.data))
+  if (isUnread(state)) return state
+  if (!deriveTokenPoolConfigPda(account.owner, state.mint).equals(address))
+    return unknown(`${what} is not the pool State PDA of its mint under its owner program`)
+  return { address, program: account.owner, state }
 }
 
-/** The registry entry of `mint` on `router`: transport errors propagate, a missing table is no pool. */
-async function readRegistry(
-  remote: { connection: Connection },
+/** Errors that mean "this account is not a working Router", rather than a transport failure. */
+const notRouter = (err: unknown) =>
+  isSimulationFailure(err) || (err instanceof CCIPError && !err.isTransient)
+
+/** Checks the trusted pool's Router: the given one, else whatever reports a Router `type_version`. */
+async function checkRouter(
+  solana: SolanaChain,
   router: PublicKey,
-  mint: PublicKey,
-): Promise<RegistryRead | Unread> {
-  const address = deriveTokenAdminRegistryPda(router, mint)
-  const account = await remote.connection.getAccountInfo(address)
-  if (!account) return { registryPool: null }
-  if (!account.owner.equals(router))
-    return unknown(`the registry account ${address.toBase58()} is not owned by the Router`)
-  const config = tryDecode(`the registry account ${address.toBase58()}`, () =>
-    decodeTokenAdminRegistryConfig(account.data),
-  )
-  if (isUnread(config)) return config
-  if (!config.lookupTable) return { registryPool: null, interfaceVersion: config.interfaceVersion }
-  const table = await remote.connection.getAddressLookupTable(config.lookupTable)
-  const pool = table.value?.state.addresses[LOOKUP_TABLE_TOKEN_POOL_INDEX]
-  return {
-    registryPool: pool && !pool.equals(PublicKey.default) ? pool : null,
-    interfaceVersion: config.interfaceVersion,
+  expected: string | undefined,
+): Promise<Unread | undefined> {
+  if (expected !== undefined)
+    return router.toBase58() === expected
+      ? undefined
+      : unknown(`the trusted pool's Router ${router.toBase58()} is not the CCIP Router ${expected}`)
+  try {
+    const [type] = await solana.typeAndVersion(router.toBase58())
+    if (!type.includes('Router'))
+      return unknown(`the trusted pool's Router ${router.toBase58()} reports ${type}, not a Router`)
+  } catch (err) {
+    if (notRouter(err))
+      return unknown(`the trusted pool's Router ${router.toBase58()} is not a CCIP Router`)
+    throw err
   }
 }
 
-type LaneRead = {
-  laneKind: PoolGroupLaneMarker | 'none'
-  poolDataFormat?: PoolDataFormat
-  back?: SolanaRemoteLaneBack
+/** The registry entry of `mint`: its pool and interface, with transport errors propagating. */
+async function readRegistry(
+  solana: SolanaChain,
+  router: PublicKey,
+  mint: PublicKey,
+): Promise<{ registryPool: PublicKey | null; interfaceVersion?: number } | Unread> {
+  try {
+    const config = await getTokenAdminRegistryConfig(solana.connection, router, mint, {
+      propagateRpcErrors: true,
+    })
+    return { registryPool: config.tokenPool ?? null, interfaceVersion: config.interfaceVersion }
+  } catch (err) {
+    if (err instanceof CCIPTokenNotConfiguredError) return { registryPool: null }
+    if (err instanceof CCIPDataFormatUnsupportedError)
+      return unknown(`the registry entry of ${mint.toBase58()} cannot be read: ${err.message}`)
+    throw err
+  }
 }
 
-/**
- * Reads the lane of pool `program` for (`mint`, `selector`) and resolves what the program resolves
- * at transfer time (`resolve_lane_policy_with`, `require_lane_not_paused`, `load_lane_group_chain`).
- */
+type LaneRead = Pick<
+  Extract<SolanaRemoteLaneFacts, { status: 'known' }>,
+  'laneKind' | 'poolDataFormat' | 'uid' | 'back'
+>
+
+/** The lane of pool `program` toward `selector`, in the guard's terms. */
 async function readLane(
-  remote: { connection: Connection },
+  solana: SolanaChain,
   program: PublicKey,
   mint: PublicKey,
   decimals: number,
   selector: bigint,
   readRateLimits: boolean,
 ): Promise<LaneRead | Unread> {
-  const conn = remote.connection
-  const ccAddress = deriveTokenPoolChainConfigPda(program, selector, mint)
-  const v2Address = deriveTokenPoolChainConfigV2Pda(program, selector, mint)
-  const [cc, v2] = await conn.getMultipleAccountsInfo([ccAddress, v2Address])
-  if (!cc) return { laneKind: 'none' }
-  for (const [acc, addr] of [
-    [cc, ccAddress],
-    [v2, v2Address],
-  ] as const)
-    if (acc && !acc.owner.equals(program))
-      return unknown(`lane account ${addr.toBase58()} is not owned by the pool program`)
-  const base = tryDecode<TokenPoolChainConfig>(`the ChainConfig ${ccAddress.toBase58()}`, () =>
-    decodeTokenPoolChainConfig(cc.data),
-  )
-  if (isUnread(base)) return base
-  const laneKind = decodePoolGroupLaneMarker(cc.data, base)
-  const lane = v2
-    ? tryDecode(`the ChainConfigV2 ${v2Address.toBase58()}`, () =>
-        decodePoolGroupChainConfigV2(v2.data, v2Address.toBase58()),
-      )
-    : null
-  if (isUnread(lane)) return lane
-  const ext = lane?.ext ?? null
-  // the program requires the two records to agree (`require_link_marker_matches`)
-  if ((laneKind !== 'standard') !== (ext !== null))
-    return unknown(
-      `the lane's ChainConfig marker (${laneKind}) and its ChainConfigV2 ${ext ? 'tail' : 'lack of a tail'} disagree`,
-    )
-  if (ext && (laneKind === 'driven') !== ext.groupDriven)
-    return unknown(`the lane's ChainConfig marker (${laneKind}) and its group_driven flag disagree`)
-
+  // The lane base is decoded here rather than with `getTokenPoolRemotes`, which swallows decode
+  // errors and drops the raw bytes the marker and the byte checks need.
+  const state = await readPoolGroupLaneState(solana.connection, program, mint, selector)
+  if (state === null) return { laneKind: 'none' }
+  if (isUnread(state)) return state
   const decode = (bytes: Buffer, what: string) =>
     tryDecode(`the lane's ${what}`, () => decodeRemoteAddress(bytes, selector))
-  const remoteToken = decode(Buffer.from(base.remote.tokenAddress.address), 'remote token')
+  const { remote: config } = state.chainConfig.base
+  const tokenBytes = Buffer.from(config.tokenAddress.address)
+  const remoteToken = decode(tokenBytes, 'remote token')
   if (isUnread(remoteToken)) return remoteToken
-  const ownPools: Buffer[] = base.remote.poolAddresses.map((p) => Buffer.from(p.address))
-
-  const inlineOutbound = () =>
-    readRateLimits ? { outboundRateLimiterState: convertRateLimiter(base.outboundRateLimit) } : {}
-
-  if (!ext || !ext.poolGroupAddress) {
-    // a standard lane, or a marked lane with only its own pool-data settings: every class is
-    // inline and pauses do not apply (`require_lane_not_paused` returns early when unlinked)
-    const pools = decodeAll(ownPools, decode)
-    if (isUnread(pools)) return pools
-    return {
-      laneKind,
-      poolDataFormat: ext?.poolDataFormat ?? 'legacy',
-      back: {
-        remoteToken,
-        remoteDecimals: decimals,
-        remotePools: pools,
-        pausedOutbound: false,
-        pausedInbound: false,
-        ...inlineOutbound(),
-      },
-    }
-  }
-  return readLinkedLane(
-    remote,
-    program,
-    selector,
-    new PublicKey(ext.poolGroupAddress),
-    ext,
-    laneKind,
-    {
-      remoteToken,
-      decimals,
-      ownPools,
-      decode,
-      inlineOutbound,
-      readRateLimits,
-    },
-  )
-}
-
-function decodeAll(
-  pools: readonly Buffer[],
-  decode: (bytes: Buffer, what: string) => string | Unread,
-): string[] | Unread {
-  const out: string[] = []
-  for (const pool of pools) {
-    const address = decode(pool, 'remote pool')
-    if (isUnread(address)) return address
-    if (!out.includes(address)) out.push(address)
-  }
-  return out
-}
-
-async function readLinkedLane(
-  remote: { connection: Connection },
-  program: PublicKey,
-  selector: bigint,
-  group: PublicKey,
-  ext: PoolGroupLaneExt,
-  laneKind: PoolGroupLaneMarker,
-  lane: {
-    remoteToken: string
-    decimals: number
-    ownPools: Buffer[]
-    decode: (bytes: Buffer, what: string) => string | Unread
-    inlineOutbound: () => { outboundRateLimiterState?: RateLimiterState }
-    readRateLimits: boolean
-  },
-): Promise<LaneRead | Unread> {
-  const gcpAddress = poolGroupPdas.groupChain(program, group, selector)
-  // the named records the receive and send classes read here: CONNECTION and RATE_LIMIT
-  const slots = new Map<number, PublicKey>()
-  for (const cls of ['connection', 'rateLimit'] as const) {
-    const source = ext.classSource[cls]
-    if (source.kind !== 'policy') continue
-    const policy = ext.policySlots[source.slot]
-    if (!policy)
-      return unknown(`the lane takes ${cls} from policy slot ${source.slot}, which is empty`)
-    slots.set(source.slot, poolGroupPdas.policyChain(program, new PublicKey(policy), selector))
-  }
-  const addresses = [gcpAddress, ...slots.values()]
-  const accounts = await remote.connection.getMultipleAccountsInfo(addresses)
-  const owned = (acc: AccountInfo<Buffer> | null, address: PublicKey, what: string) => {
-    if (!acc) return unknown(`the lane's ${what} ${address.toBase58()} does not exist`)
-    if (!acc.owner.equals(program))
-      return unknown(`the lane's ${what} ${address.toBase58()} is not owned by the pool program`)
-    return acc
-  }
-  const gcpAccount = owned(accounts[0] ?? null, gcpAddress, 'group chain record')
-  if (isUnread(gcpAccount)) return gcpAccount
-  const gcp = tryDecode(`the group chain record ${gcpAddress.toBase58()}`, () =>
-    decodePoolGroupIdlAccount('groupChainPolicy', gcpAccount.data, gcpAddress.toBase58()),
-  )
-  if (isUnread(gcp)) return gcp
-  if (!gcp.group.equals(group) || BigInt(gcp.remoteChainSelector.toString()) !== selector)
-    return unknown(`the group chain record ${gcpAddress.toBase58()} is not the lane's`)
-
-  const named = new Map<number, PolicyChainRecordAccount>()
-  for (const [i, [slot, address]] of [...slots.entries()].entries()) {
-    const acc = owned(accounts[i + 1] ?? null, address, `policy slot ${slot} chain record`)
-    if (isUnread(acc)) return acc
-    const record = tryDecode(`the policy chain record ${address.toBase58()}`, () =>
-      decodePoolGroupIdlAccount('policyChainRecord', acc.data, address.toBase58()),
-    )
-    if (isUnread(record)) return record
-    if (!record.group.equals(group))
-      return unknown(`the policy chain record ${address.toBase58()} belongs to another group`)
-    named.set(slot, record)
-  }
-
-  const sectionFor = (cls: 'connection' | 'rateLimit') => {
-    const source = ext.classSource[cls]
-    if (source.kind === 'inline') return undefined
-    if (source.kind === 'default') return gcp.policy
-    const record = named.get(source.slot)
-    if (!record || (record.classes & CLASS_BIT[cls]) === 0)
-      return unknown(`the policy record in slot ${source.slot} does not carry ${cls}`)
-    return record.sections
-  }
-  const connection = sectionFor('connection')
+  const connection = laneSectionsFor(state, 'connection')
   if (isUnread(connection)) return connection
-  const rateLimit = sectionFor('rateLimit')
-  if (isUnread(rateLimit)) return rateLimit
-
-  const policyPools = (connection?.connection.remotePools ?? []).map((p) =>
-    Buffer.from(p.address.address),
-  )
-  const pools = decodeAll([...lane.ownPools, ...policyPools], lane.decode)
-  if (isUnread(pools)) return pools
-  const poolDataFormat: PoolDataFormat = connection
-    ? 'long' in connection.connection.poolDataFormat
-      ? 'long'
-      : 'legacy'
-    : ext.poolDataFormat
-  const driven = laneKind === 'driven'
-  const drivenPaused = driven && gcp.drivenLanesPaused
+  const poolDataFormat = laneFormat(state)
+  if (isUnread(poolDataFormat)) return poolDataFormat
+  const uid = state.ext?.uid ?? null
+  const legacyOk = poolDataFormat !== 'long' && uid === null
+  const remotePools: SolanaRemoteLanePool[] = []
+  for (const [bytes, source, allow] of [
+    ...config.poolAddresses.map((p) => [Buffer.from(p.address), 'own', true] as const),
+    ...(connection?.connection.remotePools ?? []).map(
+      (p) => [Buffer.from(p.address.address), 'policy', p.allowLegacyPoolData] as const,
+    ),
+  ]) {
+    const address = decode(bytes, 'remote pool')
+    if (isUnread(address)) return address
+    remotePools.push({
+      address,
+      raw: `0x${bytes.toString('hex')}`,
+      source,
+      allowLegacyPoolData: legacyOk && allow,
+    })
+  }
+  let outbound = {}
+  if (readRateLimits) {
+    const bucket = laneOutboundRateLimiter(state)
+    if (isUnread(bucket)) return bucket
+    outbound = { outboundRateLimiterState: bucket }
+  }
+  const failsClosed = laneFailsClosed(state)
+  if (isUnread(failsClosed)) return failsClosed
   return {
-    laneKind,
+    laneKind: state.kind,
     poolDataFormat,
+    uid,
     back: {
-      remoteToken: lane.remoteToken,
-      remoteDecimals: lane.decimals,
-      remotePools: pools,
-      pausedOutbound: gcp.groupPaused || gcp.pausedOutbound || ext.pausedOutbound || drivenPaused,
-      pausedInbound: gcp.groupPaused || gcp.pausedInbound || ext.pausedInbound || drivenPaused,
-      ...(driven && { admitted: poolGroupChainAdmits(gcp, gcpAccount.data, ext.memberIndex) }),
-      ...(rateLimit
-        ? lane.readRateLimits && {
-            outboundUnknownReason:
-              "the lane's RATE_LIMIT comes from a policy record; its effective config is read in a later increment",
-          }
-        : lane.inlineOutbound()),
+      remoteToken,
+      remoteTokenRaw: `0x${tokenBytes.toString('hex')}`,
+      remoteTokenDecimals: config.decimals,
+      remoteDecimals: decimals,
+      remotePools,
+      ...lanePauses(state),
+      ...outbound,
+      ...(failsClosed !== undefined && { failsClosed }),
     },
   }
 }
@@ -397,6 +313,70 @@ async function solanaChainOf(remote: Chain) {
     : unknown(`the remote chain ${remote.network.name} is not a Solana chain`)
 }
 
+/** The lane facts from a trusted pool already read and checked. */
+async function readFromTrusted(
+  solana: SolanaChain,
+  query: SolanaRemoteLaneQuery,
+  mint: PublicKey,
+  trusted: PoolState,
+): Promise<SolanaRemoteLaneFacts> {
+  const routerCheck = await checkRouter(solana, trusted.state.router, query.router)
+  if (routerCheck) return routerCheck
+  const registry = await readRegistry(solana, trusted.state.router, mint)
+  if (isUnread(registry)) return registry
+  if (!registry.registryPool)
+    return {
+      status: 'known',
+      registryPool: null,
+      laneKind: 'none',
+      readsLongData: false,
+      ...(registry.interfaceVersion !== undefined && {
+        interfaceVersion: registry.interfaceVersion,
+      }),
+    }
+  const registryPool = registry.registryPool
+  let pool: PoolState | Unread = trusted
+  if (!registryPool.equals(trusted.address)) {
+    const account = await solana.connection.getAccountInfo(registryPool)
+    if (!account)
+      return missing(`the registry names pool ${registryPool.toBase58()}, which does not exist`)
+    pool = poolState(registryPool, account, `the registry pool ${registryPool.toBase58()}`)
+    if (isUnread(pool)) return pool
+  }
+  if (!pool.state.mint.equals(mint))
+    return unknown(`the registry pool ${registryPool.toBase58()} is another mint's pool State`)
+
+  const lane = await readLane(
+    solana,
+    pool.program,
+    mint,
+    pool.state.decimals,
+    query.remoteChainSelector,
+    !!query.readRateLimits,
+  )
+  if (isUnread(lane)) return lane
+  return {
+    status: 'known',
+    registryPool: registryPool.toBase58(),
+    poolProgram: pool.program.toBase58(),
+    interfaceVersion: registry.interfaceVersion,
+    ...lane,
+    readsLongData:
+      registry.interfaceVersion === 2 &&
+      (lane.laneKind === 'linked' || lane.laneKind === 'driven') &&
+      lane.poolDataFormat === 'long',
+  }
+}
+
+/** Reads and checks a trusted pool `State`. */
+async function readTrusted(solana: SolanaChain, value: string): Promise<PoolState | Unread> {
+  const address = parseKey(value, 'the trusted remote pool')
+  if (isUnread(address)) return address
+  const account = await solana.connection.getAccountInfo(address)
+  if (!account) return missing(`the trusted remote pool ${value} does not exist`)
+  return poolState(address, account, `the trusted remote pool ${value}`)
+}
+
 /**
  * Reads the Solana side of an EVM → Solana lane: the pool the Router's registry names for `mint`
  * (found through the first trusted pool's Router), and that pool's lane toward the EVM chain.
@@ -404,8 +384,9 @@ async function solanaChainOf(remote: Chain) {
  * @param remote - The Solana chain, from the guard's `getChain`.
  * @param query - The lane, from the EVM side.
  * @returns The facts; `'missing'` when the lane trusts no pool or the trusted pool does not exist,
- *   `'unknown'` when an account cannot be read as the program writes it, or when `remote` is not a
- *   Solana chain. A registry that names no pool is `'known'` with `registryPool: null`.
+ *   `'unknown'` when an account cannot be read as the program writes it, the trusted pool is not a
+ *   pool `State` at its PDA, its Router is not the CCIP Router, or `remote` is not a Solana chain.
+ *   A registry that names no pool is `'known'` with `registryPool: null`.
  * @throws the RPC's errors, unchanged (transport failures are never read as a fact)
  * @internal
  */
@@ -420,61 +401,9 @@ export async function readSolanaRemoteLaneFacts(
     return missing('the lane trusts no remote pool, so its remote registry cannot be found')
   const mint = parseKey(query.mint, 'the remote token')
   if (isUnread(mint)) return mint
-  const trusted = parseKey(first, 'the trusted remote pool')
+  const trusted = await readTrusted(solana, first)
   if (isUnread(trusted)) return trusted
-
-  const trustedAccount = await solana.connection.getAccountInfo(trusted)
-  if (!trustedAccount) return missing(`the trusted remote pool ${first} does not exist`)
-  const trustedState = tryDecode(`the trusted remote pool ${first}`, () =>
-    decodeTokenPoolStateConfig(trustedAccount.data),
-  )
-  if (isUnread(trustedState)) return trustedState
-
-  const registry = await readRegistry(solana, trustedState.router, mint)
-  if (isUnread(registry)) return registry
-  const none = { registryPool: null, laneKind: 'none' as const, readsLongData: false }
-  if (!registry.registryPool)
-    return {
-      status: 'known',
-      ...none,
-      ...(registry.interfaceVersion !== undefined && {
-        interfaceVersion: registry.interfaceVersion,
-      }),
-    }
-  const registryPool = registry.registryPool
-  const poolAccount = registryPool.equals(trusted)
-    ? trustedAccount
-    : await solana.connection.getAccountInfo(registryPool)
-  if (!poolAccount)
-    return missing(`the registry names pool ${registryPool.toBase58()}, which does not exist`)
-  const program = poolAccount.owner
-  const state = tryDecode(`the registry pool ${registryPool.toBase58()}`, () =>
-    decodeTokenPoolStateConfig(poolAccount.data),
-  )
-  if (isUnread(state)) return state
-  if (!state.mint.equals(mint) || !deriveTokenPoolConfigPda(program, mint).equals(registryPool))
-    return unknown(`the registry pool ${registryPool.toBase58()} is not the mint's pool State`)
-
-  const lane = await readLane(
-    solana,
-    program,
-    mint,
-    state.decimals,
-    query.remoteChainSelector,
-    !!query.readRateLimits,
-  )
-  if (isUnread(lane)) return lane
-  return {
-    status: 'known',
-    registryPool: registryPool.toBase58(),
-    poolProgram: program.toBase58(),
-    interfaceVersion: registry.interfaceVersion,
-    ...lane,
-    readsLongData:
-      registry.interfaceVersion === 2 &&
-      (lane.laneKind === 'linked' || lane.laneKind === 'driven') &&
-      lane.poolDataFormat === 'long',
-  }
+  return readFromTrusted(solana, query, mint, trusted)
 }
 
 /**
@@ -483,7 +412,8 @@ export async function readSolanaRemoteLaneFacts(
  *
  * @param remote - The Solana chain, from the guard's `getChain`.
  * @param params - `remoteChainSelector`: the EVM (local) chain selector, the Solana lane's remote
- *   chain; `poolAddress`: the trusted pool `State` PDA (base58).
+ *   chain; `poolAddress`: the trusted pool `State` PDA (base58); `router`: as in
+ *   {@link SolanaRemoteLaneQuery}.
  * @returns `isMultiTokenPool` (see {@link SolanaRemotePoolFacts}); `'missing'` when the pool does
  *   not exist, `'unknown'` when it cannot be read as the program writes it.
  * @throws the RPC's errors, unchanged
@@ -491,26 +421,21 @@ export async function readSolanaRemoteLaneFacts(
  */
 export async function readSolanaRemotePoolFacts(
   remote: Chain,
-  { remoteChainSelector, poolAddress }: { remoteChainSelector: bigint; poolAddress: string },
+  params: { remoteChainSelector: bigint; poolAddress: string; router?: string },
 ): Promise<SolanaRemotePoolFacts> {
   const solana = await solanaChainOf(remote)
   if (isUnread(solana)) return solana
-  const pool = parseKey(poolAddress, 'the remote pool')
+  const pool = await readTrusted(solana, params.poolAddress)
   if (isUnread(pool)) return pool
-  const account = await solana.connection.getAccountInfo(pool)
-  if (!account) return missing(`the remote pool ${poolAddress} does not exist`)
-  const state = tryDecode(`the remote pool ${poolAddress}`, () =>
-    decodeTokenPoolStateConfig(account.data),
+  const facts = await readFromTrusted(
+    solana,
+    { ...params, mint: pool.state.mint.toBase58(), trustedPools: [params.poolAddress] },
+    pool.state.mint,
+    pool,
   )
-  if (isUnread(state)) return state
-  const facts = await readSolanaRemoteLaneFacts(solana, {
-    remoteChainSelector,
-    mint: state.mint.toBase58(),
-    trustedPools: [poolAddress],
-  })
   if (facts.status !== 'known') return facts
   return {
     status: 'known',
-    isMultiTokenPool: facts.registryPool === poolAddress && facts.readsLongData,
+    isMultiTokenPool: facts.registryPool === pool.address.toBase58() && facts.readsLongData,
   }
 }

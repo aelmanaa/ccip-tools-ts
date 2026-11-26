@@ -53,7 +53,7 @@ describe('readSolanaRemoteLaneFacts on Devnet pool groups', { skip, timeout: 120
       trustedPools: [stateOf(LINKED_MINT)],
       readRateLimits: true,
     })
-    assert.equal(facts.status, 'known', JSON.stringify(facts))
+    assert.equal(facts.status, 'known', 'reason' in facts ? facts.reason : '')
     assert.equal(facts.registryPool, stateOf(LINKED_MINT))
     assert.equal(facts.poolProgram, PROGRAM.toBase58())
     assert.equal(facts.laneKind, 'linked')
@@ -63,11 +63,16 @@ describe('readSolanaRemoteLaneFacts on Devnet pool groups', { skip, timeout: 120
     assert.ok(facts.back)
     assert.match(facts.back.remoteToken, EVM_ADDRESS)
     assert.ok(facts.back.remotePools.length > 0)
-    for (const pool of facts.back.remotePools) assert.match(pool, EVM_ADDRESS)
+    for (const pool of facts.back.remotePools) {
+      assert.match(pool.address, EVM_ADDRESS)
+      assert.match(pool.raw, /^0x([0-9a-f]{40}|[0-9a-f]{64})$/)
+    }
+    assert.match(facts.back.remoteTokenRaw, /^0x[0-9a-f]+$/)
     assert.equal(typeof facts.back.remoteDecimals, 'number')
-    // RATE_LIMIT comes from the group's record: the outbound bucket is not claimed
-    assert.equal(facts.back.outboundRateLimiterState, undefined)
-    assert.match(facts.back.outboundUnknownReason ?? '', /policy record/)
+    assert.equal(typeof facts.back.remoteTokenDecimals, 'number')
+    assert.equal(facts.back.failsClosed, undefined)
+    // RATE_LIMIT comes from the group's record: the bucket under the record's config
+    assert.ok('outboundRateLimiterState' in facts.back)
   })
 
   it("reads a marked lane's own long format; long data needs interface 2", async () => {
@@ -77,7 +82,7 @@ describe('readSolanaRemoteLaneFacts on Devnet pool groups', { skip, timeout: 120
       trustedPools: [stateOf(OWN_LONG_MINT)],
       readRateLimits: true,
     })
-    assert.equal(facts.status, 'known', JSON.stringify(facts))
+    assert.equal(facts.status, 'known', 'reason' in facts ? facts.reason : '')
     assert.equal(facts.laneKind, 'linked')
     assert.equal(facts.poolDataFormat, 'long')
     assert.equal(facts.readsLongData, facts.interfaceVersion === 2)
@@ -133,6 +138,8 @@ describe('readSolanaRemoteLaneFacts on Devnet pool groups', { skip, timeout: 120
       assert.equal(kind === 'driven', !!lane.ext?.groupDriven, pubkey.toBase58())
     }
     assert.ok(kinds.has('linked'))
+    // Devnet has no driven lane since the 2f run closed them; S5 creates one through the SDK
+    if (process.env.EXPECT_DRIVEN_LANES) assert.ok(kinds.has('driven'), 'no driven lane on Devnet')
     for (const { pubkey, account } of await byDiscriminator(
       BorshAccountsCoder.accountDiscriminator('GroupChainPolicy'),
     ))

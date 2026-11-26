@@ -18,16 +18,21 @@ const PROBES = {
 type Feature = keyof typeof PROBES
 
 /** A chain whose program answers each probe with `answers[feature]` (a custom code or an error). */
-function chainAnswering(answers: Partial<Record<Feature, unknown>>, slot = { value: 7n }) {
+function chainAnswering(
+  answers: Partial<Record<Feature, unknown>>,
+  slot = { value: 7n },
+  opts: { transportError?: Error; variant?: number } = {},
+) {
   const calls: Feature[] = []
   const connection = {
     getAccountInfo: async () => {
       const data = Buffer.alloc(45)
-      data.writeUInt32LE(3, 0)
+      data.writeUInt32LE(opts.variant ?? 3, 0)
       data.writeBigUInt64LE(slot.value, 4)
       return { data, owner: Keypair.generate().publicKey, lamports: 1, executable: false }
     },
     simulateTransaction: async (tx: VersionedTransaction) => {
+      if (opts.transportError) throw opts.transportError
       const ixs = tx.message.compiledInstructions
       const data = Buffer.from(ixs[ixs.length - 1]!.data)
       const feature = (Object.keys(PROBES) as Feature[]).find((f) =>
@@ -102,5 +107,27 @@ describe('getPoolGroupProgramFeatures', () => {
     slot.value = 8n // an upgrade in place
     await getPoolGroupProgramFeatures(chain, program)
     assert.equal(calls.length, 8)
+  })
+
+  it('rethrows transport errors instead of reading them as an answer', async () => {
+    const { chain } = chainAnswering({}, undefined, {
+      transportError: new Error('fetch failed: 503'),
+    })
+    await assert.rejects(
+      getPoolGroupProgramFeatures(chain, Keypair.generate().publicKey),
+      (err) => {
+        assert.ok(!(err instanceof CCTOperationUnsupportedError))
+        assert.match(String(err), /503/)
+        return true
+      },
+    )
+  })
+
+  it('fails closed on program data that is not ProgramData', async () => {
+    const { chain } = chainAnswering({}, undefined, { variant: 2 })
+    await assert.rejects(
+      getPoolGroupProgramFeatures(chain, Keypair.generate().publicKey),
+      CCTOperationUnsupportedError,
+    )
   })
 })
