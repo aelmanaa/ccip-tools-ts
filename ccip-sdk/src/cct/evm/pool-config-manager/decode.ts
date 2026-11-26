@@ -33,7 +33,8 @@ import type {
   SecurityPolicyRecord,
 } from './records.ts'
 type AbiBucket = { isEnabled: boolean; capacity: bigint; rate: bigint }
-type AbiRateLimits = {
+/** An ABI four-bucket rate limit config. @internal */
+export type AbiRateLimits = {
   outbound: AbiBucket
   inbound: AbiBucket
   fastFinalityOutbound: AbiBucket
@@ -152,15 +153,6 @@ export function decodeTokenPolicies(c: {
   }
 }
 
-/** An ABI rate limit bucket. */
-type AbiRateLimitBucket = { isEnabled: boolean; capacity: bigint; rate: bigint }
-/** An ABI four-bucket rate limit config. */
-type AbiRateLimitConfig = {
-  outbound: AbiRateLimitBucket
-  inbound: AbiRateLimitBucket
-  fastFinalityOutbound: AbiRateLimitBucket
-  fastFinalityInbound: AbiRateLimitBucket
-}
 type AbiInlineKey = { localToken: string; remoteChainSelector: bigint }
 type AbiPolicyKey = { policyName: string; remoteChainSelector: bigint }
 
@@ -175,9 +167,7 @@ export const INLINE_RECORD_DECODERS = {
     return { ...key, remoteToken: decodeRemoteAddress(c.remoteToken, key.remoteChainSelector) }
   },
   remotePool: decodeInlineRemotePoolConfig,
-  rateLimit: (
-    c: AbiInlineKey & { rateLimitConfig: AbiRateLimitConfig },
-  ): InlineRateLimitConfig => ({
+  rateLimit: (c: AbiInlineKey & { rateLimitConfig: AbiRateLimits }): InlineRateLimitConfig => ({
     ...decodeInlineKey(c),
     rateLimits: decodeRateLimits(c.rateLimitConfig),
   }),
@@ -222,7 +212,7 @@ export const POLICY_RECORD_DECODERS = {
     }
   },
   rateLimit: (
-    r: AbiPolicyKey & { localDecimals: bigint | number; rateLimitConfig: AbiRateLimitConfig },
+    r: AbiPolicyKey & { localDecimals: bigint | number; rateLimitConfig: AbiRateLimits },
   ): RateLimitPolicyRecord => ({
     ...decodePolicyRecordKey(r),
     localDecimals: Number(r.localDecimals),

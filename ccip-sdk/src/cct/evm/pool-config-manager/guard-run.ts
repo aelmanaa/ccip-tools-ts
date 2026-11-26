@@ -13,11 +13,7 @@ import { getAddress, keccak256, toBeHex } from 'ethers'
 
 import type { ChainGetter } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
-import {
-  LANE_RECORD_TYPES,
-  decodeLaneConnection,
-  nullableAddress,
-} from '../../../evm/multi-token-pool.ts'
+import { decodeLaneConnection } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
@@ -41,14 +37,13 @@ import {
 } from '../multi-token-pool/contracts.ts'
 import { simulateEVMTx } from '../simulate.ts'
 import { toTokenTransferFeeConfig } from '../token-pool/contracts.ts'
-import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
 import { type DecodedMultiTokenPoolWrite, decodeMultiTokenPoolWrite } from './calldata.ts'
 import {
   type MultiTokenPoolLaneKey,
-  decodeEnum,
   readPoolConfigManagerStaticConfig,
   toAbiLaneKey,
 } from './contracts.ts'
+import { type AbiRateLimits, decodeRateLimits } from './decode.ts'
 import { readMultiTokenPoolGuardFacts } from './guard-facts.ts'
 import {
   type MultiTokenPoolGuardFacts,
@@ -62,7 +57,8 @@ import {
   multiTokenPoolLaneTransitions,
   requiredMultiTokenPoolGuardFacts,
 } from './guards.ts'
-import { RECORD_LEVELS } from './operations/get-multi-token-pool-lane-record-levels.ts'
+import { decodeLaneRecordLevels } from './operations/get-multi-token-pool-lane-record-levels.ts'
+import { decodeLaneVerification } from './operations/get-multi-token-pool-lane-verifications.ts'
 import {
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
@@ -484,40 +480,25 @@ async function crossCheckWithSimulateV1(
     const conn = decodeLaneConnection(resultToObject(connRaw[i]), (b) =>
       decodeRemoteAddress(b, lane.remoteChainSelector),
     )
-    const levels = Object.fromEntries(
-      LANE_RECORD_TYPES.map((type, t) => [
-        type,
-        decodeEnum(
-          RECORD_LEVELS,
-          (levelsRaw[t] as bigint[])[i] ?? NaN,
-          `${type} record level`,
-          poolConfigManager,
-        ),
-      ]),
+    const levels = decodeLaneRecordLevels(
+      levelsRaw as unknown as readonly (readonly bigint[])[],
+      i,
+      poolConfigManager,
     )
-    const b = resultToObject(bucketsRaw[i]) as Record<
-      'outbound' | 'inbound' | 'fastFinalityOutbound' | 'fastFinalityInbound',
-      { isEnabled: boolean; capacity: bigint; rate: bigint }
-    >
     const simulated = {
       levels,
       // the store zeroes the buckets of a lane without a connection or a rate limit record
       rateLimits:
         conn.hasConnection && levels.rateLimit !== 'none'
-          ? {
-              outbound: fromAbiRateLimitConfig(b.outbound),
-              inbound: fromAbiRateLimitConfig(b.inbound),
-              fastFinalityOutbound: fromAbiRateLimitConfig(b.fastFinalityOutbound),
-              fastFinalityInbound: fromAbiRateLimitConfig(b.fastFinalityInbound),
-            }
+          ? decodeRateLimits(resultToObject(bucketsRaw[i]) as AbiRateLimits)
           : null,
       connection: { ...conn, remotePools: byAddress(conn.remotePools) },
       tokenTransferFeeConfig: toTokenTransferFeeConfig(resultToObject(feeRaw[i])),
-      verification: {
-        hook: nullableAddress(String(hooks[i])),
-        outboundCCVs: [...(outbound[i] as string[])].map((a) => getAddress(a)),
-        inboundCCVs: [...(inbound[i] as string[])].map((a) => getAddress(a)),
-      },
+      verification: decodeLaneVerification(
+        String(hooks[i]),
+        resultToObject(outbound[i]) as string[],
+        resultToObject(inbound[i]) as string[],
+      ),
     }
     const projected = {
       levels: lane.levels,
