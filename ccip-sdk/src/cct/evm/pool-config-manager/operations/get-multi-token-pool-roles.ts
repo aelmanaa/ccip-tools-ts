@@ -14,7 +14,7 @@ import {
   poolConfigManagerRoleId,
 } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
-import { validateAddress, validateArray } from '../../validate.ts'
+import { validateAddressArray } from '../../validate.ts'
 import {
   type PoolConfigManagerTarget,
   resolvePoolConfigManagerTarget,
@@ -48,9 +48,7 @@ export class GetMultiTokenPoolRoles extends EVMQuery<
 
   protected prepare(params: GetMultiTokenPoolRolesParams): GetMultiTokenPoolRolesParams {
     validatePoolConfigManagerTarget(this.name, params)
-    validateArray(this.name, 'accounts', params.accounts, 1)
-    // visit sparse holes too, so a hole fails here rather than as an RPC error
-    Array.from(params.accounts, (a, i) => validateAddress(this.name, `accounts[${i}]`, a))
+    validateAddressArray(this.name, 'accounts', params.accounts, 1)
     return params
   }
 

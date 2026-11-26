@@ -5,21 +5,41 @@
  * @packageDocumentation
  */
 
-import { type Interface, type LogDescription, getAddress, hexlify, isBytesLike } from 'ethers'
+import {
+  type Interface,
+  type LogDescription,
+  ZeroHash,
+  decodeBytes32String,
+  encodeBytes32String,
+  getAddress,
+  hexlify,
+  isBytesLike,
+  isHexString,
+} from 'ethers'
 
 import type { EVMChain } from '../../../evm/index.ts'
 import { resultToObject } from '../../../evm/types.ts'
-import { CCTParamsInvalidError } from '../../errors.ts'
+import { type FinalityAllowed, decodeFinalityAllowed } from '../../../extra-args.ts'
+import { CCTDataDecodeError, CCTParamsInvalidError } from '../../errors.ts'
 import {
+  type LockOrBurnFlavor,
   type MultiTokenPoolVersion,
+  LOCK_OR_BURN_FLAVORS,
   POOL_CONFIG_MANAGER_TYPE,
   findDeploymentBlock,
   multiTokenPoolContract,
+  nullableAddress,
   poolConfigManagerContract,
   resolveMultiTokenPool,
   resolveMultiTokenPoolContract,
 } from '../multi-token-pool/contracts.ts'
-import { validateNonZeroAddress, validateUint32 } from '../validate.ts'
+import {
+  validateAddress,
+  validateArray,
+  validateNonZeroAddress,
+  validateUint32,
+  validateUint64,
+} from '../validate.ts'
 
 /**
  * The PCM an op writes or reads: the PCM itself, or a multi-token pool whose
@@ -93,37 +113,49 @@ export async function resolvePoolConfigManagerTarget(
   return { address, version }
 }
 
-/** Default page size for `getAllConfiguredTokens`. */
-const CONFIGURED_TOKENS_PAGE = 200
+/** Default page size of the paged PCM views (`getAllConfiguredTokens`, `getSubsetTokens`). */
+export const PAGE_SIZE = 200
 
 /**
- * Every token the PCM registers, paging `getAllConfiguredTokens` at one block: deregistration
- * reorders the set, so pages read at different blocks can skip or repeat tokens.
- * @param chain - Chain to read on.
- * @param address - The PCM.
- * @param version - Its version.
- * @param opts - `blockTag` (defaults to the latest block) and `pageSize`.
- * @returns The tokens (checksummed) and the block they were read at.
+ * Reads every page of a paged view at one block, until a page comes back short: the paged sets are
+ * swap-removed, so pages read at different blocks can skip or repeat items.
+ * @param fetch - Reads one page: `start` offset, `count` items, at `blockTag`.
+ * @internal
+ */
+export async function readPagesAtBlock<T>(
+  chain: EVMChain,
+  fetch: (start: bigint, count: bigint, blockTag: number) => Promise<T[]>,
+  { blockTag, pageSize = PAGE_SIZE }: { blockTag?: number; pageSize?: number } = {},
+): Promise<{ items: T[]; blockNumber: number }> {
+  const blockNumber = blockTag ?? (await chain.provider.getBlockNumber())
+  const items: T[] = []
+  for (;;) {
+    const page = await fetch(BigInt(items.length), BigInt(pageSize), blockNumber)
+    items.push(...page)
+    if (page.length < pageSize) return { items, blockNumber }
+  }
+}
+
+/**
+ * Every token the PCM registers, every page at one block.
  * @internal
  */
 export async function readConfiguredTokens(
   chain: EVMChain,
   address: string,
   version: MultiTokenPoolVersion,
-  { blockTag, pageSize = CONFIGURED_TOKENS_PAGE }: { blockTag?: number; pageSize?: number } = {},
+  opts: { blockTag?: number; pageSize?: number } = {},
 ): Promise<{ tokens: string[]; blockNumber: number }> {
-  const blockNumber = blockTag ?? (await chain.provider.getBlockNumber())
   const pcm = poolConfigManagerContract(chain, address, version)
-  const tokens: string[] = []
-  for (;;) {
-    const page = resultToObject(
-      await pcm.getAllConfiguredTokens(BigInt(tokens.length), BigInt(pageSize), {
-        blockTag: blockNumber,
-      }),
-    ).map((t: string) => getAddress(t))
-    tokens.push(...page)
-    if (page.length < pageSize) return { tokens, blockNumber }
-  }
+  const { items, blockNumber } = await readPagesAtBlock(
+    chain,
+    async (start, count, blockTag) =>
+      (await pcm.getAllConfiguredTokens(start, count, { blockTag })).map((t) =>
+        getAddress(resultToObject(t)),
+      ),
+    opts,
+  )
+  return { tokens: items, blockNumber }
 }
 
 /**
@@ -233,5 +265,207 @@ export async function scanLogs(
     logs,
     scanned: { fromBlock, toBlock },
     complete: deployed !== undefined && fromBlock <= deployed,
+  }
+}
+
+/**
+ * A policy name: 1 to 31 printable ASCII bytes, encoded as left-aligned, NUL-padded `bytes32` (not
+ * keccak), as the dcf operator scripts encode it; or a raw `bytes32` written as `0x` plus 64 hex
+ * digits, so a name another tool wrote (including a full 32-byte one) can be addressed. Reads return
+ * a NUL-terminated printable name as text and anything else as raw hex, and either form can be
+ * passed back.
+ */
+export type PolicyName = string
+
+const PRINTABLE = /^[\x20-\x7e]+$/
+
+/**
+ * Encodes a {@link PolicyName} to its `bytes32`.
+ * @throws {@link CCTParamsInvalidError} if the name is empty, longer than 32 bytes, not printable
+ * ASCII, or the zero `bytes32` (which means "no policy")
+ * @internal
+ */
+export function encodePolicyName(operation: string, param: string, name: unknown): string {
+  if (typeof name !== 'string' || !name.length)
+    throw new CCTParamsInvalidError(operation, param, 'must be a non-empty policy name')
+  if (name.length === 66 && isHexString(name, 32)) {
+    if (name.toLowerCase() === ZeroHash)
+      throw new CCTParamsInvalidError(
+        operation,
+        param,
+        'the zero bytes32 means "no policy"; pass null to clear an assignment',
+      )
+    return name.toLowerCase()
+  }
+  if (!PRINTABLE.test(name) || name.length > 31)
+    throw new CCTParamsInvalidError(
+      operation,
+      param,
+      'must be 1 to 31 printable ASCII characters, or a raw bytes32 as 0x plus 64 hex digits (write a full 32-byte name as hex)',
+    )
+  return encodeBytes32String(name)
+}
+
+/**
+ * Decodes a stored policy `bytes32`: `null` for the zero value (no policy), text for a printable
+ * left-aligned name, else the raw hex.
+ * @internal
+ */
+export function decodePolicyName(value: string): PolicyName | null {
+  if (value.toLowerCase() === ZeroHash) return null
+  try {
+    const text = decodeBytes32String(value)
+    // round-trips only when the name is the whole word (no bytes after the first NUL)
+    if (PRINTABLE.test(text) && encodeBytes32String(text) === value.toLowerCase()) return text
+  } catch {
+    // not NUL-terminated UTF-8: a raw id
+  }
+  return value.toLowerCase()
+}
+
+/** One token lane: a local token and a remote chain. The PCM's `LaneKey`. */
+export type MultiTokenPoolLaneKey = {
+  /** Local token. */
+  tokenAddress: string
+  /** CCIP selector of the remote chain. */
+  remoteChainSelector: bigint
+}
+
+/** Lanes per PCM batch view call. */
+export const LANE_BATCH_SIZE = 100
+
+/**
+ * Validates a non-empty list of {@link MultiTokenPoolLaneKey}s.
+ * @throws {@link CCTParamsInvalidError} naming the first invalid entry
+ * @internal
+ */
+export function validateLaneKeys(operation: string, param: string, lanes: unknown): void {
+  validateArray(operation, param, lanes, 1)
+  Array.from(lanes, (lane, i) => {
+    const { tokenAddress, remoteChainSelector } = (lane ?? {}) as Record<string, unknown>
+    validateAddress(operation, `${param}[${i}].tokenAddress`, tokenAddress)
+    validateUint64(operation, `${param}[${i}].remoteChainSelector`, remoteChainSelector)
+  })
+}
+
+/** A lane key in the PCM's `LaneKey` ABI shape. */
+export function toAbiLaneKey({ tokenAddress, remoteChainSelector }: MultiTokenPoolLaneKey) {
+  return { localToken: tokenAddress, remoteChainSelector }
+}
+
+/**
+ * Runs a PCM batch view over `lanes` in chunks of {@link LANE_BATCH_SIZE}, in parallel, and joins
+ * the per-lane results in input order.
+ * @internal
+ */
+export function readLaneBatches<R>(
+  lanes: readonly MultiTokenPoolLaneKey[],
+  read: (chunk: MultiTokenPoolLaneKey[]) => Promise<R[]>,
+): Promise<R[]> {
+  return readInBatches(lanes, read, { batchSize: LANE_BATCH_SIZE })
+}
+
+/** The TokenAdminRegistry and the three stores a PCM was deployed with. */
+export type PoolConfigManagerStaticConfig = {
+  /** The TokenAdminRegistry the PCM checks token admins against. */
+  tokenAdminRegistry: string
+  /** Store of connection and remote-pool policies. */
+  connectionPolicyStore: string
+  /** Store of fee and destination-overhead policies. */
+  feePolicyStore: string
+  /** Store of rate-limit and security policies. */
+  securityPolicyStore: string
+}
+
+/**
+ * Reads a PCM's `getStaticConfig()`.
+ * @internal
+ */
+export async function readPoolConfigManagerStaticConfig(
+  chain: EVMChain,
+  address: string,
+  version: MultiTokenPoolVersion,
+): Promise<PoolConfigManagerStaticConfig> {
+  // positional: abitype types the four outputs as a tuple; the runtime Result also has names
+  const [tokenAdminRegistry, connectionPolicyStore, feePolicyStore, securityPolicyStore] = (
+    await poolConfigManagerContract(chain, address, version).getStaticConfig()
+  ).map((a) => getAddress(resultToObject(a)))
+  return {
+    tokenAdminRegistry: tokenAdminRegistry!,
+    connectionPolicyStore: connectionPolicyStore!,
+    feePolicyStore: feePolicyStore!,
+    securityPolicyStore: securityPolicyStore!,
+  }
+}
+
+/** The PCM handle the batch and policy readers get. @internal */
+export type PoolConfigManagerReader = ReturnType<typeof poolConfigManagerContract>
+
+/**
+ * Decodes an on-chain enum value through its SDK tuple (index = on-chain value).
+ * @throws {@link CCTDataDecodeError} if the value is out of range (a contract this SDK does not know)
+ * @internal
+ */
+export function decodeEnum<const T extends readonly string[]>(
+  table: T,
+  value: bigint | number,
+  what: string,
+  address: string,
+): T[number] {
+  const decoded = table[Number(value)]
+  if (decoded === undefined)
+    throw new CCTDataDecodeError(address, {
+      context: { reason: `${what} ${String(value)} is not one of ${table.join(', ')}` },
+    })
+  return decoded
+}
+
+/** A token's profile fields, as the PCM and its connection store keep them. */
+export type MultiTokenPoolTokenProfileFields = {
+  /** The token. */
+  tokenAddress: string
+  /** Whether the token is registered now; a deregistered profile keeps its last values. */
+  isRegistered: boolean
+  /** Decimals the pool uses for amounts and remote pool data; immutable while registered. */
+  localDecimals: number
+  /** How the pool takes tokens on send. */
+  lockOrBurnFlavor: LockOrBurnFlavor
+  /** Faster-than-finality the token allows, on every chain. */
+  allowedFinality: FinalityAllowed
+  /** Burn sink (`'burn-to-address'`) or lockbox (`'lock'`); `null` for the other flavors. */
+  lockOrBurnAddress: string | null
+  /** Additional pool data provider (e.g. a factory UID provider), or `null`. */
+  additionalPoolDataProvider: string | null
+}
+
+/**
+ * Decodes the profile fields a `TokenConfig` and a `TokenProfile` share.
+ * @internal
+ */
+export function decodeTokenProfile(
+  tokenAddress: string,
+  raw: {
+    isRegistered: boolean
+    localDecimals: bigint | number
+    lockOrBurnFlavor: bigint | number
+    allowedFinalityConfig: string
+    lockOrBurnAddress: string
+    additionalPoolDataProvider: string
+  },
+  source: string,
+): MultiTokenPoolTokenProfileFields {
+  return {
+    tokenAddress,
+    isRegistered: raw.isRegistered,
+    localDecimals: Number(raw.localDecimals),
+    lockOrBurnFlavor: decodeEnum(
+      LOCK_OR_BURN_FLAVORS,
+      raw.lockOrBurnFlavor,
+      'lockOrBurnFlavor',
+      source,
+    ),
+    allowedFinality: decodeFinalityAllowed(raw.allowedFinalityConfig),
+    lockOrBurnAddress: nullableAddress(raw.lockOrBurnAddress),
+    additionalPoolDataProvider: nullableAddress(raw.additionalPoolDataProvider),
   }
 }

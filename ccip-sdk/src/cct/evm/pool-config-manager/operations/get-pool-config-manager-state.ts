@@ -15,6 +15,7 @@ import {
 import { EVMQuery } from '../../query.ts'
 import {
   type PoolConfigManagerTarget,
+  readPoolConfigManagerStaticConfig,
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from '../contracts.ts'
@@ -84,27 +85,21 @@ export class GetPoolConfigManagerState extends EVMQuery<
     const [[, , typeAndVersion], staticConfig, admin, pending, delay, pendingDelay, wait] =
       await Promise.all([
         chain.typeAndVersion(address),
-        pcm.getStaticConfig(),
+        readPoolConfigManagerStaticConfig(chain, address, version),
         pcm.defaultAdmin(),
         pcm.pendingDefaultAdmin(),
         pcm.defaultAdminDelay(),
         pcm.pendingDefaultAdminDelay(),
         pcm.defaultAdminDelayIncreaseWait(),
       ])
-    // positional: `getStaticConfig` and the two pending getters return several outputs each
-    const [tokenAdminRegistry, connectionStore, feeStore, securityStore] = staticConfig.map((a) =>
-      getAddress(resultToObject(a)),
-    )
+    // positional: the two pending getters return two outputs each
     const [newAdmin, adminSchedule] = pending
     const [newDelay, delaySchedule] = pendingDelay
     return {
       poolConfigManager: getAddress(address),
       version,
       typeAndVersion,
-      tokenAdminRegistry: tokenAdminRegistry!,
-      connectionPolicyStore: connectionStore!,
-      feePolicyStore: feeStore!,
-      securityPolicyStore: securityStore!,
+      ...staticConfig,
       defaultAdmin: getAddress(resultToObject(admin)),
       // OpenZeppelin AccessControlDefaultAdminRules: schedule 0 means nothing is pending
       pendingDefaultAdmin: BigInt(adminSchedule)

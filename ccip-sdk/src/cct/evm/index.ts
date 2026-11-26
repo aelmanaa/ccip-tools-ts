@@ -77,13 +77,39 @@ import {
 } from './policy-store/operations/index.ts'
 import type { PoolConfigManagerTarget } from './pool-config-manager/contracts.ts'
 import {
+  type GetMultiTokenPoolChainPausesParams,
+  type GetMultiTokenPoolChainPausesResult,
+  type GetMultiTokenPoolConfiguredTokensParams,
+  type GetMultiTokenPoolConfiguredTokensResult,
+  type GetMultiTokenPoolLaneBatchParams,
+  type GetMultiTokenPoolLaneConnectionsResult,
+  type GetMultiTokenPoolLaneFeesParams,
+  type GetMultiTokenPoolLaneFeesResult,
+  type GetMultiTokenPoolLaneRateLimiterStatesResult,
+  type GetMultiTokenPoolLaneRecordLevelsResult,
+  type GetMultiTokenPoolLaneTokenTransferFeeConfigsResult,
+  type GetMultiTokenPoolLaneVerificationsResult,
   type GetMultiTokenPoolRoleHoldersParams,
   type GetMultiTokenPoolRoleHoldersResult,
   type GetMultiTokenPoolRolesParams,
   type GetMultiTokenPoolRolesResult,
+  type GetMultiTokenPoolTokenConfigsParams,
+  type GetMultiTokenPoolTokenProfilesParams,
+  type GetMultiTokenPoolTokenProfilesResult,
   type GetPoolConfigManagerStateResult,
+  type MultiTokenPoolTokenConfig,
+  GetMultiTokenPoolChainPauses,
+  GetMultiTokenPoolConfiguredTokens,
+  GetMultiTokenPoolLaneConnections,
+  GetMultiTokenPoolLaneFees,
+  GetMultiTokenPoolLaneRateLimiterStates,
+  GetMultiTokenPoolLaneRecordLevels,
+  GetMultiTokenPoolLaneTokenTransferFeeConfigs,
+  GetMultiTokenPoolLaneVerifications,
   GetMultiTokenPoolRoleHolders,
   GetMultiTokenPoolRoles,
+  GetMultiTokenPoolTokenConfigs,
+  GetMultiTokenPoolTokenProfiles,
   GetPoolConfigManagerState,
 } from './pool-config-manager/operations/index.ts'
 import {
@@ -397,6 +423,17 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   readonly #getMultiTokenPoolRoles = new GetMultiTokenPoolRoles()
   readonly #getMultiTokenPoolRoleHolders = new GetMultiTokenPoolRoleHolders()
   readonly #getPolicyStoreState = new GetPolicyStoreState()
+  readonly #getMultiTokenPoolChainPauses = new GetMultiTokenPoolChainPauses()
+  readonly #getMultiTokenPoolTokenConfigs = new GetMultiTokenPoolTokenConfigs()
+  readonly #getMultiTokenPoolConfiguredTokens = new GetMultiTokenPoolConfiguredTokens()
+  readonly #getMultiTokenPoolTokenProfiles = new GetMultiTokenPoolTokenProfiles()
+  readonly #getMultiTokenPoolLaneConnections = new GetMultiTokenPoolLaneConnections()
+  readonly #getMultiTokenPoolLaneRecordLevels = new GetMultiTokenPoolLaneRecordLevels()
+  readonly #getMultiTokenPoolLaneFees = new GetMultiTokenPoolLaneFees()
+  readonly #getMultiTokenPoolLaneTokenTransferFeeConfigs =
+    new GetMultiTokenPoolLaneTokenTransferFeeConfigs()
+  readonly #getMultiTokenPoolLaneRateLimiterStates = new GetMultiTokenPoolLaneRateLimiterStates()
+  readonly #getMultiTokenPoolLaneVerifications = new GetMultiTokenPoolLaneVerifications()
 
   /** Wraps an {@link EVMChain}; prefer the static factory methods. */
   constructor(chain: EVMChain) {
@@ -4888,6 +4925,216 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   getPolicyStoreState(opts: GetPolicyStoreStateParams): Promise<GetPolicyStoreStateResult> {
     return this.#getPolicyStoreState.query(this.chain, opts)
   }
+
+  /**
+   * Lists the global and chain pauses, from `ChainPauseSet` logs of the connection store, each confirmed with a lane read.
+   * @remarks A chain pause set on a chain with no record anywhere is visible only this way. Without `fromBlock` the store deployment block is found from historical code (archive RPC).
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), or `fromBlock` is
+   * omitted and the RPC cannot find the connection store's deployment block (pass `fromBlock`)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const { global, chains, complete } = await cct.getMultiTokenPoolChainPauses({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   fromBlock: 12_188_166, // the stack's deployment block, for a non-archive RPC
+   * })
+   * const paused = chains.filter((c) => c.outbound || c.inbound)
+   * if (!complete) console.warn('scan did not reach the deployment block: older pauses may be missing')
+   * ```
+   */
+  getMultiTokenPoolChainPauses(
+    opts: GetMultiTokenPoolChainPausesParams,
+  ): Promise<GetMultiTokenPoolChainPausesResult> {
+    return this.#getMultiTokenPoolChainPauses.query(this.chain, opts)
+  }
+
+  /**
+   * Reads token configs in one `getTokenConfigBatch` call; an unregistered token reads `isRegistered: false`.
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if the contract returns data this SDK cannot decode (a
+   * result count that does not match the lanes, an enum value or remote address out of range)
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolTokenConfigs({ poolAddress: '0xMultiTokenPool...', tokenAddresses: ['0xToken...'] })
+   * ```
+   */
+  getMultiTokenPoolTokenConfigs(
+    opts: GetMultiTokenPoolTokenConfigsParams,
+  ): Promise<MultiTokenPoolTokenConfig[]> {
+    return this.#getMultiTokenPoolTokenConfigs.query(this.chain, opts)
+  }
+
+  /**
+   * Reads every registered token, every page at one pinned block.
+   * @remarks Deregistration swap-removes, which reorders pages between blocks.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolConfiguredTokens({ poolAddress: '0xMultiTokenPool...' })
+   * ```
+   */
+  getMultiTokenPoolConfiguredTokens(
+    opts: GetMultiTokenPoolConfiguredTokensParams,
+  ): Promise<GetMultiTokenPoolConfiguredTokensResult> {
+    return this.#getMultiTokenPoolConfiguredTokens.query(this.chain, opts)
+  }
+
+  /**
+   * Reads token profiles from the connection store, with pause flags and deregistered profiles.
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if the contract returns data this SDK cannot decode (a
+   * result count that does not match the lanes, an enum value or remote address out of range)
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolTokenProfiles({ poolAddress: '0xMultiTokenPool...', tokenAddresses: ['0xToken...'] })
+   * ```
+   */
+  getMultiTokenPoolTokenProfiles(
+    opts: GetMultiTokenPoolTokenProfilesParams,
+  ): Promise<GetMultiTokenPoolTokenProfilesResult> {
+    return this.#getMultiTokenPoolTokenProfiles.query(this.chain, opts)
+  }
+
+  /**
+   * Reads `getLaneConnectionBatch`: connection, pauses, pool data format, remote token and trusted remote pools per lane.
+   * @remarks Chunked by 100 lanes. Remote addresses come back in the remote chain's canonical format, or `0x` hex for a family this bundle cannot decode.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if the contract returns data this SDK cannot decode (a
+   * result count that does not match the lanes, an enum value or remote address out of range)
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolLaneConnections({ poolAddress: '0xMultiTokenPool...', lanes: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n }] })
+   * ```
+   */
+  getMultiTokenPoolLaneConnections(
+    opts: GetMultiTokenPoolLaneBatchParams,
+  ): Promise<GetMultiTokenPoolLaneConnectionsResult> {
+    return this.#getMultiTokenPoolLaneConnections.query(this.chain, opts)
+  }
+
+  /**
+   * Reads `getLaneRecordLevelBatch`: where each record type resolves from; works before a lane exists.
+   * @remarks Chunked by 100 lanes.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if the contract returns data this SDK cannot decode (a
+   * result count that does not match the lanes, an enum value or remote address out of range)
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolLaneRecordLevels({ poolAddress: '0xMultiTokenPool...', lanes: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n }] })
+   * ```
+   */
+  getMultiTokenPoolLaneRecordLevels(
+    opts: GetMultiTokenPoolLaneBatchParams,
+  ): Promise<GetMultiTokenPoolLaneRecordLevelsResult> {
+    return this.#getMultiTokenPoolLaneRecordLevels.query(this.chain, opts)
+  }
+
+  /**
+   * Reads `getFeeBatch` for one finality, marking lanes whose finality is not allowed instead of failing the batch.
+   * @remarks Chunked by 100 lanes; a batch that reverts on finality is re-read per lane.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if the contract returns data this SDK cannot decode (a
+   * result count that does not match the lanes, an enum value or remote address out of range)
+   * @example
+   * ```typescript
+   * const fees = await cct.getMultiTokenPoolLaneFees({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   lanes: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n }],
+   *   finality: 5, // faster-than-finality: 5 blocks
+   * })
+   * for (const fee of fees) {
+   *   if (fee.finalityNotAllowed) continue // the token does not allow 5-block finality
+   *   console.log(fee.tokenAddress, fee.feeUSDCents, fee.tokenFeeBps)
+   * }
+   * ```
+   */
+  getMultiTokenPoolLaneFees(
+    opts: GetMultiTokenPoolLaneFeesParams,
+  ): Promise<GetMultiTokenPoolLaneFeesResult> {
+    return this.#getMultiTokenPoolLaneFees.query(this.chain, opts)
+  }
+
+  /**
+   * Reads `getTokenTransferFeeConfigBatch`, both tiers per lane.
+   * @remarks Chunked by 100 lanes; a lane with no fee record reads `isEnabled: false`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if the contract returns data this SDK cannot decode (a
+   * result count that does not match the lanes, an enum value or remote address out of range)
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolLaneTokenTransferFeeConfigs({ poolAddress: '0xMultiTokenPool...', lanes: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n }] })
+   * ```
+   */
+  getMultiTokenPoolLaneTokenTransferFeeConfigs(
+    opts: GetMultiTokenPoolLaneBatchParams,
+  ): Promise<GetMultiTokenPoolLaneTokenTransferFeeConfigsResult> {
+    return this.#getMultiTokenPoolLaneTokenTransferFeeConfigs.query(this.chain, opts)
+  }
+
+  /**
+   * Reads `getCurrentRateLimiterStateBatch`: four raw buckets per lane.
+   * @remarks A pending policy change reads as a full bucket. Chunked by 100 lanes.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if the contract returns data this SDK cannot decode (a
+   * result count that does not match the lanes, an enum value or remote address out of range)
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolLaneRateLimiterStates({ poolAddress: '0xMultiTokenPool...', lanes: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n }] })
+   * ```
+   */
+  getMultiTokenPoolLaneRateLimiterStates(
+    opts: GetMultiTokenPoolLaneBatchParams,
+  ): Promise<GetMultiTokenPoolLaneRateLimiterStatesResult> {
+    return this.#getMultiTokenPoolLaneRateLimiterStates.query(this.chain, opts)
+  }
+
+  /**
+   * Reads `getLaneVerificationBatch`: hook and CCV lists per lane.
+   * @remarks The pool ignores amount and finality for CCVs. Chunked by 100 lanes.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if the contract returns data this SDK cannot decode (a
+   * result count that does not match the lanes, an enum value or remote address out of range)
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolLaneVerifications({ poolAddress: '0xMultiTokenPool...', lanes: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n }] })
+   * ```
+   */
+  getMultiTokenPoolLaneVerifications(
+    opts: GetMultiTokenPoolLaneBatchParams,
+  ): Promise<GetMultiTokenPoolLaneVerificationsResult> {
+    return this.#getMultiTokenPoolLaneVerifications.query(this.chain, opts)
+  }
 }
 
 export type * from './token-admin-registry/operations/index.ts'
@@ -4995,7 +5242,11 @@ export type * from '../multi-token-pool.ts'
 export type * from './multi-token-pool/operations/index.ts'
 export type * from './pool-config-manager/operations/index.ts'
 export type * from './policy-store/operations/index.ts'
-export type { PoolConfigManagerTarget } from './pool-config-manager/contracts.ts'
+export type {
+  MultiTokenPoolLaneKey,
+  PolicyName,
+  PoolConfigManagerTarget,
+} from './pool-config-manager/contracts.ts'
 export {
   MULTI_TOKEN_POOL_LANE_CHECKS,
   MULTI_TOKEN_POOL_STEP_SIGNER_KINDS,

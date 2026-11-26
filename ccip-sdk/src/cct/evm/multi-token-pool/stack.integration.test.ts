@@ -33,6 +33,7 @@ const RAW = [
   'function getStaticConfig() view returns (address,address,address,address)',
   'function defaultAdmin() view returns (address)',
   'function getAllAuthorizedCallers() view returns (address[])',
+  'function getAllConfiguredTokens(uint64,uint64) view returns (address[])',
 ]
 
 describe('multi-token pool stack reads (Sepolia v5v9)', { skip, timeout: 300_000 }, () => {
@@ -107,5 +108,46 @@ describe('multi-token pool stack reads (Sepolia v5v9)', { skip, timeout: 300_000
       findings.filter((f) => f.severity === 'error'),
       [],
     )
+  })
+
+  it('lists the registered tokens and reads every lane view of each', async (t) => {
+    if (!deployed) return t.skip('v5v9 multi-token pool not deployed')
+    const { tokens, blockNumber } = await cct.getMultiTokenPoolConfiguredTokens({
+      poolAddress: POOL,
+    })
+    const raw = (
+      (await new Contract(PCM, RAW, chain.provider).getFunction('getAllConfiguredTokens')(
+        0n,
+        1000n,
+        {
+          blockTag: blockNumber,
+        },
+      )) as string[]
+    ).map((a) => getAddress(a))
+    assert.deepEqual(tokens, raw)
+    assert.ok(tokens.length > 0)
+    const configs = await cct.getMultiTokenPoolTokenConfigs({
+      poolAddress: POOL,
+      tokenAddresses: tokens,
+    })
+    assert.ok(configs.every((c) => c.isRegistered))
+    const lanes = configs.flatMap((c) =>
+      c.supportedChains.map((remoteChainSelector) => ({
+        tokenAddress: c.tokenAddress,
+        remoteChainSelector,
+      })),
+    )
+    const [connections, levels, verifications] = await Promise.all([
+      cct.getMultiTokenPoolLaneConnections({ poolAddress: POOL, lanes }),
+      cct.getMultiTokenPoolLaneRecordLevels({ poolAddress: POOL, lanes }),
+      cct.getMultiTokenPoolLaneVerifications({ poolAddress: POOL, lanes }),
+    ])
+    // every supported chain has a connection, which resolves from somewhere
+    assert.ok(connections.every((c) => c.hasConnection && c.remoteToken))
+    assert.ok(levels.every((l) => l.levels.connection !== 'none'))
+    assert.equal(verifications.length, lanes.length)
+    // a finality no token on a lane allows is marked, not thrown
+    const fees = await cct.getMultiTokenPoolLaneFees({ poolAddress: POOL, lanes, finality: 1 })
+    assert.equal(fees.length, lanes.length)
   })
 })

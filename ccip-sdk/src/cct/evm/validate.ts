@@ -264,3 +264,33 @@ export function validateBaseERC20Params(
   }
   if (p.ccipAdmin !== undefined) validateAddress(operation, 'ccipAdmin', p.ccipAdmin)
 }
+
+/**
+ * Asserts `value` is a requested finality: `'finalized'`, `'safe'`, or a block depth in
+ * `[1, 65535]` (faster-than-finality), as core `FinalityRequested` and `encodeFinality` take it.
+ * @throws {@link CCTParamsInvalidError} if `value` is none of these
+ */
+export function validateFinalityRequested(operation: string, param: string, value: unknown): void {
+  if (value === 'finalized' || value === 'safe') return
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 0xffff) return
+  throw new CCTParamsInvalidError(
+    operation,
+    param,
+    `must be 'finalized', 'safe', or a block depth in [1, 65535], got ${String(value)}`,
+  )
+}
+
+/**
+ * Asserts `value` is an array of at least `minLength` addresses, visiting sparse holes, and names
+ * the first bad entry as `param[i]`.
+ * @throws {@link CCTParamsInvalidError} if `value` is not such an array
+ */
+export function validateAddressArray(
+  operation: string,
+  param: string,
+  value: unknown,
+  minLength = 0,
+): asserts value is string[] {
+  validateArray(operation, param, value, minLength)
+  Array.from(value, (a, i) => validateAddress(operation, `${param}[${i}]`, a))
+}

@@ -723,12 +723,33 @@ export async function readTokenPoolFee(
     requestedFinalityConfig,
     '0x',
   )
-  return {
+  return toTokenPoolFee({
     feeUSDCents: fee[0] as bigint,
-    destGasOverhead: Number(fee[1]),
-    destBytesOverhead: Number(fee[2]),
-    tokenFeeBps: Number(fee[3]),
+    destGasOverhead: fee[1],
+    destBytesOverhead: fee[2],
+    tokenFeeBps: fee[3],
     isEnabled: fee[4] as boolean,
+  })
+}
+
+/**
+ * Converts a decoded fee quote (`getFee` outputs, or a multi-token pool `LaneFee`) to
+ * {@link TokenPoolFee}.
+ * @internal
+ */
+export function toTokenPoolFee(fee: {
+  feeUSDCents: bigint
+  destGasOverhead: bigint | number
+  destBytesOverhead: bigint | number
+  tokenFeeBps: bigint | number
+  isEnabled: boolean
+}): TokenPoolFee {
+  return {
+    feeUSDCents: BigInt(fee.feeUSDCents),
+    destGasOverhead: Number(fee.destGasOverhead),
+    destBytesOverhead: Number(fee.destBytesOverhead),
+    tokenFeeBps: Number(fee.tokenFeeBps),
+    isEnabled: fee.isEnabled,
   }
 }
 
@@ -804,6 +825,23 @@ async function readTokenTransferFeeConfigFor(
     finality,
     tokenArgs,
   )
+  return toTokenTransferFeeConfig(config)
+}
+
+/**
+ * Converts a decoded `TokenTransferFeeConfig` struct (a pool's, or a multi-token pool lane's) to core
+ * {@link TokenTransferFeeConfig}, numbers as `number`.
+ * @internal
+ */
+export function toTokenTransferFeeConfig(config: {
+  destGasOverhead: bigint | number
+  destBytesOverhead: bigint | number
+  finalityFeeUSDCents: bigint | number
+  fastFinalityFeeUSDCents: bigint | number
+  finalityTransferFeeBps: bigint | number
+  fastFinalityTransferFeeBps: bigint | number
+  isEnabled: boolean
+}): TokenTransferFeeConfig {
   return {
     destGasOverhead: Number(config.destGasOverhead),
     destBytesOverhead: Number(config.destBytesOverhead),
@@ -1335,8 +1373,11 @@ export type TokenPoolRateLimiterState = {
   outbound: TokenBucket
 }
 
-/** Converts a decoded `RateLimiter.TokenBucket`, whose `uint32 lastUpdated` decodes to a bigint. */
-const toTokenBucket = ({
+/**
+ * Converts a decoded `RateLimiter.TokenBucket`, whose `uint32 lastUpdated` decodes to a bigint.
+ * @internal
+ */
+export const toTokenBucket = ({
   tokens,
   lastUpdated,
   isEnabled,

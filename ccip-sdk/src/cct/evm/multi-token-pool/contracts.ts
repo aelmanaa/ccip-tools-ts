@@ -747,3 +747,12 @@ export async function findDeploymentBlock(
 export function resolveMultiTokenPool(chain: EVMChain, address: string) {
   return resolveMultiTokenPoolContract(chain, address, MULTI_TOKEN_POOL_TYPES)
 }
+
+/**
+ * `address(0)` in an optional address field reads as `null`.
+ * @internal
+ */
+export function nullableAddress(value: string): string | null {
+  const a = getAddress(value)
+  return a === ZeroAddress ? null : a
+}

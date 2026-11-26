@@ -47,13 +47,24 @@ export const PCM_IFACE = new Interface([
   'function defaultAdminDelayIncreaseWait() view returns (uint48)',
   'function hasRole(bytes32 role, address account) view returns (bool)',
   'function getAllConfiguredTokens(uint64 startIndex, uint64 maxCount) view returns (address[])',
+  'function getTokenConfigBatch(address[] localTokens) view returns (tuple(bool isRegistered, uint8 localDecimals, uint8 lockOrBurnFlavor, bytes4 allowedFinalityConfig, address lockOrBurnAddress, address additionalPoolDataProvider, uint64[] supportedChains, bytes32 connectionPolicyName, bytes32 remotePoolPolicyName, bytes32 rateLimitPolicyName, bytes32 feePolicyName, bytes32 destOverheadPolicyName, bytes32 securityPolicyName)[] configs)',
+  'function getLaneConnectionBatch(tuple(address localToken, uint64 remoteChainSelector)[] lanes) view returns (tuple(bool hasConnection, bool isOutboundPaused, bool isInboundPaused, bool isGloballyPaused, bool isTokenOutboundPaused, bool isTokenInboundPaused, bool isChainOutboundPaused, bool isChainInboundPaused, bool useLegacyPoolDataOnSend, bytes remoteToken, tuple(bytes remotePoolAddress, bool allowLegacyPoolDataOnReceive)[] remotePools)[] connections)',
+  'function getLaneRecordLevelBatch(tuple(address localToken, uint64 remoteChainSelector)[] lanes) view returns (uint8[] connectionLevels, uint8[] remotePoolLevels, uint8[] rateLimitLevels, uint8[] feeLevels, uint8[] destOverheadLevels, uint8[] securityLevels)',
+  'function getFeeBatch(tuple(address localToken, uint64 remoteChainSelector)[] lanes, bytes4 requestedFinalityConfig) view returns (tuple(uint256 feeUSDCents, uint32 destGasOverhead, uint32 destBytesOverhead, uint16 tokenFeeBps, bool isEnabled)[] fees)',
+  'function getTokenTransferFeeConfigBatch(tuple(address localToken, uint64 remoteChainSelector)[] lanes) view returns (tuple(uint32 destGasOverhead, uint32 destBytesOverhead, uint32 finalityFeeUSDCents, uint32 fastFinalityFeeUSDCents, uint16 finalityTransferFeeBps, uint16 fastFinalityTransferFeeBps, bool isEnabled)[] feeConfigs)',
+  'function getCurrentRateLimiterStateBatch(tuple(address localToken, uint64 remoteChainSelector)[] lanes) view returns (tuple(tuple(uint128 tokens, uint32 lastUpdated, bool isEnabled, uint128 capacity, uint128 rate) outbound, tuple(uint128 tokens, uint32 lastUpdated, bool isEnabled, uint128 capacity, uint128 rate) inbound, tuple(uint128 tokens, uint32 lastUpdated, bool isEnabled, uint128 capacity, uint128 rate) fastFinalityOutbound, tuple(uint128 tokens, uint32 lastUpdated, bool isEnabled, uint128 capacity, uint128 rate) fastFinalityInbound)[] states)',
+  'function getLaneVerificationBatch(tuple(address localToken, uint64 remoteChainSelector)[] lanes, bytes4) view returns (address[] hooks, address[][] outboundCCVs, address[][] inboundCCVs)',
   'event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender)',
   'event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender)',
 ])
 export const STORE_IFACE = new Interface([
+  'error InvalidRequestedFinality(bytes4 requestedFinality, bytes4 allowedFinality)',
+  'error LocalTokenNotRegistered(address localToken)',
   'function typeAndVersion() view returns (string)',
   'function owner() view returns (address)',
   'function getAllAuthorizedCallers() view returns (address[])',
+  'function getTokenProfiles(address[] localTokens) view returns (tuple(bool isRegistered, uint8 localDecimals, uint8 lockOrBurnFlavor, address lockOrBurnAddress, bytes4 allowedFinalityConfig, bool isOutboundPaused, bool isInboundPaused, address additionalPoolDataProvider)[] profiles)',
+  'event ChainPauseSet(uint64 indexed remoteChainSelector, bool outbound, bool inbound)',
 ])
 
 /** The state the stub serves; every field has a consistent default stack. */
@@ -87,6 +98,13 @@ export type StackState = {
   latestBlock: number
   /** Extra contracts answering typeAndVersion (e.g. other pools, stale PCMs). */
   others: Record<string, string>
+  /**
+   * Per-function answers for PCM and store views the defaults do not model, keyed by function name:
+   * the decoded args in, the output values out. Throwing from one reverts the call.
+   */
+  views: Record<string, (args: readonly unknown[], to: string) => unknown[]>
+  /** Raw logs served by `getLogs` besides the role logs. */
+  logs: { address: string; topics: string[]; data: string; blockNumber: number }[]
 }
 
 /** A consistent default stack: one owner everywhere, PCM authorized on every store. */
@@ -137,11 +155,22 @@ export function defaultStack(): StackState {
     deploymentBlock: 100,
     latestBlock: 1_000,
     others: {},
+    views: {},
+    logs: [],
   }
 }
 
 /** A word of storage holding an address. */
 const word = (address: string) => zeroPadValue(address, 32)
+
+/**
+ * A custom-error revert for a `state.views` answer to throw: `throw revert(iface, 'Error', [args])`.
+ */
+export function revert(iface: Interface, error: string, args: readonly unknown[] = []): Error {
+  return Object.assign(makeError('execution reverted', 'CALL_EXCEPTION'), {
+    revertData: iface.encodeErrorResult(error, args),
+  })
+}
 
 /** A missing function, as a node reports it to ethers. */
 function callException(): Error {
@@ -161,7 +190,16 @@ export function stackChain(state: StackState = defaultStack()) {
   ) => {
     const tx = iface.parseTransaction({ data })
     if (!tx) throw callException()
-    return iface.encodeFunctionResult(tx.fragment, f(tx.name, tx.args))
+    let out
+    try {
+      out = f(tx.name, tx.args)
+    } catch (err) {
+      // a view that throws is a contract revert, as a node reports it; a thrown `{ revertData }`
+      // carries the encoded custom error
+      const data = (err as { revertData?: string }).revertData
+      throw data ? Object.assign(callException(), { data }) : callException()
+    }
+    return iface.encodeFunctionResult(tx.fragment, out)
   }
   const typeAndVersionOf = (to: string): string | undefined =>
     to === POOL
@@ -193,6 +231,7 @@ export function stackChain(state: StackState = defaultStack()) {
         })
       if (addr === PCM)
         return answer(PCM_IFACE, data, (name, args) => {
+          if (state.views[name]) return state.views[name](args, addr)
           const pcm = state.pcm
           switch (name) {
             case 'getStaticConfig':
@@ -222,7 +261,8 @@ export function stackChain(state: StackState = defaultStack()) {
         })
       const store = state.stores[addr]
       if (store)
-        return answer(STORE_IFACE, data, (name) => {
+        return answer(STORE_IFACE, data, (name, args) => {
+          if (state.views[name]) return state.views[name](args, addr)
           switch (name) {
             case 'owner':
               return [store.owner]
@@ -267,8 +307,24 @@ export function stackChain(state: StackState = defaultStack()) {
       calls.push(`getRegistryTokenConfig:${token}`)
       return { administrator: OWNER, tokenPool: state.tarPools[token] }
     },
-    getLogs: async function* ({ startBlock, endBlock }: { startBlock: number; endBlock: number }) {
+    getLogs: async function* ({
+      address,
+      startBlock,
+      endBlock,
+    }: {
+      address: string
+      startBlock: number
+      endBlock: number
+    }) {
       calls.push(`getLogs:${startBlock}-${endBlock}`)
+      for (const l of state.logs)
+        if (
+          getAddress(l.address) === getAddress(address) &&
+          l.blockNumber >= startBlock &&
+          l.blockNumber <= endBlock
+        )
+          yield l
+      if (getAddress(address) !== PCM) return
       for (const l of state.roleLogs) {
         if (l.blockNumber < startBlock || l.blockNumber > endBlock) continue
         yield {

@@ -5,10 +5,12 @@
  * @packageDocumentation
  */
 
+import { type BytesLike, hexlify } from 'ethers'
+
 import { networkInfo } from '../networks.ts'
 import { notRegisteredRecovery, supportedChains } from '../supported-chains.ts'
 import { decodeAddress, getAddressBytes } from '../utils.ts'
-import { CCTParamsInvalidError } from './errors.ts'
+import { CCTDataDecodeError, CCTParamsInvalidError } from './errors.ts'
 
 /**
  * Parses a remote chain's address into its canonical spelling, validated against the family of
@@ -119,4 +121,42 @@ export function parseUniqueRemoteAddresses(
     seen.add(address)
     return address
   })
+}
+
+/**
+ * Decodes a remote address as a lane stores it (raw bytes) into the canonical spelling
+ * {@link parseRemoteAddress} accepts and returns, so read output can be passed back into a write.
+ *
+ * @remarks Falls back to `0x` hex of the stored bytes only when the SDK cannot decode the family
+ * here: an unknown selector, or a family not registered in this bundle (e.g. a Solana remote in an
+ * EVM-only bundle; import `@chainlink/ccip-sdk/all` to decode every family). Bytes a registered
+ * family rejects (e.g. an EVM word with dirty high bytes) are a broken record, not a format choice,
+ * so they throw.
+ * @param value - The stored bytes (EVM pools left-pad EVM addresses to 32 bytes).
+ * @param remoteChainSelector - Selector of the lane's remote chain.
+ * @returns The canonical address, or `0x` hex when the family cannot be decoded here.
+ * @throws {@link CCTDataDecodeError} if the family is registered and rejects the bytes
+ * @internal
+ */
+export function decodeRemoteAddress(value: BytesLike, remoteChainSelector: bigint): string {
+  let family
+  try {
+    const info = networkInfo(remoteChainSelector)
+    // `networkInfo` also resolves chain IDs: only a selector match identifies the lane's family
+    if (info.chainSelector === remoteChainSelector) family = info.family
+  } catch {
+    // an unknown selector: fall through to raw hex
+  }
+  if (family === undefined || !supportedChains[family]) return hexlify(value)
+  try {
+    return decodeAddress(value, family)
+  } catch (cause) {
+    throw new CCTDataDecodeError(hexlify(value), {
+      cause: cause instanceof Error ? cause : undefined,
+      context: {
+        remoteChainSelector,
+        reason: `the stored remote address is not a valid ${family} address`,
+      },
+    })
+  }
 }
