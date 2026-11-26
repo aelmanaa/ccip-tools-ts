@@ -30,6 +30,7 @@ import {
   TOKEN_AUTHORITY_TYPES,
   isSolanaTokenPoolType,
 } from './index.ts'
+import * as cctSolana from './index.ts'
 
 function stubChain(): SolanaChain {
   return {
@@ -800,5 +801,26 @@ describe('SolanaTokenManager (cct/solana)', () => {
         assert.ok(typeof result === 'object', `${name} returns a result`)
       }
     })
+  })
+})
+
+describe('cct/solana entry point', () => {
+  it('exposes only the manager, the pool taxonomy and the shared tuples at runtime', () => {
+    assert.deepEqual(Object.keys(cctSolana).sort(), [
+      'DEFAULT_WRITABLE_INDEXES',
+      'MULTI_TOKEN_POOL_LANE_CHECKS',
+      'MULTI_TOKEN_POOL_STEP_SIGNER_KINDS',
+      'REGISTRATION_METHODS',
+      'SOLANA_TOKEN_POOL_TYPES',
+      'SolanaTokenManager',
+      'TOKEN_AUTHORITY_TYPES',
+      'TOKEN_ONBOARDING_STEPS',
+      'TOKEN_POOL_PROGRAMS',
+      'deriveTokenPoolSignerPda',
+      'isSolanaTokenPoolType',
+      'parseMultiTokenPoolSnapshot',
+      'resolveTokenPoolProgram',
+      'serializeMultiTokenPoolSnapshot',
+    ])
   })
 })
