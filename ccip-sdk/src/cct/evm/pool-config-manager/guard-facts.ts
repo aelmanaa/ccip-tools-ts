@@ -5,30 +5,25 @@
  * @packageDocumentation
  */
 
-import { getAddress, hexlify, isError } from 'ethers'
+import { dataLength, getAddress } from 'ethers'
 
 import type { Chain, ChainGetter } from '../../../chain.ts'
-import {
-  CCIPTokenNotConfiguredError,
-  CCIPTokenNotInRegistryError,
-  CCIPTokenPoolChainConfigNotFoundError,
-} from '../../../errors/index.ts'
+import { CCIPTokenPoolChainConfigNotFoundError } from '../../../errors/index.ts'
 import { EVMChain } from '../../../evm/index.ts'
 import { decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import type { MultiTokenPoolRemoteAttestation } from '../../multi-token-pool.ts'
 import { laneFamilyOf } from '../../remote-address.ts'
+import { readAllAuthorizedCallers } from '../advanced-pool-hooks/contracts.ts'
 import {
   type MultiTokenPoolVersion,
   ANY_FINALITY_CONFIG,
-  multiTokenPoolContract,
-  multiTokenPoolHooksContract,
   poolConfigManagerContract,
   reportsMultiTokenPool,
   uidProviderContract,
 } from '../multi-token-pool/contracts.ts'
-import { LANE_BATCH_SIZE, readInBatches } from './contracts.ts'
+import { isNotCcipContract } from '../query.ts'
 import {
   type MultiTokenPoolGuardFactRequests,
   type MultiTokenPoolGuardFacts,
@@ -38,6 +33,7 @@ import {
   guardPoolKey,
 } from './guards.ts'
 import type { ProjectedMultiTokenPoolLane } from './projection.ts'
+import { readPoolsServingPoolConfigManager, readRegistryPool } from './serving-pools.ts'
 
 /** Longest an attestation may be valid for. @internal */
 export const MAX_ATTESTATION_SECONDS = 24n * 60n * 60n
@@ -112,19 +108,17 @@ export async function readMultiTokenPoolGuardFacts(
 
 async function readHookCallers(chain: EVMChain, hooks: readonly string[], blockTag: number) {
   const entries = await Promise.all(
-    hooks.map(async (hook) => {
-      const callers = await multiTokenPoolHooksContract(chain, hook).getAllAuthorizedCallers({
-        blockTag,
-      })
-      return [getAddress(hook), callers.map((a) => getAddress(resultToObject(a)))] as const
-    }),
+    hooks.map(
+      async (hook) =>
+        [getAddress(hook), await readAllAuthorizedCallers(chain, hook, { blockTag })] as const,
+    ),
   )
   return new Map(entries)
 }
 
 /**
  * The pools that call the PCM for the affected tokens: the target pool, and the pool the registry
- * names for each affected token when that pool uses this PCM.
+ * names for each affected token when that pool uses this PCM (the stack audit's same reader).
  */
 async function readServingPools({
   chain,
@@ -135,47 +129,15 @@ async function readServingPools({
   poolAddress,
   requests,
 }: ReadMultiTokenPoolGuardFactsInput): Promise<string[]> {
-  const pools = new Set<string>(poolAddress ? [getAddress(poolAddress)] : [])
-  const tokens = [...new Set(requests.remoteLanes.map((l) => getAddress(l.tokenAddress)))]
-  const named = await readInBatches(
-    tokens,
-    (batch) =>
-      Promise.all(
-        batch.map((token) =>
-          chain.getRegistryTokenConfig(tokenAdminRegistry, token).then(
-            ({ tokenPool }) => tokenPool,
-            (err: unknown) => {
-              if (
-                err instanceof CCIPTokenNotConfiguredError ||
-                err instanceof CCIPTokenNotInRegistryError
-              )
-                return undefined
-              throw err
-            },
-          ),
-        ),
-      ),
-    { batchSize: LANE_BATCH_SIZE },
-  )
-  await Promise.all(
-    [...new Set(named.filter((p): p is string => !!p).map((p) => getAddress(p)))].map(
-      async (pool) => {
-        if (pools.has(pool)) return
-        const pcm = await multiTokenPoolContract(chain, pool, version)
-          .getPoolConfigManager({ blockTag })
-          .then(
-            (a) => getAddress(resultToObject(a)),
-            (err: unknown) => {
-              // a registry pool that is not a multi-token pool does not call this PCM
-              if (isError(err, 'CALL_EXCEPTION') || isError(err, 'BAD_DATA')) return undefined
-              throw err
-            },
-          )
-        if (pcm === getAddress(poolConfigManager)) pools.add(pool)
-      },
-    ),
-  )
-  return [...pools].sort()
+  const { serving } = await readPoolsServingPoolConfigManager(chain, {
+    poolConfigManager,
+    version,
+    tokenAdminRegistry,
+    tokens: requests.remoteLanes.map((l) => l.tokenAddress),
+    ...(poolAddress !== undefined && { targetPool: poolAddress }),
+    blockTag,
+  })
+  return [...new Set([...(poolAddress ? [getAddress(poolAddress)] : []), ...serving])].sort()
 }
 
 /** Bytes of additional pool data per lane whose token has a provider. */
@@ -210,7 +172,7 @@ async function readProviderDataLengths({
         '0x',
         { blockTag },
       )
-      lengths.set(guardLaneKey(lane), (hexlify(data).length - 2) / 2)
+      lengths.set(guardLaneKey(lane), dataLength(data))
     }),
   )
   return lengths
@@ -302,14 +264,7 @@ async function readRemoteLane(
   if (laneFamilyOf(lane.remoteChainSelector) === ChainFamily.Solana)
     return readSolanaRemoteLane(input, lane, localSelector, servingPools, remote)
   const registry = await remote.getTokenAdminRegistryFor(trusted[0]!)
-  const registryPool = await remote.getRegistryTokenConfig(registry, remoteToken).then(
-    ({ tokenPool }) => (tokenPool ? getAddress(tokenPool) : null),
-    (err: unknown) => {
-      if (err instanceof CCIPTokenNotConfiguredError || err instanceof CCIPTokenNotInRegistryError)
-        return null
-      throw err
-    },
-  )
+  const registryPool = await readRegistryPool(remote, registry, remoteToken)
   if (registryPool === null)
     return {
       status: 'known',
@@ -374,8 +329,8 @@ async function readRemotePool(
     })
   }
   const [type] = await remote.typeAndVersion(address).catch((err: unknown) => {
-    // a pool that reports no typeAndVersion is not a multi-token pool
-    if (isError(err, 'CALL_EXCEPTION') || isError(err, 'BAD_DATA')) return ['']
+    // a pool that reports no (or an unparseable) typeAndVersion is not a multi-token pool
+    if (isNotCcipContract(err)) return ['']
     throw err
   })
   return { status: 'known', isMultiTokenPool: reportsMultiTokenPool(type) }

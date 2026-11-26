@@ -7,19 +7,18 @@
 
 import { getAddress } from 'ethers'
 
-import { CCIPTokenNotConfiguredError } from '../../../../errors/index.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
-import { CCTContractTypeInvalidError, CCTContractVersionUnsupportedError } from '../../../errors.ts'
 import { type MultiTokenPoolFinding, sortFindings } from '../../../multi-token-pool.ts'
 import {
   type GetPolicyStoreStateResult,
   GetPolicyStoreState,
 } from '../../policy-store/operations/get-policy-store-state.ts'
-import { readConfiguredTokens, readInBatches } from '../../pool-config-manager/contracts.ts'
+import { readConfiguredTokens } from '../../pool-config-manager/contracts.ts'
 import {
   type GetPoolConfigManagerStateResult,
   GetPoolConfigManagerState,
 } from '../../pool-config-manager/operations/get-pool-config-manager-state.ts'
+import { readPoolsServingPoolConfigManager } from '../../pool-config-manager/serving-pools.ts'
 import { EVMQuery, isNotCcipContract } from '../../query.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
 import { type PolicyStoreType, POOL_CONFIG_MANAGER_TYPE } from '../contracts.ts'
@@ -30,7 +29,6 @@ import {
 import type { MultiTokenPoolReadParams } from './is-multi-token-pool.ts'
 
 /** Registry reads in flight at once during the sharing-pool sweep. */
-const REGISTRY_SWEEP_BATCH = 16
 
 /** One finding of the stack audit. */
 export type MultiTokenPoolStackFinding = MultiTokenPoolFinding<
@@ -204,48 +202,20 @@ export class GetMultiTokenPoolStack extends EVMQuery<
       })
 
     // other pools serving the PCM's tokens: either they share this PCM, or the registration diverged
-    const sharing = new Set<string>()
-    // one registry read per registered token, in batches so a large stack does not flood the RPC
-    await readInBatches(
-      configured.tokens,
-      async (batch) => {
-        await Promise.all(
-          batch.map(async (token) => {
-            const tokenPool = await chain
-              .getRegistryTokenConfig(pcm.tokenAdminRegistry, token)
-              .then(
-                ({ tokenPool }) => tokenPool,
-                (err: unknown) => {
-                  if (err instanceof CCIPTokenNotConfiguredError) return undefined
-                  throw err
-                },
-              )
-            if (!tokenPool || getAddress(tokenPool) === getAddress(poolAddress)) return
-            const other = await this.#poolState.query(chain, { poolAddress: tokenPool }).then(
-              (s) => s.poolConfigManager,
-              (err: unknown) => {
-                // not a multi-token pool (a single-token pool, or a variant the SDK does not know)
-                if (
-                  err instanceof CCTContractTypeInvalidError ||
-                  err instanceof CCTContractVersionUnsupportedError
-                )
-                  return undefined
-                throw err
-              },
-            )
-            if (other === pcm.poolConfigManager) sharing.add(getAddress(tokenPool))
-            else
-              findings.push({
-                check: 'REGISTRATION_DIVERGED',
-                severity: 'warning',
-                reason: `token ${token} is registered in this PoolConfigManager but the TokenAdminRegistry serves it from ${tokenPool}, which does not use it; point the registry at this pool with setPool, or deregister the token here`,
-              })
-          }),
-        )
-        return []
-      },
-      { batchSize: REGISTRY_SWEEP_BATCH, sequential: true },
-    )
+    // (the guard's hook-caller rule reads the same answer)
+    const { serving, diverged } = await readPoolsServingPoolConfigManager(chain, {
+      poolConfigManager: pcm.poolConfigManager,
+      version: pool.version,
+      tokenAdminRegistry: pcm.tokenAdminRegistry,
+      tokens: configured.tokens,
+      targetPool: poolAddress,
+    })
+    for (const { token, pool: tokenPool } of diverged)
+      findings.push({
+        check: 'REGISTRATION_DIVERGED',
+        severity: 'warning',
+        reason: `token ${token} is registered in this PoolConfigManager but the TokenAdminRegistry serves it from ${tokenPool}, which does not use it; point the registry at this pool with setPool, or deregister the token here`,
+      })
 
     // deterministic order: severity, then check, then reason (the reads above run concurrently)
     sortFindings(findings)
@@ -254,7 +224,7 @@ export class GetMultiTokenPoolStack extends EVMQuery<
       pool,
       poolConfigManager: pcm,
       policyStores: stores,
-      poolsSharingPoolConfigManager: [...sharing].sort(),
+      poolsSharingPoolConfigManager: serving,
       poolsSharingPoolConfigManagerSource: 'registered-tokens',
       findings,
     }
