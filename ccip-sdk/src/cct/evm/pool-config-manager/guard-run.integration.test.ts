@@ -42,6 +42,13 @@ const FUJI_TOKENS = [
 ]
 const SOLANA_LANE_TOKEN = '0x808d0D44b1E532A0f0360edB05292dC09596F9b9'
 const SOLANA_DEVNET = 16423721717087811551n
+/** The campaign's mttp-core stack: tokens on Sepolia and Fuji, live transfers done; its lanes are healthy. */
+const CORE_POOL = '0x91b33bfc6B7E4ee5511BB654e9f93b6d3e72671b'
+const CORE_PCM = '0x4c4Ad0518cB12304051CB6E2b7c1a4fDd6A21Cfd'
+/** Holds CONFIG_ROLE on the mttp-core PCM. */
+const CORE_CONFIG = '0x3F7Ba502948E1A74d2eF94908CA3e0Bb8f17C7Ca'
+const CORE_TOKEN = '0x6377325E0D7F2E0D2Bc770860F0eB3B6c62F7cEd'
+const FUJI = 14767482510784806043n
 const V = MultiTokenPoolVersion.V2_1_0_DEV
 const PCM_IFACE = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, V)
 const OUTBOUND = 0
@@ -184,5 +191,42 @@ describe('MTTP post-state guard (Sepolia v5v9, read-only)', { skip, timeout: 600
       getChain: base.getChain!,
     })
     assert.deepEqual(check, { ok: true, changed: [], findings: [] })
+  })
+
+  it('accepts a real change on a healthy lane: every rule, the remote side read on Fuji', async (t) => {
+    if (!(await EVMTokenManager.fromChain(base.chain).isMultiTokenPool({ poolAddress: CORE_POOL })))
+      return t.skip('mttp-core multi-token pool not deployed')
+    const cct = EVMTokenManager.fromChain(base.chain)
+    const lane = { tokenAddress: CORE_TOKEN, remoteChainSelector: FUJI }
+    const [fee] = await cct.getMultiTokenPoolLaneTokenTransferFeeConfigs({
+      poolConfigManager: CORE_PCM,
+      lanes: [lane],
+    })
+    const data = PCM_IFACE.encodeFunctionData('applyInlineFeeConfigUpdates', [
+      [],
+      [
+        [
+          CORE_TOKEN,
+          FUJI,
+          [
+            fee!.finalityFeeUSDCents,
+            fee!.fastFinalityFeeUSDCents,
+            fee!.finalityTransferFeeBps + 1,
+            fee!.fastFinalityTransferFeeBps + 1,
+          ],
+        ],
+      ],
+    ])
+    const r = await runMultiTokenPoolGuards({
+      ...base,
+      poolConfigManager: CORE_PCM,
+      poolAddress: CORE_POOL,
+      sender: CORE_CONFIG,
+      operation: 'applyMultiTokenPoolInlineFeeConfigUpdates',
+      data,
+    })
+    assert.deepEqual(r.affectedLanes, [lane])
+    assert.deepEqual(r.warnings, [])
+    testLogger.info(`healthy lane projectionVerified: ${r.projectionVerified}`)
   })
 })
