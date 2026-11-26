@@ -18,6 +18,7 @@ import {
   guardPoolKey,
   multiTokenPoolAffectedLanes,
   multiTokenPoolChainLanes,
+  multiTokenPoolLaneTransitions,
 } from './guards.ts'
 import {
   type MultiTokenPoolRecordChange,
@@ -483,5 +484,50 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       findings.map((f) => f.check),
       ['NO_CONNECTION'],
     )
+  })
+
+  it('reports what a write opens and makes live, per direction', () => {
+    const transitions = (changes: MultiTokenPoolRecordChange[], base = empty()) =>
+      multiTokenPoolLaneTransitions(
+        multiTokenPoolAffectedLanes(base, applyMultiTokenPoolRecordChanges(base, changes)),
+      )
+    const lane = { tokenAddress: T1, remoteChainSelector: C1 }
+    // a lane opened unpaused goes live both ways
+    assert.deepEqual(transitions(inlineLane(T1)), {
+      opened: [{ ...lane, directions: ['outbound', 'inbound'] }],
+      goingLive: [{ ...lane, directions: ['outbound', 'inbound'] }],
+    })
+    // opened with outbound paused: only inbound goes live
+    const pausedOut: MultiTokenPoolRecordChange = {
+      kind: 'setTokenPause',
+      tokenAddress: T1,
+      outbound: true,
+    }
+    assert.deepEqual(transitions([pausedOut, ...inlineLane(T1)]).goingLive, [
+      { ...lane, directions: ['inbound'] },
+    ])
+    // an unpause makes a lane live without opening it
+    const paused = applyMultiTokenPoolRecordChanges(empty(), [
+      ...inlineLane(T1),
+      { kind: 'setChainPause', remoteChainSelector: C1, outbound: true },
+    ])
+    assert.deepEqual(
+      transitions([{ kind: 'setChainPause', remoteChainSelector: C1, outbound: false }], paused),
+      {
+        opened: [],
+        goingLive: [{ ...lane, directions: ['outbound'] }],
+      },
+    )
+    // opened fully paused: opened, but nothing goes live
+    const bothPaused: MultiTokenPoolRecordChange = {
+      kind: 'setTokenPause',
+      tokenAddress: T1,
+      outbound: true,
+      inbound: true,
+    }
+    assert.deepEqual(transitions([bothPaused, ...inlineLane(T1)]), {
+      opened: [{ ...lane, directions: [] }],
+      goingLive: [],
+    })
   })
 })

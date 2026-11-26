@@ -156,6 +156,13 @@ function guardOptionsFrom(value: unknown, operation: string): MultiTokenPoolGuar
     (o.minDestGasOverhead !== undefined && typeof o.minDestGasOverhead !== 'number') ||
     (o.confirmClosing !== undefined &&
       !(Array.isArray(o.confirmClosing) && o.confirmClosing.every(isLaneKey))) ||
+    (o.confirmOpening !== undefined &&
+      !(
+        Array.isArray(o.confirmOpening) &&
+        o.confirmOpening.every(
+          (k) => isLaneKey(k) && Array.isArray((k as { directions?: unknown }).directions),
+        )
+      )) ||
     (o.migrationWindowChains !== undefined &&
       !(
         Array.isArray(o.migrationWindowChains) &&

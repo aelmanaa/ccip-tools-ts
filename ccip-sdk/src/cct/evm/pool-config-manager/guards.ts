@@ -10,7 +10,7 @@
 
 import { ZeroAddress, getAddress } from 'ethers'
 
-import type { LaneRecordType, RateLimiterState } from '../../../chain.ts'
+import type { LaneRecordType, RateLimiterState, TransferDirection } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { canonicalJson } from '../../canonical.ts'
 import {
@@ -49,6 +49,12 @@ export type MultiTokenPoolGuardOptions = {
   minDestGasOverhead?: number
   /** Lanes the caller agrees this write closes. */
   confirmClosing?: MultiTokenPoolLaneKey[]
+  /**
+   * Lanes, per direction, the caller agrees this write opens. When given, the write is refused if a
+   * lane it opens goes live in a direction not listed for it (the mirror of `confirmClosing`); a
+   * planner passes its planned lanes. Confirming outbound never confirms inbound.
+   */
+  confirmOpening?: MultiTokenPoolLaneDirections[]
   /** Remote chains where a lane may accept legacy pool data from a remote multi-token pool. */
   migrationWindowChains?: bigint[]
 }
@@ -513,4 +519,50 @@ export function multiTokenPoolChainLanes(
       .map((remoteChainSelector) => ({ tokenAddress: t.tokenAddress, remoteChainSelector })),
   )
   return resolveMultiTokenPoolLanes(state, lanes)
+}
+
+/** A lane and the directions an answer concerns. @internal */
+export type MultiTokenPoolLaneDirections = MultiTokenPoolLaneKey & {
+  /** The directions. */
+  directions: TransferDirection[]
+}
+
+const DIRECTIONS = ['outbound', 'inbound'] as const
+
+/** Whether a lane is live in a direction: it has a connection and no pause holds that direction. */
+function liveIn(l: ProjectedMultiTokenPoolLane, d: TransferDirection): boolean {
+  return (
+    l.connection.hasConnection &&
+    !(d === 'outbound' ? l.connection.isOutboundPaused : l.connection.isInboundPaused)
+  )
+}
+
+/**
+ * What a write opens and makes live, per direction: `opened` gains a connection (with the directions
+ * live after it), `goingLive` is live in a direction it was not live in before (an opened lane, or an
+ * unpause).
+ * @internal
+ */
+export function multiTokenPoolLaneTransitions(
+  lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
+): { opened: MultiTokenPoolLaneDirections[]; goingLive: MultiTokenPoolLaneDirections[] } {
+  const entry = (l: ProjectedMultiTokenPoolLane, directions: TransferDirection[]) => ({
+    tokenAddress: l.tokenAddress,
+    remoteChainSelector: l.remoteChainSelector,
+    directions,
+  })
+  const opened: MultiTokenPoolLaneDirections[] = []
+  const goingLive: MultiTokenPoolLaneDirections[] = []
+  for (const { before, after } of lanes) {
+    if (!before.connection.hasConnection && after.connection.hasConnection)
+      opened.push(
+        entry(
+          after,
+          DIRECTIONS.filter((d) => liveIn(after, d)),
+        ),
+      )
+    const newly = DIRECTIONS.filter((d) => liveIn(after, d) && !liveIn(before, d))
+    if (newly.length) goingLive.push(entry(after, newly))
+  }
+  return { opened, goingLive }
 }

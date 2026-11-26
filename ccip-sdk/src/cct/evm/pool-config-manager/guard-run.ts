@@ -53,11 +53,13 @@ import { readMultiTokenPoolGuardFacts } from './guard-facts.ts'
 import {
   type MultiTokenPoolGuardFacts,
   type MultiTokenPoolGuardOptions,
+  type MultiTokenPoolLaneDirections,
   evaluateMultiTokenPoolGuards,
   guardLaneKey,
   multiTokenPoolAffectedLanes,
   multiTokenPoolCandidateLanes,
   multiTokenPoolChainLanes,
+  multiTokenPoolLaneTransitions,
   requiredMultiTokenPoolGuardFacts,
 } from './guards.ts'
 import { RECORD_LEVELS } from './operations/get-multi-token-pool-lane-record-levels.ts'
@@ -110,6 +112,8 @@ export type MultiTokenPoolGuardResult = {
   decoded: DecodedMultiTokenPoolWrite
   /** Lanes the write changes. */
   affectedLanes: MultiTokenPoolLaneKey[]
+  /** Lanes live in a direction after the write that were not live in it before, with those directions. */
+  goingLive: MultiTokenPoolLaneDirections[]
   /** Warning findings (errors refuse). */
   warnings: MultiTokenPoolLaneFinding[]
   /** Every finding, errors included (only with `reportFindings`; errors refuse otherwise). */
@@ -189,6 +193,30 @@ export async function runMultiTokenPoolGuards(
       { context: { factFailures } },
     )
   }
+  // a lane the write opens beyond the caller's planned set is refused (when the caller gives one)
+  const { opened, goingLive } = multiTokenPoolLaneTransitions(lanes)
+  if (input.confirmOpening) {
+    const allowed = new Map(
+      input.confirmOpening.map((l) => [guardLaneKey(l), new Set(l.directions)]),
+    )
+    const extra = opened
+      .map((l) => ({
+        ...l,
+        directions: l.directions.filter((d) => !allowed.get(guardLaneKey(l))?.has(d)),
+      }))
+      .filter((l) => l.directions.length)
+    if (extra.length)
+      throw new CCTParamsInvalidError(
+        errorOperation,
+        'confirmOpening',
+        `the write opens ${extra.length} lane(s) in directions not listed: ${extra
+          .map((l) => `${l.tokenAddress} → ${l.remoteChainSelector} (${l.directions.join(', ')})`)
+          .join(
+            '; ',
+          )}; a record another operator wrote can make it open more than planned. List them, or rebuild after checking`,
+        { context: { extra } },
+      )
+  }
   const errors = findings.filter((f) => f.severity === 'error')
   if (errors.length && !input.reportFindings)
     throw new CCTParamsInvalidError(
@@ -248,6 +276,7 @@ export async function runMultiTokenPoolGuards(
       tokenAddress,
       remoteChainSelector,
     })),
+    goingLive,
     warnings: findings.filter((f) => f.severity === 'warning'),
     findings,
     projectionVerified,
@@ -281,6 +310,15 @@ export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGua
         .map(({ tokenAddress, remoteChainSelector }) => ({
           tokenAddress: getAddress(tokenAddress),
           remoteChainSelector,
+        }))
+        .sort((a, b) => guardLaneKey(a).localeCompare(guardLaneKey(b))),
+    }),
+    ...(o.confirmOpening && {
+      confirmOpening: [...o.confirmOpening]
+        .map(({ tokenAddress, remoteChainSelector, directions }) => ({
+          tokenAddress: getAddress(tokenAddress),
+          remoteChainSelector,
+          directions: [...new Set(directions)].sort(),
         }))
         .sort((a, b) => guardLaneKey(a).localeCompare(guardLaneKey(b))),
     }),
