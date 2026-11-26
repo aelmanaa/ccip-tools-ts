@@ -27,6 +27,7 @@ import {
   policyKey,
   resolveMultiTokenPoolLanes,
 } from './projection.ts'
+import type { MultiTokenPoolWriteGuards } from './write-operation.ts'
 
 /** Default {@link MultiTokenPoolGuardOptions.maxTransferFeeBps} (the token fee cap). @internal */
 export const DEFAULT_MAX_TRANSFER_FEE_BPS = 1_000
@@ -40,24 +41,15 @@ export const LONG_POOL_DATA_BYTES = 192
 export const LEGACY_POOL_DATA_BYTES = 32
 
 /** The guard options a write takes (thresholds and confirmations, never switches). @internal */
-export type MultiTokenPoolGuardOptions = {
-  /** Accept non-empty CCV lists without the default-CCV placeholder `address(0)`. */
-  allowDroppingDefaultCCVs?: boolean
-  /** Highest resolved transfer fee in bps, both tiers. */
-  maxTransferFeeBps?: number
-  /** Lowest resolved `destGasOverhead`. */
-  minDestGasOverhead?: number
-  /** Lanes the caller agrees this write closes. */
-  confirmClosing?: MultiTokenPoolLaneKey[]
-  /**
-   * Lanes, per direction, the caller agrees this write opens. When given, the write is refused if a
-   * lane it opens goes live in a direction not listed for it (the mirror of `confirmClosing`); a
-   * planner passes its planned lanes. Confirming outbound never confirms inbound.
-   */
-  confirmOpening?: MultiTokenPoolLaneDirections[]
-  /** Remote chains where a lane may accept legacy pool data from a remote multi-token pool. */
-  migrationWindowChains?: bigint[]
-}
+export type MultiTokenPoolGuardOptions = Pick<
+  MultiTokenPoolWriteGuards,
+  | 'allowDroppingDefaultCCVs'
+  | 'maxTransferFeeBps'
+  | 'minDestGasOverhead'
+  | 'confirmClosing'
+  | 'confirmOpening'
+  | 'migrationWindowChains'
+>
 
 /** A remote fact: read, absent on the remote chain, or unreadable. @internal */
 export type MultiTokenPoolRemoteFact<T> =

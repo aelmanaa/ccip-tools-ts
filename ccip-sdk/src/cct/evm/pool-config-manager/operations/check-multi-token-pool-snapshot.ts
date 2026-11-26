@@ -5,7 +5,7 @@
  * @packageDocumentation
  */
 
-import { keccak256 } from 'ethers'
+import { isAddress, keccak256 } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
@@ -20,7 +20,7 @@ import {
 import { EVMQuery } from '../../query.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
 import { resolvePoolConfigManagerTarget } from '../contracts.ts'
-import { GUARD_OPTIONS_PATH, runMultiTokenPoolGuards } from '../guard-run.ts'
+import { GUARD_OPTIONS_PATH, GUARD_POOL_PATH, runMultiTokenPoolGuards } from '../guard-run.ts'
 import type { MultiTokenPoolGuardOptions } from '../guards.ts'
 
 /**
@@ -97,6 +97,13 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
       poolConfigManager: tx.to as string,
     })
     const options = guardOptionsFrom(snapshot.expected[GUARD_OPTIONS_PATH], this.name)
+    const pool = snapshot.expected[GUARD_POOL_PATH]
+    if (pool !== undefined && (typeof pool !== 'string' || !isAddress(pool)))
+      throw new CCTParamsInvalidError(
+        this.name,
+        `snapshot.expected.${GUARD_POOL_PATH}`,
+        'is not an address',
+      )
     const result = await runMultiTokenPoolGuards({
       ...options,
       chain,
@@ -104,10 +111,13 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
       errorOperation: this.name,
       poolConfigManager: address,
       version,
+      ...(typeof pool === 'string' && { poolAddress: pool }),
       data: tx.data as string,
       sender,
       expected: Object.fromEntries(
-        Object.entries(snapshot.expected).filter(([path]) => path !== GUARD_OPTIONS_PATH),
+        Object.entries(snapshot.expected).filter(
+          ([path]) => path !== GUARD_OPTIONS_PATH && path !== GUARD_POOL_PATH,
+        ),
       ),
       ...(getChain && { getChain }),
       ...(remoteAttestations && { remoteAttestations }),

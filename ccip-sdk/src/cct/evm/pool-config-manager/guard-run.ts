@@ -104,6 +104,8 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   reportFindings?: boolean
   /** The op named in errors, when it is not `operation` (the snapshot check re-runs another op's guard). */
   errorOperation?: string
+  /** Extra context every refusal carries (e.g. the `recordType` of a merged op). */
+  errorContext?: Record<string, unknown>
 }
 
 /** What a guarded write reports (the fields of `MultiTokenPoolUnsignedTx`). @internal */
@@ -190,7 +192,7 @@ export async function runMultiTokenPoolGuards(
       `cannot check ${factFailures.length} affected lane(s), and a guard never passes on a fact it could not read: ${factFailures
         .map((f) => `${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
         .join('; ')}`,
-      { context: { factFailures } },
+      { context: { ...input.errorContext, factFailures } },
     )
   }
   // a lane the write opens beyond the caller's planned set is refused (when the caller gives one)
@@ -214,7 +216,7 @@ export async function runMultiTokenPoolGuards(
           .join(
             '; ',
           )}; a record another operator wrote can make it open more than planned. List them, or rebuild after checking`,
-        { context: { extra } },
+        { context: { ...input.errorContext, extra } },
       )
   }
   const errors = findings.filter((f) => f.severity === 'error')
@@ -225,7 +227,7 @@ export async function runMultiTokenPoolGuards(
       `the write would leave ${errors.length} problem(s) on the lanes it changes: ${errors
         .map((f) => `${f.check} on ${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
         .join('; ')}`,
-      { context: { findings: errors } },
+      { context: { ...input.errorContext, findings: errors } },
     )
 
   // the write itself, from the account that will execute it
@@ -242,6 +244,7 @@ export async function runMultiTokenPoolGuards(
         `the write reverts when ${sender} executes it: ${sim.errorName ?? sim.revertData}`,
         {
           context: {
+            ...input.errorContext,
             errorName: sim.errorName,
             errorArgs: sim.errorArgs,
             revertData: sim.revertData,
@@ -256,7 +259,13 @@ export async function runMultiTokenPoolGuards(
   const guardInputsHash = hashGuardInputs(lanes, chainLanes, facts)
   // the thresholds and confirmations the write was judged with travel in the snapshot, under its
   // hash, so a re-check of the proposal applies the same ones
-  const expected = { ...input.expected, [GUARD_OPTIONS_PATH]: guardOptionsOf(input) }
+  const expected = {
+    ...input.expected,
+    [GUARD_OPTIONS_PATH]: guardOptionsOf(input),
+    // the target pool is a serving pool the guard counted; a re-check of the proposal, which sees only
+    // the PCM, needs the same one
+    ...(input.poolAddress !== undefined && { [GUARD_POOL_PATH]: getAddress(input.poolAddress) }),
+  }
   if (input.expectedSnapshot)
     assertSnapshotHolds(operation, input.expectedSnapshot, {
       calldataHash: keccak256(data),
@@ -298,6 +307,8 @@ async function fillProviderAnswers(
 
 /** The `expected` path the guard options are sealed under. @internal */
 export const GUARD_OPTIONS_PATH = 'guard.options'
+/** The `expected` path the target pool is sealed under. @internal */
+export const GUARD_POOL_PATH = 'guard.poolAddress'
 
 /** The guard options a write was judged with, defaults dropped, in a stable shape. @internal */
 export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGuardOptions {
