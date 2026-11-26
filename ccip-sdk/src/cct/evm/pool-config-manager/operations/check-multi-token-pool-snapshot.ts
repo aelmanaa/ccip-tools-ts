@@ -20,8 +20,13 @@ import {
 import { EVMQuery } from '../../query.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
 import { resolvePoolConfigManagerTarget } from '../contracts.ts'
-import { GUARD_OPTIONS_PATH, GUARD_POOL_PATH, runMultiTokenPoolGuards } from '../guard-run.ts'
-import type { MultiTokenPoolGuardOptions } from '../guards.ts'
+import {
+  GUARD_OPTIONS_PATH,
+  GUARD_POOL_PATH,
+  runMultiTokenPoolGuards,
+  snapshotChanges,
+} from '../guard-run.ts'
+import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from '../guards.ts'
 
 /**
  * Parameters for `checkMultiTokenPoolSnapshot`: re-reads the state, and re-runs the full post-state
@@ -123,16 +128,7 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
       ...(remoteAttestations && { remoteAttestations }),
       reportFindings: true,
     })
-    const changed =
-      result.snapshot.guardInputsHash === snapshot.guardInputsHash
-        ? []
-        : [
-            {
-              path: 'guardInputsHash',
-              expected: snapshot.guardInputsHash,
-              actual: result.snapshot.guardInputsHash,
-            },
-          ]
+    const changed = snapshotChanges(snapshot, result.snapshot)
     return {
       ok: !changed.length && !result.findings.some((f) => f.severity === 'error'),
       changed,
@@ -142,43 +138,15 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
 }
 
 /**
- * The guard options a snapshot sealed, shape-checked: the hash proves the snapshot was not edited,
- * not that a hand-built one carries valid options.
+ * The guard options a snapshot sealed, validated as a write validates its own: the hash proves the
+ * snapshot was not edited, not that a hand-built one carries valid options.
  */
 function guardOptionsFrom(value: unknown, operation: string): MultiTokenPoolGuardOptions {
   if (value === undefined) return {}
-  const bad = () =>
-    new CCTParamsInvalidError(
-      operation,
-      `snapshot.expected.${GUARD_OPTIONS_PATH}`,
-      'is not the guard options an op sealed',
-    )
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw bad()
+  const param = `snapshot.expected.${GUARD_OPTIONS_PATH}`
+  if (value === null || typeof value !== 'object' || Array.isArray(value))
+    throw new CCTParamsInvalidError(operation, param, 'is not the guard options an op sealed')
   const o = value as Record<string, unknown>
-  const isLaneKey = (k: unknown) =>
-    !!k &&
-    typeof k === 'object' &&
-    typeof (k as Record<string, unknown>).tokenAddress === 'string' &&
-    typeof (k as Record<string, unknown>).remoteChainSelector === 'bigint'
-  if (
-    (o.allowDroppingDefaultCCVs !== undefined && typeof o.allowDroppingDefaultCCVs !== 'boolean') ||
-    (o.maxTransferFeeBps !== undefined && typeof o.maxTransferFeeBps !== 'number') ||
-    (o.minDestGasOverhead !== undefined && typeof o.minDestGasOverhead !== 'number') ||
-    (o.confirmClosing !== undefined &&
-      !(Array.isArray(o.confirmClosing) && o.confirmClosing.every(isLaneKey))) ||
-    (o.confirmOpening !== undefined &&
-      !(
-        Array.isArray(o.confirmOpening) &&
-        o.confirmOpening.every(
-          (k) => isLaneKey(k) && Array.isArray((k as { directions?: unknown }).directions),
-        )
-      )) ||
-    (o.migrationWindowChains !== undefined &&
-      !(
-        Array.isArray(o.migrationWindowChains) &&
-        o.migrationWindowChains.every((c) => typeof c === 'bigint')
-      ))
-  )
-    throw bad()
-  return o as MultiTokenPoolGuardOptions
+  validateMultiTokenPoolGuardOptions(operation, `${param}.`, o)
+  return o
 }

@@ -9,8 +9,8 @@
 import { getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { LOCK_OR_BURN_FLAVORS, decodeTokenProfileFields } from '../../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../../evm/types.ts'
+import { scaleDecimals } from '../../../../utils.ts'
 import { CCTContractTypeInvalidError, CCTContractVersionUnsupportedError } from '../../../errors.ts'
 import {
   type CheckMultiTokenPoolLaneParams,
@@ -23,14 +23,15 @@ import { poolConfigManagerContract } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
 import { IsBurner } from '../../token/operations/is-burner.ts'
 import { IsMinter } from '../../token/operations/is-minter.ts'
-import { validateArray, validateOneOf, validateUint32 } from '../../validate.ts'
-import { readPoolConfigManagerStaticConfig, resolvePoolConfigManagerTarget } from '../contracts.ts'
+import { validateArray, validateOneOf } from '../../validate.ts'
+import { decodeTokenProfile, resolvePoolConfigManagerTarget } from '../contracts.ts'
 import { readMultiTokenPoolGuardFacts } from '../guard-facts.ts'
 import {
   evaluateMultiTokenPoolGuards,
   guardLaneKey,
   multiTokenPoolChainLanes,
   requiredMultiTokenPoolGuardFacts,
+  validateMultiTokenPoolGuardOptions,
 } from '../guards.ts'
 import { resolveMultiTokenPoolLanes } from '../projection.ts'
 import { readMultiTokenPoolRecordState } from '../record-state.ts'
@@ -65,10 +66,10 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
         validateOneOf(this.name, `expectOpen[${i}]`, d, DIRECTIONS),
       )
     }
-    if (params.minDestGasOverhead !== undefined)
-      validateUint32(this.name, 'minDestGasOverhead', params.minDestGasOverhead)
-    if (params.maxTransferFeeBps !== undefined)
-      validateUint32(this.name, 'maxTransferFeeBps', params.maxTransferFeeBps)
+    validateMultiTokenPoolGuardOptions(this.name, '', {
+      minDestGasOverhead: params.minDestGasOverhead,
+      maxTransferFeeBps: params.maxTransferFeeBps,
+    })
     return params
   }
 
@@ -83,13 +84,19 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
       tokenAddress: getAddress(params.tokenAddress),
       remoteChainSelector: params.remoteChainSelector,
     }
-    const [lane, { state }, { tokenAdminRegistry }, [config]] = await Promise.all([
+    const [
+      lane,
+      {
+        state,
+        staticConfig: { tokenAdminRegistry },
+      },
+      [config],
+    ] = await Promise.all([
       readMultiTokenPoolLane(chain, pcm, key, blockTag, this.#reads),
       readMultiTokenPoolRecordState(chain, pcm.address, pcm.version, {
         blockTag,
         extraChains: [key.remoteChainSelector],
       }),
-      readPoolConfigManagerStaticConfig(chain, pcm.address, pcm.version),
       poolConfigManagerContract(chain, pcm.address, pcm.version).getTokenConfigBatch(
         [key.tokenAddress],
         { blockTag },
@@ -102,7 +109,8 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
       reason: string,
     ) => findings.push({ check, severity, ...key, reason })
 
-    const token = resultToObject(config!)
+    // one decode: an unknown flavor is a decode error, never a silently skipped role check
+    const token = decodeTokenProfile(key.tokenAddress, resultToObject(config!), pcm.address)
     if (!token.isRegistered)
       add(
         'TOKEN_NOT_REGISTERED',
@@ -174,11 +182,8 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
       const theirs = read?.status === 'known' ? read.remoteOutbound : undefined
       const remoteDecimals = read?.status === 'known' ? read.remoteDecimals : undefined
       if (local && theirs && remoteDecimals !== undefined) {
-        const localDecimals = decodeTokenProfileFields(token).localDecimals
         const toLocal = (amount: bigint) =>
-          localDecimals >= remoteDecimals
-            ? amount * BigInt(10) ** BigInt(localDecimals - remoteDecimals)
-            : amount / BigInt(10) ** BigInt(remoteDecimals - localDecimals)
+          scaleDecimals(amount, remoteDecimals, token.localDecimals)
         const [capacity, rate] = [toLocal(theirs.capacity), toLocal(theirs.rate)]
         if (local.capacity < capacity || local.rate < rate)
           add(
@@ -210,8 +215,8 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
 
     // the pool must hold the roles its flavor uses: burn to send, mint to receive
     if (token.isRegistered) {
-      const flavor = LOCK_OR_BURN_FLAVORS[decodeTokenProfileFields(token).lockOrBurnFlavor]
-      if (flavor && flavor !== 'lock') {
+      const flavor = token.lockOrBurnFlavor
+      if (flavor !== 'lock') {
         const needs = [
           ...(flavor !== 'burn-to-address' ? [['burn', this.#isBurner] as const] : []),
           ['mint', this.#isMinter] as const,

@@ -19,7 +19,14 @@ import {
   type MultiTokenPoolRemoteFact,
   sortFindings,
 } from '../../multi-token-pool.ts'
-import type { MultiTokenPoolLaneKey } from './contracts.ts'
+import {
+  validateArray,
+  validateBoolean,
+  validateOneOf,
+  validateUint32,
+  validateUint64,
+} from '../validate.ts'
+import { type MultiTokenPoolLaneKey, validateLaneKeys } from './contracts.ts'
 import {
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
@@ -505,13 +512,51 @@ export function multiTokenPoolChainLanes(
   return resolveMultiTokenPoolLanes(state, lanes)
 }
 
+const DIRECTIONS = ['outbound', 'inbound'] as const
+
+/**
+ * Validates guard options before any RPC: a write's own params (`prefix` empty) or the options a
+ * snapshot sealed (`prefix` naming where they sit), with the same validators the reads use.
+ * @throws {@link CCTParamsInvalidError} naming the first invalid option
+ * @internal
+ */
+export function validateMultiTokenPoolGuardOptions(
+  operation: string,
+  prefix: string,
+  o: Record<string, unknown>,
+): asserts o is MultiTokenPoolGuardOptions {
+  const at = (name: string) => `${prefix}${name}`
+  if (o.allowDroppingDefaultCCVs !== undefined)
+    validateBoolean(operation, at('allowDroppingDefaultCCVs'), o.allowDroppingDefaultCCVs)
+  if (o.maxTransferFeeBps !== undefined)
+    validateUint32(operation, at('maxTransferFeeBps'), o.maxTransferFeeBps)
+  if (o.minDestGasOverhead !== undefined)
+    validateUint32(operation, at('minDestGasOverhead'), o.minDestGasOverhead)
+  if (o.confirmClosing !== undefined)
+    validateLaneKeys(operation, at('confirmClosing'), o.confirmClosing, 0)
+  if (o.confirmOpening !== undefined) {
+    validateLaneKeys(operation, at('confirmOpening'), o.confirmOpening, 0)
+    o.confirmOpening.forEach((l, i) => {
+      const { directions } = l as { directions?: unknown }
+      validateArray(operation, at(`confirmOpening[${i}].directions`), directions)
+      Array.from(directions, (d, j) =>
+        validateOneOf(operation, at(`confirmOpening[${i}].directions[${j}]`), d, DIRECTIONS),
+      )
+    })
+  }
+  if (o.migrationWindowChains !== undefined) {
+    validateArray(operation, at('migrationWindowChains'), o.migrationWindowChains)
+    Array.from(o.migrationWindowChains, (c, i) =>
+      validateUint64(operation, at(`migrationWindowChains[${i}]`), c),
+    )
+  }
+}
+
 /** A lane and the directions an answer concerns. @internal */
 export type MultiTokenPoolLaneDirections = MultiTokenPoolLaneKey & {
   /** The directions. */
   directions: TransferDirection[]
 }
-
-const DIRECTIONS = ['outbound', 'inbound'] as const
 
 /** Whether a lane is live in a direction: it has a connection and no pause holds that direction. */
 function liveIn(l: ProjectedMultiTokenPoolLane, d: TransferDirection): boolean {

@@ -38,11 +38,7 @@ import {
 import { simulateEVMTx } from '../simulate.ts'
 import { toTokenTransferFeeConfig } from '../token-pool/contracts.ts'
 import { type DecodedMultiTokenPoolWrite, decodeMultiTokenPoolWrite } from './calldata.ts'
-import {
-  type MultiTokenPoolLaneKey,
-  readPoolConfigManagerStaticConfig,
-  toAbiLaneKey,
-} from './contracts.ts'
+import { type MultiTokenPoolLaneKey, toAbiLaneKey } from './contracts.ts'
 import { type AbiRateLimits, decodeRateLimits } from './decode.ts'
 import { readMultiTokenPoolGuardFacts } from './guard-facts.ts'
 import {
@@ -140,14 +136,14 @@ export async function runMultiTokenPoolGuards(
   const errorOperation = input.errorOperation ?? operation
   const decoded = decodeMultiTokenPoolWrite(data, version)
   const blockNumber = input.blockTag ?? (await chain.provider.getBlockNumber())
-  const [{ state: before }, { tokenAdminRegistry }] = await Promise.all([
+  const {
+    state: before,
+    staticConfig: { tokenAdminRegistry },
+  } = await readMultiTokenPoolRecordState(chain, poolConfigManager, version, {
+    blockTag: blockNumber,
     // chains the write names may have no record yet, and can already be paused
-    readMultiTokenPoolRecordState(chain, poolConfigManager, version, {
-      blockTag: blockNumber,
-      extraChains: multiTokenPoolChangeChains(decoded.changes),
-    }),
-    readPoolConfigManagerStaticConfig(chain, poolConfigManager, version),
-  ])
+    extraChains: multiTokenPoolChangeChains(decoded.changes),
+  })
   const after = applyMultiTokenPoolRecordChanges(before, decoded.changes)
   // both sides need provider answers for every lane they resolve from a policy
   const candidates = multiTokenPoolCandidateLanes(before, after)
@@ -363,6 +359,29 @@ function hashGuardInputs(
 }
 
 /**
+ * What moved between a snapshot and the state now: each kept value whose canonical form differs, and
+ * the guard inputs. Non-throwing; the snapshot check reports it, {@link assertSnapshotHolds} throws.
+ * @internal
+ */
+export function snapshotChanges(
+  snapshot: MultiTokenPoolSnapshot,
+  current: { guardInputsHash: string; expected: Record<string, unknown> },
+): CCTStateChange[] {
+  const changed: CCTStateChange[] = []
+  const paths = new Set([...Object.keys(snapshot.expected), ...Object.keys(current.expected)])
+  for (const path of [...paths].sort())
+    if (canonicalHash([snapshot.expected[path]]) !== canonicalHash([current.expected[path]]))
+      changed.push({ path, expected: snapshot.expected[path], actual: current.expected[path] })
+  if (snapshot.guardInputsHash !== current.guardInputsHash)
+    changed.push({
+      path: 'guardInputsHash',
+      expected: snapshot.guardInputsHash,
+      actual: current.guardInputsHash,
+    })
+  return changed
+}
+
+/**
  * Refuses a snapshot that another op built, that covers other calldata, or whose guard inputs or
  * kept values have moved.
  * @throws {@link CCTStateChangedError} listing what moved
@@ -385,17 +404,7 @@ export function assertSnapshotHolds(
       'expectedSnapshot',
       'covers other calldata: pass the snapshot built with these exact params',
     )
-  const changed: CCTStateChange[] = []
-  const paths = new Set([...Object.keys(snapshot.expected), ...Object.keys(current.expected)])
-  for (const path of [...paths].sort())
-    if (canonicalHash([snapshot.expected[path]]) !== canonicalHash([current.expected[path]]))
-      changed.push({ path, expected: snapshot.expected[path], actual: current.expected[path] })
-  if (snapshot.guardInputsHash !== current.guardInputsHash)
-    changed.push({
-      path: 'guardInputsHash',
-      expected: snapshot.guardInputsHash,
-      actual: current.guardInputsHash,
-    })
+  const changed = snapshotChanges(snapshot, current)
   if (changed.length)
     throw new CCTStateChangedError(
       operation,

@@ -46,4 +46,30 @@ describe('ApplyMultiTokenPoolTokenPolicyUpdates (cct/evm pool-config-manager)', 
       )
     assert.deepEqual(calls, [])
   })
+
+  it('refuses bad guard options and a bad sender before any RPC, with the shared validators', async () => {
+    const { chain, calls } = stackChain()
+    const lane = { tokenAddress: T, remoteChainSelector: 1n }
+    for (const [bad, param] of [
+      [{ ...base, maxTransferFeeBps: -1 }, 'maxTransferFeeBps'],
+      [{ ...base, minDestGasOverhead: 1.5 }, 'minDestGasOverhead'],
+      [{ ...base, allowDroppingDefaultCCVs: 'yes' }, 'allowDroppingDefaultCCVs'],
+      [
+        { ...base, confirmClosing: [{ ...lane, tokenAddress: '0x12' }] },
+        'confirmClosing[0].tokenAddress',
+      ],
+      [
+        { ...base, confirmOpening: [{ ...lane, directions: ['sideways'] }] },
+        'confirmOpening[0].directions[0]',
+      ],
+      [{ ...base, migrationWindowChains: [-1n] }, 'migrationWindowChains[0]'],
+      [{ ...base, sender: '0xnope' }, 'sender'],
+    ] as const)
+      await assert.rejects(
+        new ApplyMultiTokenPoolTokenPolicyUpdates().generate(chain, bad as never),
+        (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === param,
+        param,
+      )
+    assert.deepEqual(calls, [])
+  })
 })

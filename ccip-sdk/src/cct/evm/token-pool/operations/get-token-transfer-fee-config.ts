@@ -102,6 +102,7 @@ export class GetTokenTransferFeeConfig extends EVMQuery<
       tokenAddress,
     }: GetTokenTransferFeeConfigParams,
   ): Promise<GetTokenTransferFeeConfigResult> {
+    const requested = toBeHex(encodeFinality(finality ?? 'finalized'), 4)
     let version
     try {
       ;({ version } = await resolveTokenPool(chain, poolAddress))
@@ -114,7 +115,7 @@ export class GetTokenTransferFeeConfig extends EVMQuery<
         pool.version,
         pool.tokenAddress,
         remoteChainSelector,
-        toBeHex(encodeFinality(finality ?? 'finalized'), 4),
+        requested,
         tokenArgs,
       )
     }
@@ -122,7 +123,7 @@ export class GetTokenTransferFeeConfig extends EVMQuery<
       chain,
       poolAddress,
       remoteChainSelector,
-      toBeHex(encodeFinality(finality ?? 'finalized'), 4),
+      requested,
       tokenArgs ?? '0x',
     )
   }

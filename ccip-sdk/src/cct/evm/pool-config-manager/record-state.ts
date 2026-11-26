@@ -19,6 +19,7 @@ import {
 } from '../multi-token-pool/contracts.ts'
 import {
   type MultiTokenPoolLaneKey,
+  type PoolConfigManagerStaticConfig,
   LANE_BATCH_SIZE,
   policyNameOf,
   readChainPauseFlags,
@@ -56,6 +57,8 @@ export type MultiTokenPoolRecordStateRead = {
   blockNumber: number
   /** Every (token, supported chain) of the tokens read. */
   lanes: MultiTokenPoolLaneKey[]
+  /** The PCM's static config, read at the same block (callers need its TokenAdminRegistry). */
+  staticConfig: PoolConfigManagerStaticConfig
 }
 
 /**
@@ -79,14 +82,14 @@ export async function readMultiTokenPoolRecordState(
   const blockNumber = blockTag ?? (await chain.provider.getBlockNumber())
   const at = { blockTag: blockNumber }
   const pcm = poolConfigManagerContract(chain, address, version)
-  const [{ connectionPolicyStore }, tokens, nameLists] = await Promise.all([
-    readPoolConfigManagerStaticConfig(chain, address, version),
+  const [staticConfig, tokens, nameLists] = await Promise.all([
+    readPoolConfigManagerStaticConfig(chain, address, version, at),
     tokenAddresses
       ? tokenAddresses.map((t) => getAddress(t))
       : readConfiguredTokens(chain, address, version, at).then((r) => r.tokens),
     pcm.getPolicyNames(at),
   ])
-  const store = connectionPolicyStoreContract(chain, connectionPolicyStore, version)
+  const store = connectionPolicyStoreContract(chain, staticConfig.connectionPolicyStore, version)
 
   // tokens: policies, own pauses and inline records
   const tokenRecords: MultiTokenPoolTokenRecords[] = await readInBatches(
@@ -187,7 +190,7 @@ export async function readMultiTokenPoolRecordState(
     requiredMultiTokenPoolProviderAnswers(state, lanes),
     blockNumber,
   )
-  return { state, blockNumber, lanes }
+  return { state, blockNumber, lanes, staticConfig }
 }
 
 /**

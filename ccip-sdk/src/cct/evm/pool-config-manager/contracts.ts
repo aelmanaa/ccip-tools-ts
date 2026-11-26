@@ -20,6 +20,7 @@ import {
 
 import type { EVMChain } from '../../../evm/index.ts'
 import {
+  type PoolConfigManagerStores,
   decodeLaneConnection,
   decodePoolConfigManagerStaticConfig,
   decodeTokenProfileFields,
@@ -360,7 +361,7 @@ export type MultiTokenPoolLaneKey = {
 export const LANE_BATCH_SIZE = 100
 
 /**
- * Validates a non-empty list of {@link MultiTokenPoolLaneKey}s.
+ * Validates a list of {@link MultiTokenPoolLaneKey}s, non-empty unless `minLength` is 0.
  * @throws {@link CCTParamsInvalidError} naming the first invalid entry
  * @internal
  */
@@ -368,8 +369,9 @@ export function validateLaneKeys(
   operation: string,
   param: string,
   lanes: unknown,
+  minLength = 1,
 ): asserts lanes is MultiTokenPoolLaneKey[] {
-  validateArray(operation, param, lanes, 1)
+  validateArray(operation, param, lanes, minLength)
   Array.from(lanes, (lane, i) => {
     const { tokenAddress, remoteChainSelector } = (lane ?? {}) as Record<string, unknown>
     validateAddress(operation, `${param}[${i}].tokenAddress`, tokenAddress)
@@ -412,16 +414,7 @@ export function readLaneBatches<R>(
 }
 
 /** The TokenAdminRegistry and the three stores a PCM was deployed with. */
-export type PoolConfigManagerStaticConfig = {
-  /** The TokenAdminRegistry the PCM checks token admins against. */
-  tokenAdminRegistry: string
-  /** Store of connection and remote-pool policies. */
-  connectionPolicyStore: string
-  /** Store of fee and destination-overhead policies. */
-  feePolicyStore: string
-  /** Store of rate-limit and security policies. */
-  securityPolicyStore: string
-}
+export type PoolConfigManagerStaticConfig = PoolConfigManagerStores
 
 /**
  * Reads a PCM's `getStaticConfig()`.
@@ -431,10 +424,13 @@ export async function readPoolConfigManagerStaticConfig(
   chain: EVMChain,
   address: string,
   version: MultiTokenPoolVersion,
+  { blockTag }: { blockTag?: number } = {},
 ): Promise<PoolConfigManagerStaticConfig> {
   // positional: abitype types the four outputs as a tuple; the runtime Result also has names
   return decodePoolConfigManagerStaticConfig(
-    await poolConfigManagerContract(chain, address, version).getStaticConfig(),
+    await poolConfigManagerContract(chain, address, version).getStaticConfig(
+      blockTag === undefined ? {} : { blockTag },
+    ),
   )
 }
 

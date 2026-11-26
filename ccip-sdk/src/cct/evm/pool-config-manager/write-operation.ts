@@ -26,6 +26,7 @@ import {
 } from '../multi-token-pool/contracts.ts'
 import { type EVMExecuteParams, EVMOperation } from '../operation.ts'
 import { submit } from '../submit.ts'
+import { validateAddress } from '../validate.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PoolConfigManagerTarget,
@@ -33,7 +34,7 @@ import {
   validatePoolConfigManagerTarget,
 } from './contracts.ts'
 import { runMultiTokenPoolGuards } from './guard-run.ts'
-import type { MultiTokenPoolLaneDirections } from './guards.ts'
+import { type MultiTokenPoolLaneDirections, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
 /** Common fields of every PoolConfigManager write. */
 export type PoolConfigManagerWriteParams = PoolConfigManagerTarget & {
@@ -141,9 +142,11 @@ export abstract class PoolConfigManagerWriteOperation<
     return undefined
   }
 
-  /** Validates the target; subclasses validate their own fields after calling it. */
+  /** Validates the target, sender and guard options; subclasses validate their own fields after it. */
   protected override prepare(params: P): Parsed {
     validatePoolConfigManagerTarget(this.name, params)
+    validateMultiTokenPoolGuardOptions(this.name, '', params)
+    if (params.sender !== undefined) validateAddress(this.name, 'sender', params.sender)
     return params as Parsed
   }
 
