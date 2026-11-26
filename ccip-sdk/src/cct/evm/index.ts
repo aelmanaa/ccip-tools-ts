@@ -12,6 +12,7 @@ import type { ChainContext } from '../../chain.ts'
 import { EVMChain } from '../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../evm/types.ts'
 import type { ChainFamily } from '../../networks.ts'
+import type { MultiTokenPoolSnapshotCheck } from '../multi-token-pool.ts'
 import type { TransactionResult } from '../operation.ts'
 import { TokenManager } from '../token-manager.ts'
 import {
@@ -87,6 +88,7 @@ import {
 } from './policy-store/operations/index.ts'
 import type { PoolConfigManagerTarget } from './pool-config-manager/contracts.ts'
 import {
+  type CheckMultiTokenPoolSnapshotParams,
   type GetMultiTokenPoolChainPausesParams,
   type GetMultiTokenPoolChainPausesResult,
   type GetMultiTokenPoolConfiguredTokensParams,
@@ -120,6 +122,7 @@ import {
   type GetMultiTokenPoolTokenProfilesResult,
   type GetPoolConfigManagerStateResult,
   type MultiTokenPoolTokenConfig,
+  CheckMultiTokenPoolSnapshot,
   GetMultiTokenPoolChainPauses,
   GetMultiTokenPoolConfiguredTokens,
   GetMultiTokenPoolConnectionPolicy,
@@ -465,6 +468,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
     new GetMultiTokenPoolLaneTokenTransferFeeConfigs()
   readonly #getMultiTokenPoolLaneRateLimiterStates = new GetMultiTokenPoolLaneRateLimiterStates()
   readonly #getMultiTokenPoolLaneVerifications = new GetMultiTokenPoolLaneVerifications()
+  readonly #checkMultiTokenPoolSnapshot = new CheckMultiTokenPoolSnapshot()
   readonly #getMultiTokenPoolHooksState = new GetMultiTokenPoolHooksState()
   readonly #getMultiTokenPoolProvider = new GetMultiTokenPoolProvider()
   readonly #getMultiTokenPoolPolicyNames = new GetMultiTokenPoolPolicyNames()
@@ -5176,6 +5180,36 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
     opts: GetMultiTokenPoolLaneBatchParams,
   ): Promise<GetMultiTokenPoolLaneVerificationsResult> {
     return this.#getMultiTokenPoolLaneVerifications.query(this.chain, opts)
+  }
+
+  /**
+   * Re-reads the state a snapshot recorded and re-runs the full post-state guard for the exact
+   * calldata from the executing account.
+   * @remarks Run it right before executing a proposal: the contracts cannot compare on chain, so a
+   * delayed proposal is protected only by this check. It applies the thresholds and confirmations the
+   * write was built with (sealed in the snapshot), simulates the call from `sender`, and cross-checks
+   * the projection with `eth_simulateV1` where the RPC has it. `ok` is `false` when anything the guard
+   * read has moved, or an error finding remains.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the snapshot is not
+   * the one returned with `transaction`, a remote fact cannot be read (pass `getChain`), or the call
+   * reverts when `sender` executes it
+   * @throws {@link CCTContractTypeInvalidError} if the transaction does not call a PoolConfigManager
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const { ok, changed, findings } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot!,
+   *   transaction: unsigned,
+   *   sender: SAFE,
+   *   getChain,
+   * })
+   * if (!ok) throw new Error(`reject the proposal: ${JSON.stringify({ changed, findings })}`)
+   * ```
+   */
+  checkMultiTokenPoolSnapshot(
+    opts: CheckMultiTokenPoolSnapshotParams,
+  ): Promise<MultiTokenPoolSnapshotCheck> {
+    return this.#checkMultiTokenPoolSnapshot.query(this.chain, opts)
   }
 
   /**

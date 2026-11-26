@@ -104,3 +104,7 @@ export {
   GetMultiTokenPoolSubsetTokens,
 } from './get-multi-token-pool-subset-tokens.ts'
 export type { GetMultiTokenPoolPolicyParams } from './policy-query.ts'
+export {
+  type CheckMultiTokenPoolSnapshotParams,
+  CheckMultiTokenPoolSnapshot,
+} from './check-multi-token-pool-snapshot.ts'

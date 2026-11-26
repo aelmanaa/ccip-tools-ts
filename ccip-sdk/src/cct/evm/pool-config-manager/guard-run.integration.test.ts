@@ -160,4 +160,29 @@ describe('MTTP post-state guard (Sepolia v5v9, read-only)', { skip, timeout: 600
       (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'getChain',
     )
   })
+
+  it('re-checks a proposal through checkMultiTokenPoolSnapshot with the sealed options', async (t) => {
+    if (!deployed) return t.skip('v5v9 multi-token pool not deployed')
+    const op = 'pauseMultiTokenPoolTokens'
+    const data = pause(OUTBOUND)
+    const { snapshot } = await runMultiTokenPoolGuards({
+      ...base,
+      operation: op,
+      data,
+      maxTransferFeeBps: 900,
+    })
+    assert.deepEqual(snapshot.expected['guard.options'], { maxTransferFeeBps: 900 })
+    const transaction = {
+      family: 'EVM' as const,
+      transactions: [{ to: PCM, data, from: OPERATOR }],
+    }
+    const cct = EVMTokenManager.fromChain(base.chain)
+    const check = await cct.checkMultiTokenPoolSnapshot({
+      snapshot,
+      transaction,
+      sender: OPERATOR,
+      getChain: base.getChain!,
+    })
+    assert.deepEqual(check, { ok: true, changed: [], findings: [] })
+  })
 })

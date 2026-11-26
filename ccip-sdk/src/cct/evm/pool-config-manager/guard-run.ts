@@ -89,6 +89,8 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   makesLive?: boolean
   /** Block to read at; defaults to the latest block, read once. */
   blockTag?: number
+  /** Return error findings in `findings` instead of refusing (the snapshot check reports them). */
+  reportFindings?: boolean
 }
 
 /** What a guarded write reports (the fields of `MultiTokenPoolUnsignedTx`). @internal */
@@ -99,6 +101,8 @@ export type MultiTokenPoolGuardResult = {
   affectedLanes: MultiTokenPoolLaneKey[]
   /** Warning findings (errors refuse). */
   warnings: MultiTokenPoolLaneFinding[]
+  /** Every finding, errors included (only with `reportFindings`; errors refuse otherwise). */
+  findings: MultiTokenPoolLaneFinding[]
   /** `true` when `eth_simulateV1` confirmed the projection; `false` when the RPC lacks it. */
   projectionVerified: boolean
   /** The state the write was judged on. */
@@ -170,7 +174,7 @@ export async function runMultiTokenPoolGuards(
     )
   }
   const errors = findings.filter((f) => f.severity === 'error')
-  if (errors.length)
+  if (errors.length && !input.reportFindings)
     throw new CCTParamsInvalidError(
       operation,
       'guards',
@@ -229,6 +233,7 @@ export async function runMultiTokenPoolGuards(
       remoteChainSelector,
     })),
     warnings: findings.filter((f) => f.severity === 'warning'),
+    findings,
     projectionVerified,
     snapshot,
     blockNumber,
