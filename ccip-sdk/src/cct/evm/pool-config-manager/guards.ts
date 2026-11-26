@@ -10,7 +10,7 @@
 
 import { ZeroAddress, getAddress } from 'ethers'
 
-import type { LaneRecordType } from '../../../chain.ts'
+import type { LaneRecordType, RateLimiterState } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import {
   type MultiTokenPoolLaneFinding,
@@ -70,6 +70,8 @@ export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   mapsBack: boolean
   /** Whether the remote token has code on the remote chain (read when the registry names no pool). */
   remoteTokenHasCode?: boolean
+  /** The remote pool's outbound bucket toward this chain (read for the lane check), `null` when disabled. */
+  remoteOutbound?: RateLimiterState
   /** The attestation the long-data fact came from, for a family the SDK cannot read. */
   attestation?: MultiTokenPoolRemoteAttestation
 }>

@@ -109,3 +109,4 @@ export {
   CheckMultiTokenPoolSnapshot,
 } from './check-multi-token-pool-snapshot.ts'
 export { GetMultiTokenPoolLane } from './get-multi-token-pool-lane.ts'
+export { CheckMultiTokenPoolLane } from './check-multi-token-pool-lane.ts'

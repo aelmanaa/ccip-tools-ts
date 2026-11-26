@@ -13,7 +13,9 @@ import { EVMChain } from '../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../evm/types.ts'
 import { ChainFamily } from '../../networks.ts'
 import type {
+  CheckMultiTokenPoolLaneParams,
   MultiTokenPoolLane,
+  MultiTokenPoolLaneCheckResult,
   MultiTokenPoolLaneParams,
   MultiTokenPoolSnapshotCheck,
 } from '../multi-token-pool.ts'
@@ -126,6 +128,7 @@ import {
   type GetMultiTokenPoolTokenProfilesResult,
   type GetPoolConfigManagerStateResult,
   type MultiTokenPoolTokenConfig,
+  CheckMultiTokenPoolLane,
   CheckMultiTokenPoolSnapshot,
   GetMultiTokenPoolChainPauses,
   GetMultiTokenPoolConfiguredTokens,
@@ -477,6 +480,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   readonly #getMultiTokenPoolLaneVerifications = new GetMultiTokenPoolLaneVerifications()
   readonly #checkMultiTokenPoolSnapshot = new CheckMultiTokenPoolSnapshot()
   readonly #getMultiTokenPoolLane = new GetMultiTokenPoolLane()
+  readonly #checkMultiTokenPoolLane = new CheckMultiTokenPoolLane()
   readonly #getMultiTokenPoolHooksState = new GetMultiTokenPoolHooksState()
   readonly #getMultiTokenPoolProvider = new GetMultiTokenPoolProvider()
   readonly #getMultiTokenPoolPolicyNames = new GetMultiTokenPoolPolicyNames()
@@ -5213,6 +5217,36 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    */
   getMultiTokenPoolLane(opts: MultiTokenPoolLaneParams): Promise<MultiTokenPoolLane> {
     return this.#getMultiTokenPoolLane.query(this.chain, opts)
+  }
+
+  /**
+   * Runs the lane check on one lane, locally and on the remote side: the post-state rules on the lane
+   * as it is, the token's registration, pauses and stops, the pool's mint and burn roles, the remote
+   * registry's pool and data format, the reverse mapping, and the inbound limit against the remote
+   * outbound one.
+   * @remarks Reports, never refuses: `ok` is `false` when any finding is an error. Fails closed: a
+   * remote fact that cannot be read (no `getChain`, a family the SDK cannot read yet) is an error
+   * finding, and `remote` says why. A provider can change its remote token with no PCM write; only
+   * this check catches that. Directions not in `expectOpen` report pauses as warnings.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), or the registry names
+   * no pool for the token
+   * @throws {@link CCTContractTypeInvalidError} if the pool is not a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const { ok, findings, remote } = await cct.checkMultiTokenPoolLane({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   tokenAddress: '0xToken...',
+   *   remoteChainSelector: 16015286601757825753n,
+   *   getChain,
+   * })
+   * for (const f of findings) console.log(f.severity, f.check, f.reason)
+   * ```
+   */
+  checkMultiTokenPoolLane(
+    opts: CheckMultiTokenPoolLaneParams,
+  ): Promise<MultiTokenPoolLaneCheckResult> {
+    return this.#checkMultiTokenPoolLane.query(this.chain, opts)
   }
 
   /**

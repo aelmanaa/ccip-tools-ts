@@ -65,6 +65,8 @@ export type ReadMultiTokenPoolGuardFactsInput = {
   now: bigint
   /** `true` for checks that make lanes live: they never use attestations. */
   makesLive?: boolean
+  /** Also read each remote pool's outbound bucket toward this chain (the lane check). */
+  readRemoteRateLimits?: boolean
 }
 
 /** A remote family the SDK reads the remote side of (attestations are refused for it). */
@@ -317,23 +319,31 @@ async function readRemoteLane(
   const [type] = await remote.typeAndVersion(registryPool)
   const readsLongData = reportsMultiTokenPool(type)
   // only a legacy lane relies on the reverse mapping
-  let mapsBack = true
-  if (lane.connection.poolDataFormat === 'legacy') {
-    const back = await remote
-      .getTokenPoolRemotes(registryPool, localSelector, { token: remoteToken })
-      .then(
-        (remotes) => Object.values(remotes)[0],
-        (err: unknown) => {
-          if (err instanceof CCIPTokenPoolChainConfigNotFoundError) return undefined
-          throw err
-        },
-      )
-    mapsBack =
-      !!back &&
-      getAddress(back.remoteToken) === getAddress(lane.tokenAddress) &&
-      back.remotePools.some((p) => servingPools.includes(getAddress(p)))
+  // the remote lane back: the reverse mapping a legacy lane relies on, and the remote outbound
+  // limit the lane check compares with this lane's inbound
+  const legacy = lane.connection.poolDataFormat === 'legacy'
+  if (!legacy && !input.readRemoteRateLimits)
+    return { status: 'known', readsLongData, registryPool, mapsBack: true }
+  const back = await remote
+    .getTokenPoolRemotes(registryPool, localSelector, { token: remoteToken })
+    .then(
+      (remotes) => Object.values(remotes)[0],
+      (err: unknown) => {
+        if (err instanceof CCIPTokenPoolChainConfigNotFoundError) return undefined
+        throw err
+      },
+    )
+  const pointsBack =
+    !!back &&
+    getAddress(back.remoteToken) === getAddress(lane.tokenAddress) &&
+    back.remotePools.some((p) => servingPools.includes(getAddress(p)))
+  return {
+    status: 'known',
+    readsLongData,
+    registryPool,
+    mapsBack: legacy ? pointsBack : true,
+    ...(input.readRemoteRateLimits && back && { remoteOutbound: back.outboundRateLimiterState }),
   }
-  return { status: 'known', readsLongData, registryPool, mapsBack }
 }
 
 /** Whether the remote token has code (EVM remotes; other families do not say). */
