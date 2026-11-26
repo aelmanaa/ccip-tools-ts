@@ -126,6 +126,11 @@ export type SolanaRemoteLaneBack = {
 export type SolanaRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   /** The pool `State` the Router's registry names for the mint, or `null` when it names none. */
   registryPool: string | null
+  /**
+   * `true` only when the caller passed `router` and the trusted pool's Router matched it. With the
+   * `type_version` fallback it is `false`: any program can answer that it is a Router.
+   */
+  routerVerified: boolean
   /** The program owning `registryPool`. */
   poolProgram?: string
   /** The registry's pool interface for the mint: 1 (CCIP 1.6-compatible) or 2. */
@@ -324,10 +329,12 @@ async function readFromTrusted(
   if (routerCheck) return routerCheck
   const registry = await readRegistry(solana, trusted.state.router, mint)
   if (isUnread(registry)) return registry
+  const routerVerified = query.router !== undefined
   if (!registry.registryPool)
     return {
       status: 'known',
       registryPool: null,
+      routerVerified,
       laneKind: 'none',
       readsLongData: false,
       ...(registry.interfaceVersion !== undefined && {
@@ -358,6 +365,7 @@ async function readFromTrusted(
   return {
     status: 'known',
     registryPool: registryPool.toBase58(),
+    routerVerified,
     poolProgram: pool.program.toBase58(),
     interfaceVersion: registry.interfaceVersion,
     ...lane,

@@ -305,6 +305,7 @@ describe('readSolanaRemoteLaneFacts', () => {
     assert.equal(facts.uid, null)
     assert.equal(facts.readsLongData, false)
     assert.equal(facts.registryPool, STATE.toBase58())
+    assert.equal(facts.routerVerified, true)
     assert.equal(facts.interfaceVersion, 2)
     assert.ok(facts.back)
     // stored 32-byte padded, returned checksummed at 20 bytes and raw at 32
@@ -620,16 +621,13 @@ describe('readSolanaRemoteLaneFacts', () => {
     // an unset (default) router fails the same way
     const unset = lane({ extra: [[fakeState, stateData(MINT, PublicKey.default), OTHER_PROGRAM]] })
     await unknownReason(unset, q)
-    // a real Router reached without `router`
-    assert.equal(
-      (
-        await known(lane({ cc: chainConfigData() }), {
-          ...noRouter,
-          trustedPools: [STATE.toBase58()],
-        })
-      ).laneKind,
-      'standard',
-    )
+    // a real Router reached without `router`: read, but not verified
+    const fallback = await known(lane({ cc: chainConfigData() }), {
+      ...noRouter,
+      trustedPools: [STATE.toBase58()],
+    })
+    assert.equal(fallback.laneKind, 'standard')
+    assert.equal(fallback.routerVerified, false)
   })
 
   it('reads the registry pool when it differs from the trusted pool, and checks it', async () => {
@@ -657,6 +655,7 @@ describe('readSolanaRemoteLaneFacts', () => {
     assert.deepEqual(await known(set(lane(), TAR, registryData(2, null), ROUTER)), {
       status: 'known',
       registryPool: null,
+      routerVerified: true,
       laneKind: 'none',
       readsLongData: false,
       interfaceVersion: 2,
