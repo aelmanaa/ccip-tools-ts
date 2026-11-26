@@ -12,6 +12,7 @@ import { resultToObject } from '../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import {
   type MultiTokenPoolVersion,
+  MULTI_TOKEN_POOL_OPERATIONS,
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
   nullableAddress,
@@ -139,14 +140,12 @@ export const NO_RECORD_CHANGE_FUNCTIONS: ReadonlySet<string> = new Set([
   'validateReleaseOrMint',
 ])
 
-const TOKEN_POLICY_FUNCTIONS: Record<string, LaneRecordType> = {
-  applyTokenConnectionPolicyUpdates: 'connection',
-  applyTokenRemotePoolPolicyUpdates: 'remotePool',
-  applyTokenRateLimitPolicyUpdates: 'rateLimit',
-  applyTokenFeePolicyUpdates: 'fee',
-  applyTokenDestOverheadPolicyUpdates: 'destOverhead',
-  applyTokenSecurityPolicyUpdates: 'security',
-}
+/** The record type of each assignment function: the op map's `functions`, inverted. */
+const TOKEN_POLICY_FUNCTIONS: Record<string, LaneRecordType> = Object.fromEntries(
+  Object.entries(MULTI_TOKEN_POOL_OPERATIONS.applyMultiTokenPoolTokenPolicyUpdates.functions).map(
+    ([type, fn]) => [fn, type as LaneRecordType],
+  ),
+)
 
 /**
  * Decodes PCM calldata into record changes.
