@@ -9,12 +9,17 @@
  * @packageDocumentation
  */
 
-import { Interface, id as keccak256Utf8 } from 'ethers'
+import { Interface, ZeroAddress, getAddress, id as keccak256Utf8 } from 'ethers'
 import type { TypedContract } from 'ethers-abitype'
 
 import type { EVMChain } from '../../../evm/index.ts'
 import { isMultiTokenPoolType } from '../../../evm/multi-token-pool.ts'
-import { CCTContractTypeInvalidError, CCTContractVersionUnsupportedError } from '../../errors.ts'
+import { resultToObject } from '../../../evm/types.ts'
+import {
+  CCTContractTypeInvalidError,
+  CCTContractVersionUnsupportedError,
+  CCTDataDecodeError,
+} from '../../errors.ts'
 import BURN_MINT_MULTI_TOKEN_POOL_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/burn-mint-multi-token-pool.ts'
 import CONNECTION_POLICY_STORE_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/connection-policy-store.ts'
 import FACTORY_TOKEN_WITH_UID_POOL_DATA_PROVIDER_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/factory-token-with-uid-pool-data-provider.ts'
@@ -621,4 +626,124 @@ export function sameAddressProviderContract(
     address,
     MULTI_TOKEN_POOL_ABIS.SameAddressRemoteTokenAddressProvider[MultiTokenPoolVersion.V2_1_0_DEV],
   )
+}
+
+/**
+ * ERC-165 ID of `IMultiTokenPool`: the XOR of the selectors it declares itself
+ * (`isSupportedChain(address,uint64)`, `getRemoteToken(address,uint64)`, `getTokenDecimals(address)`,
+ * `withdrawFeeTokens(address[],address)`). `contracts.test.ts` recomputes it from the vendored ABI.
+ * @internal
+ */
+export const I_MULTI_TOKEN_POOL_INTERFACE_ID = '0x409c3bb0'
+
+/** Storage slot of `s_pendingOwner` in Chainlink `Ownable2Step` (declared first; `s_owner` is slot 1). */
+const PENDING_OWNER_SLOT = 0n
+/** Storage slot of `s_owner` in Chainlink `Ownable2Step`. */
+const OWNER_SLOT = 1n
+
+/** The address an `address` storage word holds. */
+function wordToAddress(word: string): string {
+  return getAddress('0x' + word.slice(-40))
+}
+
+/** The `Ownable2Step` owner getter, as every contract of the stack declares it. */
+const OWNABLE_ABI = [
+  {
+    type: 'function',
+    name: 'owner',
+    inputs: [],
+    outputs: [{ name: '', type: 'address', internalType: 'address' }],
+    stateMutability: 'view',
+  },
+] as const
+
+/** A contract's owner and its pending `Ownable2Step` transfer. */
+export type PendingOwner = {
+  /** The proposed owner that has not accepted yet, or `null` when no transfer is pending. */
+  pendingOwner: string | null
+}
+
+/**
+ * Reads a Chainlink `Ownable2Step` contract's owner and pending owner at one block. The pending owner
+ * has no getter: it is storage slot 0, read only after checking that slot 1 holds `owner()`, so a
+ * different storage layout is reported, never misread.
+ *
+ * @param chain - Chain to read on.
+ * @param address - The `Ownable2Step` contract.
+ * @param blockTag - Block to read at; defaults to the latest block, read once.
+ * @returns `owner` and `pendingOwner` (`null` when no transfer is pending).
+ * @throws {@link CCTDataDecodeError} if slot 1 does not hold `owner()`: the layout is not the
+ * vendored one
+ * @internal
+ */
+export async function readOwnership(
+  chain: EVMChain,
+  address: string,
+  blockTag?: number,
+): Promise<PendingOwner & { owner: string }> {
+  // one block for the getter and both slots, so a transfer landing in between cannot look like a
+  // layout mismatch
+  const block = blockTag ?? (await chain.provider.getBlockNumber())
+  const [owner, ownerWord, pendingWord] = await Promise.all([
+    getTypedContract(chain, address, OWNABLE_ABI)
+      .owner({ blockTag: block })
+      .then((o) => getAddress(resultToObject(o))),
+    chain.provider.getStorage(address, OWNER_SLOT, block),
+    chain.provider.getStorage(address, PENDING_OWNER_SLOT, block),
+  ])
+  if (wordToAddress(ownerWord) !== owner)
+    throw new CCTDataDecodeError(address, {
+      recovery:
+        'The contract is not laid out as Chainlink Ownable2Step (owner in slot 1), so its pending owner cannot be read safely; owner() still works. Check the address and its typeAndVersion.',
+      context: {
+        reason: `storage slot ${OWNER_SLOT} does not hold owner() ${owner}`,
+      },
+    })
+  const pending = wordToAddress(pendingWord)
+  return { owner, pendingOwner: pending === ZeroAddress ? null : pending }
+}
+
+/** Errors a node returns for state it has pruned (no archive), as opposed to a transport failure. */
+const PRUNED_STATE =
+  /missing trie node|header not found|historical state|state (is )?not available|pruned|archive/i
+
+/**
+ * The block a contract was deployed in: the lowest block where it has code, by binary search over
+ * `eth_getCode` (needs an RPC that serves historical state).
+ * @param chain - Chain to read on.
+ * @param address - The contract.
+ * @param latest - Upper bound of the search.
+ * @returns The deployment block (`latest + 1` when there is no code at `latest`), or `undefined`
+ * when the RPC answers historical code with a pruned-state error. Any other error propagates.
+ * @remarks A node that answers pruned history with `0x` instead of an error makes the search land
+ * later than the real deployment; callers treat the result as a lower bound of what they scanned.
+ * @internal
+ */
+export async function findDeploymentBlock(
+  chain: EVMChain,
+  address: string,
+  latest: number,
+): Promise<number | undefined> {
+  try {
+    if ((await chain.provider.getCode(address, latest)) === '0x') return latest + 1
+    let [lo, hi] = [0, latest]
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2)
+      if ((await chain.provider.getCode(address, mid)) === '0x') lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  } catch (err) {
+    if (err instanceof Error && PRUNED_STATE.test(err.message)) return
+    throw err
+  }
+}
+
+/**
+ * Resolves a multi-token pool at `address` (exact type and version).
+ * @throws as {@link resolveMultiTokenPoolContract}
+ * @internal
+ */
+export function resolveMultiTokenPool(chain: EVMChain, address: string) {
+  return resolveMultiTokenPoolContract(chain, address, MULTI_TOKEN_POOL_TYPES)
 }

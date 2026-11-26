@@ -61,7 +61,31 @@ import {
   UpdateLockboxAuthorizedCallers,
   WithdrawFromLockbox,
 } from './lockbox/operations/index.ts'
+import {
+  type GetMultiTokenPoolStackResult,
+  type GetMultiTokenPoolStateResult,
+  type MultiTokenPoolReadParams,
+  GetMultiTokenPoolStack,
+  GetMultiTokenPoolState,
+  IsMultiTokenPool,
+} from './multi-token-pool/operations/index.ts'
 import type { DeployResult, EVMExecuteParams } from './operation.ts'
+import {
+  type GetPolicyStoreStateParams,
+  type GetPolicyStoreStateResult,
+  GetPolicyStoreState,
+} from './policy-store/operations/index.ts'
+import type { PoolConfigManagerTarget } from './pool-config-manager/contracts.ts'
+import {
+  type GetMultiTokenPoolRoleHoldersParams,
+  type GetMultiTokenPoolRoleHoldersResult,
+  type GetMultiTokenPoolRolesParams,
+  type GetMultiTokenPoolRolesResult,
+  type GetPoolConfigManagerStateResult,
+  GetMultiTokenPoolRoleHolders,
+  GetMultiTokenPoolRoles,
+  GetPoolConfigManagerState,
+} from './pool-config-manager/operations/index.ts'
 import {
   type AcceptAdminParams,
   type GetSupportedTokensParams,
@@ -365,6 +389,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   readonly #withdrawFromLockbox = new WithdrawFromLockbox()
   readonly #transferLockboxOwnership = new TransferLockboxOwnership()
   readonly #acceptLockboxOwnership = new AcceptLockboxOwnership()
+  // multi-token pool (MTTP) reads
+  readonly #isMultiTokenPool = new IsMultiTokenPool()
+  readonly #getMultiTokenPoolState = new GetMultiTokenPoolState()
+  readonly #getMultiTokenPoolStack = new GetMultiTokenPoolStack()
+  readonly #getPoolConfigManagerState = new GetPoolConfigManagerState()
+  readonly #getMultiTokenPoolRoles = new GetMultiTokenPoolRoles()
+  readonly #getMultiTokenPoolRoleHolders = new GetMultiTokenPoolRoleHolders()
+  readonly #getPolicyStoreState = new GetPolicyStoreState()
 
   /** Wraps an {@link EVMChain}; prefer the static factory methods. */
   constructor(chain: EVMChain) {
@@ -4720,6 +4752,142 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   getAllowlistEnabled(opts: GetAllowlistEnabledParams): Promise<GetAllowlistEnabledResult> {
     return this.#getAllowlistEnabled.query(this.chain, opts)
   }
+
+  // ── Multi-token pool (MTTP): detection and stack reads ──
+
+  /**
+   * Reads whether `poolAddress` is a multi-token pool: ERC-165 `IMultiTokenPool`, falling back to
+   * the `typeAndVersion` name when the call is missing.
+   * @remarks The only ERC-165 probe in the CCT layer; core reads keep their synchronous name test.
+   * Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @example
+   * ```typescript
+   * const result = await cct.isMultiTokenPool({ poolAddress: '0xMultiTokenPool...' })
+   * ```
+   */
+  isMultiTokenPool(opts: MultiTokenPoolReadParams): Promise<boolean> {
+    return this.#isMultiTokenPool.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a multi-token pool: type, version, owner, pending owner, Router, RMN proxy and PCM.
+   * @remarks The pending owner has no getter: it is read from the `Ownable2Step` storage slot, after
+   * checking that the owner slot holds `owner()`, so a different layout is reported, never misread.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the pool is not a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if its version is unknown
+   * @throws {@link CCTDataDecodeError} if its storage is not the `Ownable2Step` layout
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolState({ poolAddress: '0xMultiTokenPool...' })
+   * ```
+   */
+  getMultiTokenPoolState(opts: MultiTokenPoolReadParams): Promise<GetMultiTokenPoolStateResult> {
+    return this.#getMultiTokenPoolState.query(this.chain, opts)
+  }
+
+  /**
+   * Reads and audits the whole stack: pool, PCM, three stores, owners, pending owners, authorized
+   * callers, and the pools sharing the PCM.
+   * @remarks Findings: `PCM_NOT_ON_STORE`, `STALE_PCM_AUTHORIZED` (F4), `EXTRA_STORE_CALLER` and
+   * `OWNER_MISMATCH` (F5), `PENDING_OWNERSHIP`, `TAR_MISMATCH`, `REGISTRATION_DIVERGED`,
+   * `ZERO_ADMIN_DELAY` (F8). Reads every registered token's pool from the TokenAdminRegistry, so
+   * its cost grows with the token count.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if a contract of the stack has the wrong type
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if a contract's storage is not the `Ownable2Step` layout its
+   * pending owner is read from
+   * @example
+   * ```typescript
+   * const { findings } = await cct.getMultiTokenPoolStack({ poolAddress: '0xMultiTokenPool...' })
+   * for (const f of findings) console.log(f.severity, f.check, f.reason)
+   * ```
+   */
+  getMultiTokenPoolStack(opts: MultiTokenPoolReadParams): Promise<GetMultiTokenPoolStackResult> {
+    return this.#getMultiTokenPoolStack.query(this.chain, opts)
+  }
+
+  /**
+   * Reads the PCM: static config, TAR and default-admin state (pending admin, delays).
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const result = await cct.getPoolConfigManagerState({ poolAddress: '0xMultiTokenPool...' })
+   * ```
+   */
+  getPoolConfigManagerState(
+    opts: PoolConfigManagerTarget,
+  ): Promise<GetPoolConfigManagerStateResult> {
+    return this.#getPoolConfigManagerState.query(this.chain, opts)
+  }
+
+  /**
+   * Reads the PCM roles each of `accounts` holds.
+   * @remarks One `hasRole` per (account, role), in parallel.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if the pool's or the PCM's version is unknown
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolRoles({ poolAddress: '0xMultiTokenPool...', accounts: ['0xOps...'] })
+   * ```
+   */
+  getMultiTokenPoolRoles(
+    opts: GetMultiTokenPoolRolesParams,
+  ): Promise<GetMultiTokenPoolRolesResult> {
+    return this.#getMultiTokenPoolRoles.query(this.chain, opts)
+  }
+
+  /**
+   * Lists every PCM role holder from `RoleGranted`/`RoleRevoked` logs, each confirmed with
+   * `hasRole`.
+   * @remarks The PCM is not enumerable. Ranges follow the chain's log paging, which shrinks on a range
+   * error; `complete` is `false` when the scan starts after the PCM deployment. Without `fromBlock` the
+   * deployment block is found from historical code, which needs an archive RPC.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), or `fromBlock` is
+   * omitted and the RPC cannot find the deployment block
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if the pool's or the PCM's version is unknown
+   * @example
+   * ```typescript
+   * // pass the PCM's deployment block (or 0) on an RPC without archive state
+   * const { holders, complete } = await cct.getMultiTokenPoolRoleHolders({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   fromBlock: 7_000_000,
+   * })
+   * if (!complete) console.warn('the scan may miss grants made before block 7,000,000')
+   * console.log('can change fees:', holders.FEE_ROLE, holders.CONFIG_ROLE)
+   * ```
+   */
+  getMultiTokenPoolRoleHolders(
+    opts: GetMultiTokenPoolRoleHoldersParams,
+  ): Promise<GetMultiTokenPoolRoleHoldersResult> {
+    return this.#getMultiTokenPoolRoleHolders.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a policy store: type, owner, pending owner and authorized callers.
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the address is not a policy store
+   * @throws {@link CCTContractVersionUnsupportedError} if its version is unknown
+   * @throws {@link CCTDataDecodeError} if its storage is not the `Ownable2Step` layout
+   * @example
+   * ```typescript
+   * const result = await cct.getPolicyStoreState({ policyStore: '0xStore...' })
+   * ```
+   */
+  getPolicyStoreState(opts: GetPolicyStoreStateParams): Promise<GetPolicyStoreStateResult> {
+    return this.#getPolicyStoreState.query(this.chain, opts)
+  }
 }
 
 export type * from './token-admin-registry/operations/index.ts'
@@ -4806,6 +4974,7 @@ export type {
   MultiTokenPoolOperationTarget,
   MultiTokenPoolProviderType,
   MultiTokenPoolType,
+  PendingOwner,
   PolicyStoreType,
   PoolConfigManagerGrantableRole,
   PoolConfigManagerRole,
@@ -4823,6 +4992,10 @@ export {
   isSupportedMultiTokenPoolType,
 } from './multi-token-pool/contracts.ts'
 export type * from '../multi-token-pool.ts'
+export type * from './multi-token-pool/operations/index.ts'
+export type * from './pool-config-manager/operations/index.ts'
+export type * from './policy-store/operations/index.ts'
+export type { PoolConfigManagerTarget } from './pool-config-manager/contracts.ts'
 export {
   MULTI_TOKEN_POOL_LANE_CHECKS,
   MULTI_TOKEN_POOL_STEP_SIGNER_KINDS,
