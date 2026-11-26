@@ -48,6 +48,7 @@ export type {
   TokenTransferFeeOpts,
   TokenUIMultiplier,
   TotalFeesEstimate,
+  TransferDirection,
   VerificationSourcesOpts,
 } from './chain.ts'
 export { DEFAULT_API_RETRY_CONFIG, LaneFeature } from './chain.ts'

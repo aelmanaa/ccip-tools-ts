@@ -4873,10 +4873,11 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   /**
    * Reads and audits the whole stack: pool, PCM, three stores, owners, pending owners, authorized
    * callers, and the pools sharing the PCM.
-   * @remarks Findings: `PCM_NOT_ON_STORE`, `STALE_PCM_AUTHORIZED` (F4), `EXTRA_STORE_CALLER` and
-   * `OWNER_MISMATCH` (F5), `PENDING_OWNERSHIP`, `TAR_MISMATCH`, `REGISTRATION_DIVERGED`,
-   * `ZERO_ADMIN_DELAY` (F8). Reads every registered token's pool from the TokenAdminRegistry, so
-   * its cost grows with the token count.
+   * @remarks Findings: `PCM_NOT_ON_STORE`, `STALE_PCM_AUTHORIZED` (another PCM can still write a
+   * store), `EXTRA_STORE_CALLER`, `OWNER_MISMATCH` (pool, stores and PCM admin differ),
+   * `PENDING_OWNERSHIP`, `TAR_MISMATCH`, `REGISTRATION_DIVERGED`, `ZERO_ADMIN_DELAY` (PCM governance
+   * changes are instant). Reads every registered token's pool from the TokenAdminRegistry, so its
+   * cost grows with the token count.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
    * @throws {@link CCTContractTypeInvalidError} if a contract of the stack has the wrong type
    * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown

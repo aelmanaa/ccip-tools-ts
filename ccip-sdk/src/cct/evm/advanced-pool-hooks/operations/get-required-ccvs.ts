@@ -7,6 +7,7 @@
  * @packageDocumentation
  */
 
+import type { TransferDirection } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { EVMQuery } from '../../query.ts'
@@ -19,7 +20,7 @@ import {
 } from '../contracts.ts'
 
 /** Transfer direction accepted by `IPoolV2.MessageDirection`. */
-export type CCVMessageDirection = 'outbound' | 'inbound'
+export type CCVMessageDirection = TransferDirection
 
 /**
  * Parameters for {@link GetRequiredCCVs}.

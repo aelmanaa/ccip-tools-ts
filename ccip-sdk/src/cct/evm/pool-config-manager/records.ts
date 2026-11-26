@@ -124,7 +124,7 @@ export type DestOverheadPolicyRecord = PolicyRecordKey & {
 
 /**
  * CCV lists and hook of a lane or policy record. `ZeroAddress` stands for the ramps' default CCVs.
- * An empty list also means "defaults"; only a non-empty list without `ZeroAddress` drops them (F2).
+ * An empty list also means "defaults"; only a non-empty list without `ZeroAddress` drops them.
  * No threshold lists: multi-token pools ignore amount (why `CCVConfig` is not reused).
  */
 export type MultiTokenPoolSecurityConfig = {

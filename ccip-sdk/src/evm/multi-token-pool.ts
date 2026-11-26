@@ -11,7 +11,7 @@
 
 import { ZeroAddress, getAddress } from 'ethers'
 
-import type { LaneRecordType, LaneStatus } from '../chain.ts'
+import type { LaneRecordType, LaneStatus, TransferDirection } from '../chain.ts'
 import { type FinalityAllowed, decodeFinalityAllowed } from '../extra-args.ts'
 
 /**
@@ -90,7 +90,7 @@ export type LanePauseFlags = {
 export function toMultiTokenLaneStatus(
   pauses: LanePauseFlags,
   recordLevels: readonly bigint[],
-  direction: 'outbound' | 'inbound',
+  direction: TransferDirection,
 ): LaneStatus {
   const outbound = direction === 'outbound'
   if (pauses.isGloballyPaused) return { status: 'paused', scope: 'global', direction }

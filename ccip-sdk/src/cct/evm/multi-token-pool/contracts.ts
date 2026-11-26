@@ -287,11 +287,11 @@ const OPERATIONS = {
   unpauseMultiTokenPoolTokens: { contracts: ['PoolConfigManager'], function: 'unpauseTokens' },
   pauseMultiTokenPoolChains: { contracts: ['PoolConfigManager'], function: 'pauseChains' },
   unpauseMultiTokenPoolChains: { contracts: ['PoolConfigManager'], function: 'unpauseChains' },
-  pauseMultiTokenPoolLanes: {
+  stopMultiTokenPoolLanes: {
     contracts: ['PoolConfigManager'],
     function: 'applyInlineRateLimitConfigUpdates',
   },
-  unpauseMultiTokenPoolLanes: {
+  liftMultiTokenPoolLaneStops: {
     contracts: ['PoolConfigManager'],
     function: 'applyInlineRateLimitConfigUpdates',
   },

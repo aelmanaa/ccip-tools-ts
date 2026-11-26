@@ -1,6 +1,6 @@
 /**
  * Reads the facts the post-state rules need beyond the projection: hook callers, serving pools,
- * provider data lengths, and the remote side of each lane (design §7.2).
+ * provider data lengths, and the remote side of each lane.
  *
  * @packageDocumentation
  */
@@ -38,7 +38,7 @@ import {
 } from './guards.ts'
 import type { ProjectedMultiTokenPoolLane } from './projection.ts'
 
-/** Longest an attestation may be valid for (design §7.2). @internal */
+/** Longest an attestation may be valid for. @internal */
 export const MAX_ATTESTATION_SECONDS = 24n * 60n * 60n
 
 /** Inputs of {@link readMultiTokenPoolGuardFacts}. @internal */
@@ -59,7 +59,7 @@ export type ReadMultiTokenPoolGuardFactsInput = {
   requests: MultiTokenPoolGuardFactRequests
   /** Resolves remote chains (core `ChainGetter`). */
   getChain?: ChainGetter
-  /** F14 facts for remote families the SDK cannot read. */
+  /** Long-data facts for remote families the SDK cannot read. */
   remoteAttestations?: readonly MultiTokenPoolRemoteAttestation[]
   /** Unix seconds now, for attestation validity. */
   now: bigint
@@ -69,7 +69,7 @@ export type ReadMultiTokenPoolGuardFactsInput = {
 
 /** A remote family the SDK reads the remote side of (attestations are refused for it). */
 const READABLE_FAMILIES: ReadonlySet<string> = new Set([ChainFamily.EVM])
-/** Families that always need `getChain` (design §7.2), readable or not yet. */
+/** Families that always need `getChain`, readable or not yet: attestations never stand in for them. */
 const GET_CHAIN_FAMILIES: ReadonlySet<string> = new Set([ChainFamily.EVM, ChainFamily.Solana])
 
 /**
@@ -247,7 +247,7 @@ async function remoteChainOf(
   return getChain(remoteChainSelector)
 }
 
-/** Checks an attestation against the rules of design §7.2; returns why it is refused, or `undefined`. */
+/** Checks an attestation against the attestation rules; returns why it is refused, or `undefined`. */
 export function attestationRefusal(
   a: MultiTokenPoolRemoteAttestation,
   { now, makesLive }: { now: bigint; makesLive?: boolean },
@@ -287,7 +287,7 @@ async function readRemoteLane(
       status: 'known',
       readsLongData: attestation.acceptsLongPoolData,
       registryPool: attestation.remotePoolAddress,
-      // F3's reverse mapping needs a read; legacy lanes fail closed without one
+      // the reverse mapping needs a read; legacy lanes fail closed without one
       mapsBack: false,
       attestation,
     }
@@ -316,7 +316,7 @@ async function readRemoteLane(
     }
   const [type] = await remote.typeAndVersion(registryPool)
   const readsLongData = reportsMultiTokenPool(type)
-  // F3: only a legacy lane relies on the reverse mapping
+  // only a legacy lane relies on the reverse mapping
   let mapsBack = true
   if (lane.connection.poolDataFormat === 'legacy') {
     const back = await remote

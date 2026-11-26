@@ -1,5 +1,5 @@
 /**
- * The post-state rules of a lane-affecting PCM write (design §7.1), evaluated on projected lanes.
+ * The post-state rules of a lane-affecting PCM write, evaluated on projected lanes.
  *
  * Pure: the lanes come from the projection, the facts the projection cannot know (remote side,
  * hook callers, provider data) are supplied, and the result is findings. The framework that reads
@@ -25,11 +25,11 @@ import {
   resolveMultiTokenPoolLanes,
 } from './projection.ts'
 
-/** Default {@link MultiTokenPoolGuardOptions.maxTransferFeeBps} (F6). @internal */
+/** Default {@link MultiTokenPoolGuardOptions.maxTransferFeeBps} (the token fee cap). @internal */
 export const DEFAULT_MAX_TRANSFER_FEE_BPS = 1_000
-/** Default {@link MultiTokenPoolGuardOptions.minDestGasOverhead} (G1). @internal */
+/** Default {@link MultiTokenPoolGuardOptions.minDestGasOverhead} (destination gas). @internal */
 export const DEFAULT_MIN_DEST_GAS_OVERHEAD = 200_000
-/** Gas a resolved hook adds to the default minimum (G1). @internal */
+/** Gas a resolved hook adds to the default minimum destination gas. @internal */
 export const HOOK_DEST_GAS_OVERHEAD = 100_000
 /** Long pool data without additional data: decimals, source token and two offsets/lengths. @internal */
 export const LONG_POOL_DATA_BYTES = 192
@@ -38,15 +38,15 @@ export const LEGACY_POOL_DATA_BYTES = 32
 
 /** The guard options a write takes (thresholds and confirmations, never switches). @internal */
 export type MultiTokenPoolGuardOptions = {
-  /** Accept non-empty CCV lists without the default-CCV placeholder (F2). */
+  /** Accept non-empty CCV lists without the default-CCV placeholder `address(0)`. */
   allowDroppingDefaultCCVs?: boolean
-  /** Highest resolved transfer fee in bps, both tiers (F6). */
+  /** Highest resolved transfer fee in bps, both tiers. */
   maxTransferFeeBps?: number
-  /** Lowest resolved `destGasOverhead` (G1). */
+  /** Lowest resolved `destGasOverhead`. */
   minDestGasOverhead?: number
-  /** Lanes the caller agrees this write closes (F11). */
+  /** Lanes the caller agrees this write closes. */
   confirmClosing?: MultiTokenPoolLaneKey[]
-  /** Remote chains where a lane may accept legacy pool data from a remote multi-token pool (F3). */
+  /** Remote chains where a lane may accept legacy pool data from a remote multi-token pool. */
   migrationWindowChains?: bigint[]
 }
 
@@ -62,15 +62,15 @@ export type MultiTokenPoolRemoteFact<T> =
 
 /** What the remote side of one lane does. @internal */
 export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
-  /** Whether the remote pool the remote registry names reads long pool data (F14). */
+  /** Whether the remote pool the remote registry names reads long pool data. */
   readsLongData: boolean
   /** The pool the remote registry names for the remote token, or `null` when it names none. */
   registryPool: string | null
-  /** Whether that pool's lane back points at this token and trusts a local serving pool (F3). */
+  /** Whether that pool's lane back points at this token and trusts a local serving pool. */
   mapsBack: boolean
   /** Whether the remote token has code on the remote chain (read when the registry names no pool). */
   remoteTokenHasCode?: boolean
-  /** The attestation the F14 fact came from, for a family the SDK cannot read. */
+  /** The attestation the long-data fact came from, for a family the SDK cannot read. */
   attestation?: MultiTokenPoolRemoteAttestation
 }>
 
@@ -184,7 +184,7 @@ export function multiTokenPoolAffectedLanes(
 }
 
 /**
- * Every (token, chain) a state names, for the lane projections the rules compare against (F3 reads
+ * Every (token, chain) a state names, for the lane projections the rules compare against (the shared-remote-token rule reads
  * every token's lane on a chain).
  * @internal
  */
@@ -240,7 +240,7 @@ export type EvaluateMultiTokenPoolGuardsInput = {
   after: MultiTokenPoolRecordState
   /** The affected lanes, before and after. */
   lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[]
-  /** Every token's lane after the write on the affected chains (for F3). */
+  /** Every token's lane after the write on the affected chains (for the shared-remote-token rule). */
   chainLanes: readonly ProjectedMultiTokenPoolLane[]
   /** The facts {@link requiredMultiTokenPoolGuardFacts} asked for. */
   facts: MultiTokenPoolGuardFacts
@@ -282,7 +282,7 @@ export function evaluateMultiTokenPoolGuards({
     ) => findings.push({ check, severity, ...key, ...(recordType && { recordType }), reason })
     const c = lane.connection
 
-    // F11: a lane the write closes strands in-flight inbound messages
+    // a lane the write closes strands in-flight inbound messages
     if (before.connection.hasConnection && !c.hasConnection) {
       if (confirmed.has(guardLaneKey(key)))
         add('LANE_CLOSED', 'warning', 'the write closes this lane (confirmed in confirmClosing)')
@@ -297,7 +297,7 @@ export function evaluateMultiTokenPoolGuards({
     // teardown: a lane with no connection after the write has no other rule
     if (!c.hasConnection) continue
 
-    // F11: an open lane with a missing record reverts every transfer that reads it
+    // a lane with a connection and a missing record reverts every transfer that reads it
     const missing = LANE_RECORD_TYPES.filter((t) => lane.levels[t] === 'none')
     if (missing.length)
       add(
@@ -318,7 +318,7 @@ export function evaluateMultiTokenPoolGuards({
 
     const fee = lane.tokenTransferFeeConfig
     if (fee.isEnabled) {
-      // F12: pool data longer than destBytesOverhead reverts the send
+      // pool data longer than destBytesOverhead reverts the send
       const extra = facts.additionalPoolDataBytes.get(guardLaneKey(key)) ?? 0
       const needed =
         c.poolDataFormat === 'legacy' ? LEGACY_POOL_DATA_BYTES : longPoolDataBytes(extra)
@@ -329,7 +329,7 @@ export function evaluateMultiTokenPoolGuards({
           `destBytesOverhead ${fee.destBytesOverhead} is below the ${needed} bytes of ${c.poolDataFormat} pool data this lane sends: every send reverts`,
           'destOverhead',
         )
-      // G1: too little gas for the destination releaseOrMint
+      // too little gas for the destination releaseOrMint
       const minGas =
         options.minDestGasOverhead ??
         DEFAULT_MIN_DEST_GAS_OVERHEAD + (lane.verification.hook ? HOOK_DEST_GAS_OVERHEAD : 0)
@@ -340,7 +340,7 @@ export function evaluateMultiTokenPoolGuards({
           `destGasOverhead ${fee.destGasOverhead} is below ${minGas}${lane.verification.hook ? ' (a hook resolves)' : ''}: the destination release can run out of gas`,
           'destOverhead',
         )
-      // F6: the resolved token fee, both tiers
+      // the resolved token fee, both tiers
       const bps = Math.max(fee.finalityTransferFeeBps, fee.fastFinalityTransferFeeBps)
       if (bps > maxBps)
         add(
@@ -351,7 +351,7 @@ export function evaluateMultiTokenPoolGuards({
         )
     }
 
-    // F2: a CCV list without address(0) drops the ramps' default CCVs
+    // a CCV list without address(0) drops the ramps' default CCVs
     if (!options.allowDroppingDefaultCCVs)
       for (const [direction, list] of [
         ['outbound', lane.verification.outboundCCVs],
@@ -386,7 +386,7 @@ export function evaluateMultiTokenPoolGuards({
       }
     }
 
-    // F3: two local tokens resolving the same remote token: the destination mints the wrong one
+    // two local tokens resolving the same remote token: the destination mints the wrong one
     const shared = chainLanes.filter(
       (o) =>
         o.remoteChainSelector === lane.remoteChainSelector &&
@@ -402,7 +402,7 @@ export function evaluateMultiTokenPoolGuards({
         'connection',
       )
 
-    // F3: legacy data received from a remote multi-token pool cannot identify the source token
+    // legacy data received from a remote multi-token pool cannot identify the source token
     for (const p of c.remotePools) {
       if (!p.allowLegacyPoolData || migration.has(lane.remoteChainSelector)) continue
       const pool = facts.remotePools.get(guardPoolKey(lane.remoteChainSelector, p.address))
@@ -423,7 +423,7 @@ export function evaluateMultiTokenPoolGuards({
         )
     }
 
-    // remote side: F14 format, the registry's pool among the trusted ones, F3 reverse mapping
+    // remote side: the registry's pool, its pool data format, and the reverse mapping
     const remote = facts.remoteLanes.get(guardLaneKey(key))
     if (!remote || remote.status !== 'known') {
       factFailures.push({
@@ -439,7 +439,8 @@ export function evaluateMultiTokenPoolGuards({
         'warning',
         `the remote long-data fact comes from an attestation, not a read: ${remote.attestation.reason}`,
       )
-    // a token paused outbound whose remote registry names no pool yet may wait (spec:1354-1355);
+    // a token paused outbound whose remote registry names no pool yet may wait (the MTTP spec's
+    // onboarding exception);
     // the unpause re-check runs with no exception
     const waiting = c.isTokenOutboundPaused && remote.registryPool === null
     if (remote.registryPool === null) {
@@ -500,7 +501,7 @@ function policyBlastRadius(
   return ` (from ${type} policy ${name}, shared by ${count} token${count === 1 ? '' : 's'})`
 }
 
-/** Every token's lane on the given chains, after the write, for the F3 rule. @internal */
+/** Every token's lane on the given chains, after the write, for the shared-remote-token rule. @internal */
 export function multiTokenPoolChainLanes(
   state: MultiTokenPoolRecordState,
   chains: readonly bigint[],

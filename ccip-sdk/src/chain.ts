@@ -702,6 +702,9 @@ export type LaneRecordType =
   | 'destOverhead'
   | 'security'
 
+/** The direction of a token transfer on a lane, seen from the local chain. */
+export type TransferDirection = 'outbound' | 'inbound'
+
 /**
  * Whether a token pool lets a transfer of a token on a lane go through now, for one direction.
  *
@@ -718,7 +721,7 @@ export type LaneStatus =
   | {
       status: 'paused'
       scope: 'global' | 'token' | 'chain'
-      direction: 'outbound' | 'inbound'
+      direction: TransferDirection
     }
   | { status: 'incomplete'; missing: LaneRecordType[] }
 

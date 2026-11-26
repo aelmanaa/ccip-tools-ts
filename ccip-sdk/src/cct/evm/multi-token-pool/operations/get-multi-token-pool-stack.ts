@@ -10,7 +10,7 @@ import { getAddress } from 'ethers'
 import { CCIPTokenNotConfiguredError } from '../../../../errors/index.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { CCTContractTypeInvalidError, CCTContractVersionUnsupportedError } from '../../../errors.ts'
-import { sortFindings } from '../../../multi-token-pool.ts'
+import { type MultiTokenPoolFinding, sortFindings } from '../../../multi-token-pool.ts'
 import {
   type GetPolicyStoreStateResult,
   GetPolicyStoreState,
@@ -33,31 +33,28 @@ import type { MultiTokenPoolReadParams } from './is-multi-token-pool.ts'
 const REGISTRY_SWEEP_BATCH = 16
 
 /** One finding of the stack audit. */
-export type MultiTokenPoolStackFinding = {
+export type MultiTokenPoolStackFinding = MultiTokenPoolFinding<
   /**
    * - `PCM_NOT_ON_STORE`: a store does not authorize the PCM; every write through it reverts.
-   * - `STALE_PCM_AUTHORIZED`: a store still authorizes another PoolConfigManager, which can write it (F4).
+   * - `STALE_PCM_AUTHORIZED`: a store still authorizes another PoolConfigManager, which can write it.
    * - `EXTRA_STORE_CALLER`: a store authorizes a contract that is not a PoolConfigManager.
-   * - `OWNER_MISMATCH`: the pool owner, the store owners and the PCM default admin differ (F5).
+   * - `OWNER_MISMATCH`: the pool owner, the store owners and the PCM default admin differ.
    * - `PENDING_OWNERSHIP`: an ownership or default-admin transfer is pending.
    * - `TAR_MISMATCH`: the PCM's TokenAdminRegistry is not the one the pool's Router uses.
    * - `REGISTRATION_DIVERGED`: a token the PCM registers is served by a pool that does not use this PCM.
-   * - `ZERO_ADMIN_DELAY`: PCM governance changes are instant (F8).
+   * - `ZERO_ADMIN_DELAY`: PCM governance changes are instant.
+   *
+   * `'error'`: the stack cannot work as configured; `'warning'`: a risk to review.
    */
-  check:
-    | 'PCM_NOT_ON_STORE'
-    | 'STALE_PCM_AUTHORIZED'
-    | 'EXTRA_STORE_CALLER'
-    | 'OWNER_MISMATCH'
-    | 'PENDING_OWNERSHIP'
-    | 'TAR_MISMATCH'
-    | 'REGISTRATION_DIVERGED'
-    | 'ZERO_ADMIN_DELAY'
-  /** `'error'`: the stack cannot work as configured; `'warning'`: a risk to review. */
-  severity: 'error' | 'warning'
-  /** What is wrong and how to fix it. */
-  reason: string
-}
+  | 'PCM_NOT_ON_STORE'
+  | 'STALE_PCM_AUTHORIZED'
+  | 'EXTRA_STORE_CALLER'
+  | 'OWNER_MISMATCH'
+  | 'PENDING_OWNERSHIP'
+  | 'TAR_MISMATCH'
+  | 'REGISTRATION_DIVERGED'
+  | 'ZERO_ADMIN_DELAY'
+>
 
 /** Result of `getMultiTokenPoolStack`. */
 export type GetMultiTokenPoolStackResult = {

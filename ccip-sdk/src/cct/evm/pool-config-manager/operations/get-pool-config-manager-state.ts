@@ -44,7 +44,7 @@ export type GetPoolConfigManagerStateResult = {
    * `getTokenDefaultAdmin`): test with `'pendingDefaultAdmin' in result`.
    */
   pendingDefaultAdmin?: PendingTokenDefaultAdmin
-  /** Seconds a default-admin transfer waits; `0` makes PCM governance changes instant (F8). */
+  /** Seconds a default-admin transfer waits; `0` makes PCM governance changes instant. */
   defaultAdminDelay: number
   /** A scheduled delay change, present only when one is pending. */
   pendingDefaultAdminDelay?: {

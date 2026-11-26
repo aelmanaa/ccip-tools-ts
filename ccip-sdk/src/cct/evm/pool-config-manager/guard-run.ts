@@ -1,5 +1,5 @@
 /**
- * The post-state guard of a lane-affecting PCM write (design §7.1): read the records at one block,
+ * The post-state guard of a lane-affecting PCM write: read the records at one block,
  * project the exact calldata, read the facts, evaluate the rules, simulate the write from `sender`,
  * cross-check the projection with `eth_simulateV1` where the RPC has it, and seal a snapshot.
  *
@@ -83,7 +83,7 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   expectedSnapshot?: MultiTokenPoolSnapshot
   /** Resolves remote chains. */
   getChain?: ChainGetter
-  /** F14 facts for remote families the SDK cannot read. */
+  /** Long-data facts for remote families the SDK cannot read. */
   remoteAttestations?: MultiTokenPoolRemoteAttestation[]
   /** `true` for checks that make lanes live (unpauses): attestations are never used. */
   makesLive?: boolean

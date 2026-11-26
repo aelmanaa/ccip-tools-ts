@@ -2,7 +2,7 @@
  * Lane projection: what the PCM's resolved views would return after a write, computed from its
  * stored records without sending anything.
  *
- * The post-state guards (design §7.1) project every affected lane after a write and evaluate their
+ * The post-state guards project every affected lane after a write and evaluate their
  * rules on the result. This module is the pure core of that: a {@link MultiTokenPoolRecordState} (the
  * stored records, in the shapes the reads return), {@link applyMultiTokenPoolRecordChanges} (a write,
  * as store-level record changes) and {@link resolveMultiTokenPoolLanes} (the stores' resolution, view
@@ -592,7 +592,7 @@ function resolveLevel<T extends LaneRecordType>(
   if (name === null) return { level: 'none' }
   const forChain = index.policy(type, name, chain)
   if (forChain) {
-    // a connection record admits only its subset while `onlySubsetTokens` is set
+    // a connection record allows only its subset tokens while `onlySubsetTokens` is set
     if (type === 'connection') {
       const c = forChain as MultiTokenPoolConnectionPolicyRecordState
       if (

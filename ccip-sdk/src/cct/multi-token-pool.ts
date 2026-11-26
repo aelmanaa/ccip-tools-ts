@@ -20,6 +20,7 @@ import type {
   LaneStatus,
   RateLimiterState,
   TokenTransferFeeConfig,
+  TransferDirection,
 } from '../chain.ts'
 import type { FinalityRequested } from '../extra-args.ts'
 import type { ChainFamily } from '../networks.ts'
@@ -27,8 +28,8 @@ import { jsonParse } from '../utils.ts'
 import { canonicalHash, canonicalJson } from './canonical.ts'
 import { type CCTStateChange, CCTParamsInvalidError } from './errors.ts'
 
-/** A transfer direction. Structurally identical to the EVM `CCVMessageDirection`. */
-export type MultiTokenPoolDirection = 'outbound' | 'inbound'
+/** A transfer direction: core {@link TransferDirection}, the one direction type of the SDK. */
+export type MultiTokenPoolDirection = TransferDirection
 
 /**
  * The pool data a lane sends.
@@ -36,7 +37,7 @@ export type MultiTokenPoolDirection = 'outbound' | 'inbound'
  * - `'long'`: `abi.encode(uint256 decimals, bytes sourceToken, bytes additionalData)`, at least
  *   192 bytes (224 with a 32-byte factory UID). Only a remote EVM multi-token pool, or a Solana
  *   pool-group lane whose format is `'long'`, reads it; any other remote pool burns on the source and
- *   never mints (F14). A canonical Solana pool on interface 1 counts as "does not read long data":
+ *   never mints. A canonical Solana pool on interface 1 counts as "does not read long data":
  *   it ignores the data now and strands it after a later move to interface 2.
  */
 export type PoolDataFormat = 'legacy' | 'long'
@@ -97,7 +98,10 @@ export type MultiTokenPoolLaneRateLimits = {
 export type MultiTokenPoolRemotePool = {
   /** Canonical remote pool address, the spelling `parseRemoteAddress` returns. */
   address: string
-  /** Whether this pool may send 32-byte legacy pool data (F3: trusted by address). */
+  /**
+   * Whether this pool may send 32-byte legacy pool data, which names no source token, so the pool is
+   * trusted by its address alone (the EVM contract field is `allowLegacyPoolDataOnReceive`).
+   */
   allowLegacyPoolData: boolean
 }
 
@@ -117,7 +121,7 @@ export type MultiTokenPoolLaneParams = {
 }
 
 /**
- * The F14 fact for one lane (does the remote pool read long pool data?) that the SDK cannot read,
+ * Whether the remote pool of one lane reads long pool data, for a remote chain the SDK cannot read,
  * supplied by the caller. Keyed by `(remoteChainSelector, remoteToken, remotePoolAddress)`: it applies
  * only to a lane whose resolved remote token and trusted remote pool are exactly these.
  *
@@ -132,7 +136,8 @@ export type MultiTokenPoolLaneParams = {
  *   call from the vendored ABI (`MULTI_TOKEN_POOL_OPERATIONS` names the function) and owns the check;
  * - planners never copy attestations into step `inputs` or reuse them across runs: a resumed plan
  *   must be given them again, with `attestedAt` after the run started;
- * - supplies only the F14 fact; the F3 reverse-mapping and UID pairing checks still need `getChain`;
+ * - supplies only the long-data fact; the remote lane's reverse mapping and the UID pairing checks
+ *   still need `getChain`;
  * - every attestation used is reported in the op's `warnings`.
  */
 export type MultiTokenPoolRemoteAttestation = {
@@ -142,7 +147,7 @@ export type MultiTokenPoolRemoteAttestation = {
   remoteToken: string
   /** The remote pool the attestation is about; it must be one of the lane's trusted remote pools. */
   remotePoolAddress: string
-  /** Whether the remote pool reads long pool data (the F14 fact). */
+  /** Whether the remote pool reads long pool data. */
   acceptsLongPoolData: boolean
   /** Unix seconds when the fact was checked. */
   attestedAt: bigint
@@ -164,7 +169,7 @@ export type MultiTokenPoolRemoteAttestation = {
 export type MultiTokenPoolRemoteCheckOptions = {
   /** Resolves a remote chain (core `ChainGetter`). Only core `Chain` reads are used on it. */
   getChain?: ChainGetter
-  /** F14 facts for lanes whose remote chain the SDK cannot read; see {@link MultiTokenPoolRemoteAttestation}. */
+  /** Long-data facts for lanes whose remote chain the SDK cannot read; see {@link MultiTokenPoolRemoteAttestation}. */
   remoteAttestations?: MultiTokenPoolRemoteAttestation[]
 }
 
@@ -188,7 +193,7 @@ export type MultiTokenPoolLane = {
   sources: Record<LaneRecordType, MultiTokenPoolConfigSource>
   /** Resolved rate-limit buckets. */
   rateLimits: MultiTokenPoolLaneRateLimits
-  /** Directions held by a stop: an enabled 0/0 bucket (e.g. written by `pauseMultiTokenPoolLanes`). */
+  /** Directions held by a stop: an enabled 0/0 bucket (e.g. written by `stopMultiTokenPoolLanes`). */
   stopped: {
     /** Outbound is held by a stop. */
     outbound: boolean
@@ -216,7 +221,39 @@ export type MultiTokenPoolLane = {
   inboundStatus: LaneStatus
 }
 
-/** Codes of the lane check and of the post-state guards: a closed runtime tuple. */
+/**
+ * Codes of the lane check and of the post-state guards: a closed runtime tuple.
+ *
+ * @remarks What each code means:
+ * - `TOKEN_NOT_REGISTERED`: the pool's PoolConfigManager does not register the token.
+ * - `RECORD_MISSING`: a lane with a connection lacks a record a transfer reads; transfers revert.
+ * - `NO_CONNECTION`: the lane has no usable connection: none resolves for the token and chain, or one
+ *   resolves but its remote token does not (a policy provider without an answer). It describes a
+ *   lane's state, whatever made it so.
+ * - `LANE_CLOSED`: a write removes the connection of a lane that has one, so in-flight inbound
+ *   messages can no longer execute. It describes what a write does; confirm it with `confirmClosing`.
+ * - `REMOTE_TOKEN_ENCODING`: the remote token is not a valid address of the remote chain's family.
+ * - `REMOTE_TOKEN_SHARED`: another local token resolves the same remote token on that chain.
+ * - `NO_REMOTE_POOL`: the remote registry names no pool for the remote token (or the lane trusts no
+ *   remote pool): a send burns here and nothing releases it there.
+ * - `POOL_DATA_FORMAT_MISMATCH`: the lane sends long pool data to a remote pool that reads only legacy.
+ * - `LEGACY_RECEIVE_FROM_MULTI_TOKEN_POOL`: the lane accepts legacy pool data, which names no source
+ *   token, from a remote multi-token pool.
+ * - `DEST_BYTES_OVERHEAD_TOO_LOW` / `DEST_GAS_OVERHEAD_TOO_LOW`: the destination overheads cannot carry
+ *   the pool data, or the release.
+ * - `NO_FEE_RECORD`: no fee record resolves; a send reverts.
+ * - `TRANSFER_FEE_ABOVE_CAP`: the resolved basis-point fee is above the caller's cap.
+ * - `INBOUND_BELOW_REMOTE_OUTBOUND`: the inbound rate limit is below the remote outbound one.
+ * - `DEFAULT_CCVS_DROPPED`: a CCV list without the default placeholder drops the ramps' default CCVs.
+ * - `HOOK_CALLER_MISSING`: the lane's hook does not authorize a serving pool.
+ * - `UID_MISMATCH`: the token's additional pool data does not pair with the remote token's.
+ * - `POOL_CANNOT_MINT_BURN`: the pool lacks mint or burn on the token.
+ * - `REMOTE_LANE_MISMATCH`: the remote side does not point back at this lane, or its registry's pool
+ *   is not among the trusted ones.
+ * - `LANE_PAUSED`: a pause stops the lane in a direction.
+ * - `CCVS_NOT_SYNCED`, `LANE_NOT_ADMITTED`, `ACCOUNT_LOCKS_EXCEEDED`: Solana pool-group lane states.
+ * - `REMOTE_ATTESTED`: a remote fact came from an attestation, not a read (a warning).
+ */
 export const MULTI_TOKEN_POOL_LANE_CHECKS = [
   'TOKEN_NOT_REGISTERED',
   'RECORD_MISSING',
@@ -247,20 +284,27 @@ export const MULTI_TOKEN_POOL_LANE_CHECKS = [
 /** One lane check code. */
 export type MultiTokenPoolLaneCheck = (typeof MULTI_TOKEN_POOL_LANE_CHECKS)[number]
 
-/** One finding of `checkMultiTokenPoolLane` and of the post-state guards of a write. */
-export type MultiTokenPoolLaneFinding = {
+/**
+ * One finding of a multi-token pool check: the shape every MTTP read, check and guard reports.
+ * @typeParam C - The closed set of check codes of that report.
+ */
+export type MultiTokenPoolFinding<C extends string> = {
   /** The check that produced the finding. */
-  check: MultiTokenPoolLaneCheck
-  /** `'error'`: a transfer fails or loses funds; the write is refused. `'warning'`: reported only. */
+  check: C
+  /** `'error'`: it fails, loses funds, or the write is refused. `'warning'`: reported only. */
   severity: 'error' | 'warning'
+  /** What is wrong and how to fix it. */
+  reason: string
+}
+
+/** One finding of `checkMultiTokenPoolLane` and of the post-state guards of a write. */
+export type MultiTokenPoolLaneFinding = MultiTokenPoolFinding<MultiTokenPoolLaneCheck> & {
   /** Local token of the lane. */
   tokenAddress: string
   /** Remote chain of the lane. */
   remoteChainSelector: bigint
   /** The record type involved, when one is. */
   recordType?: LaneRecordType
-  /** What is wrong and how to fix it. */
-  reason: string
 }
 
 /**
@@ -268,9 +312,7 @@ export type MultiTokenPoolLaneFinding = {
  * Every finding list the MTTP reads and guards return goes through it.
  * @internal
  */
-export function sortFindings<
-  F extends { severity: 'error' | 'warning'; check: string; reason: string },
->(findings: F[]): F[] {
+export function sortFindings<F extends MultiTokenPoolFinding<string>>(findings: F[]): F[] {
   return findings.sort(
     (a, b) =>
       (a.severity === b.severity ? 0 : a.severity === 'error' ? -1 : 1) ||
@@ -322,7 +364,7 @@ export type GetMultiTokenPoolTransferQuoteParams = MultiTokenPoolLaneParams & {
   feeToken?: string
 }
 
-/** A transfer quote with the pool's basis-point token fee, which the Router's `getFee` leaves out (F6). */
+/** A transfer quote with the pool's basis-point token fee, which the Router's `getFee` leaves out. */
 export type MultiTokenPoolTransferQuote = {
   /** Token transfer fee in USD cents the Router charges for this tier. */
   feeUSDCents: bigint
@@ -332,9 +374,9 @@ export type MultiTokenPoolTransferQuote = {
   destBytesOverhead: number
   /** Basis-point fee the pool takes from the amount, for this tier. */
   tokenFeeBps: number
-  /** Token fee the pool takes, in local token units. */
-  tokenFeeAmount: bigint
-  /** Amount the receiver gets: `amount - tokenFeeAmount`. */
+  /** Amount the pool deducts from the transfer as its token fee, in local token units (as core `TokenTransferFee.feeDeducted`). */
+  feeDeducted: bigint
+  /** Amount the receiver gets: `amount - feeDeducted`. */
   netAmount: bigint
   /** Whether a fee record resolves; without one a send reverts. */
   hasFeeRecord: boolean
@@ -360,7 +402,8 @@ export type MultiTokenPoolTransferQuote = {
  * - On `<op>`, the op re-reads right before sending and throws `CCTStateChangedError` if anything
  *   moved. A delayed proposal is protected only when its executor runs `check…Snapshot` (which
  *   re-runs the full guard on the exact calldata) or when the planner reports it in
- *   `stalePendingSteps`; the contracts cannot compare on chain (program-team ask, design §15).
+ *   `stalePendingSteps`; the contracts cannot compare on chain (an on-chain compare-and-swap is
+ *   asked of the contract team).
  */
 export type MultiTokenPoolSnapshot = {
   /** Block (EVM) or slot (Solana) the state was read at. */
@@ -633,7 +676,7 @@ export type MultiTokenPoolPlan<Name extends string, Op extends string = string> 
 /**
  * Options every planner takes on both families.
  *
- * @remarks **The ready-step rule** (the one definition; design §8.1). Two steps A and B conflict when
+ * @remarks **The ready-step rule** (its one definition). Two steps A and B conflict when
  * `A.writeSet ∩ B.writeSet`, `A.writeSet ∩ B.guardReads` or `A.guardReads ∩ B.writeSet` is non-empty.
  * A step is ready when every `dependsOn` step has landed, it is not pending, and it conflicts with no
  * other step returned as ready in the same call. Ready steps therefore commute: they may land in any
