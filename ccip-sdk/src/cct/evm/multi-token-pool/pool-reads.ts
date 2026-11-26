@@ -103,7 +103,7 @@ export async function readMultiTokenPoolFee(
       throw new CCTParamsInvalidError(
         operation,
         'remoteChainSelector',
-        `the lane of ${tokenAddress} to ${remoteChainSelector} has no fee record: a send would revert`,
+        `the lane of ${tokenAddress} to ${remoteChainSelector} has no connection or no fee record, so a send would revert: set an inline fee and destination overhead record, or assign policies that resolve them`,
       )
     if (isRevertWith(err, store, 'InvalidRequestedFinality'))
       throw new CCTParamsInvalidError(
@@ -123,10 +123,11 @@ export async function readMultiTokenPoolTokenTransferFeeConfig(
   tokenAddress: string,
   remoteChainSelector: bigint,
   finality: string,
+  tokenArgs = '0x',
 ): Promise<TokenTransferFeeConfig> {
   const pool = multiTokenPoolContract(chain, poolAddress, version)
   return toTokenTransferFeeConfig(
-    await pool.getTokenTransferFeeConfig(tokenAddress, remoteChainSelector, finality, '0x'),
+    await pool.getTokenTransferFeeConfig(tokenAddress, remoteChainSelector, finality, tokenArgs),
   )
 }
 

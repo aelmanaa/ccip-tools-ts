@@ -17,7 +17,7 @@
 import type { CantonChain } from '../../canton/index.ts'
 import { getCantonNetworkConfig } from '../../canton/networks.ts'
 import type { ChainContext } from '../../chain.ts'
-import type { ChainFamily } from '../../networks.ts'
+import { ChainFamily } from '../../networks.ts'
 import { TokenManager } from '../token-manager.ts'
 import {
   type GetTokenAdminRegistryParams,
@@ -87,6 +87,8 @@ export { POOL_TEMPLATE_IDS } from './token-pool/shared.ts'
  * read op has a single `<op>` method (no wallet).
  */
 export class CantonTokenManager extends TokenManager<typeof ChainFamily.Canton> {
+  /** The chain family, a literal for narrowing a union of managers (`manager.family === 'CANTON'`). */
+  readonly family = ChainFamily.Canton
   readonly chain: CantonChain
 
   // Write operations (one instance each, reused across calls).

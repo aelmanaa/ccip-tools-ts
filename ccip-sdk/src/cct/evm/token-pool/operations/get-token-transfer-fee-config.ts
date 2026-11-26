@@ -115,6 +115,7 @@ export class GetTokenTransferFeeConfig extends EVMQuery<
         pool.tokenAddress,
         remoteChainSelector,
         toBeHex(encodeFinality(finality ?? 'finalized'), 4),
+        tokenArgs,
       )
     }
     return resolveEncoder(this.readers, version, this.name)(
