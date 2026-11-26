@@ -87,6 +87,7 @@ export class GetFee extends EVMQuery<GetFeeParams, GetFeeResult> {
     chain: EVMChain,
     { poolAddress, remoteChainSelector, finality, tokenAddress }: GetFeeParams,
   ): Promise<GetFeeResult> {
+    const requested = toBeHex(encodeFinality(finality ?? 'finalized'), 4)
     let version
     try {
       ;({ version } = await resolveTokenPool(chain, poolAddress))
@@ -98,14 +99,14 @@ export class GetFee extends EVMQuery<GetFeeParams, GetFeeResult> {
         poolAddress,
         ...pool,
         remoteChainSelector,
-        finality: toBeHex(encodeFinality(finality ?? 'finalized'), 4),
+        finality: requested,
       })
     }
     return resolveEncoder(this.readers, version, this.name)(
       chain,
       poolAddress,
       remoteChainSelector,
-      toBeHex(encodeFinality(finality ?? 'finalized'), 4),
+      requested,
     )
   }
 }

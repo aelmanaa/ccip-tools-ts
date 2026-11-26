@@ -11,18 +11,9 @@ import { getAddress } from 'ethers'
 import type { LaneRecordType } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import { resultToObject } from '../../../evm/types.ts'
-import { decodeRemoteAddress } from '../../remote-address.ts'
 import { nullableAddress } from '../multi-token-pool/contracts.ts'
 import { type PoolConfigManagerReader, readPagesAtBlock } from './contracts.ts'
-import {
-  decodeDestOverheadConfig,
-  decodeFeeConfig,
-  decodeInlineKey,
-  decodeInlineRemotePoolConfig,
-  decodePolicyRecordKey,
-  decodeRateLimits,
-  decodeSecurityConfig,
-} from './decode.ts'
+import { INLINE_RECORD_DECODERS, POLICY_RECORD_DECODERS } from './decode.ts'
 import type { GetMultiTokenPoolConnectionPolicyResult } from './operations/get-multi-token-pool-connection-policy.ts'
 import type { GetMultiTokenPoolDestOverheadPolicyResult } from './operations/get-multi-token-pool-dest-overhead-policy.ts'
 import type { GetMultiTokenPoolFeePolicyResult } from './operations/get-multi-token-pool-fee-policy.ts'
@@ -51,10 +42,7 @@ export const POLICY_RECORD_READERS = {
     return {
       tokenCount: Number(tokenCount),
       remoteTokenAddressProvider: nullableAddress(resultToObject(provider)),
-      records: records.map((raw) => {
-        const r = resultToObject(raw)
-        return { ...decodePolicyRecordKey(r), onlySubsetTokens: r.onlySubsetTokens }
-      }),
+      records: records.map((raw) => POLICY_RECORD_DECODERS.connection(resultToObject(raw))),
     }
   },
   remotePool: async (
@@ -65,16 +53,7 @@ export const POLICY_RECORD_READERS = {
     const [tokenCount, records] = await pcm.getRemotePoolPolicy(policyWord, overrides)
     return {
       tokenCount: Number(tokenCount),
-      records: records.map((raw) => {
-        const r = resultToObject(raw)
-        const key = decodePolicyRecordKey(r)
-        return {
-          ...key,
-          remotePoolAddresses: r.remotePoolAddresses.map((a: string) =>
-            decodeRemoteAddress(a, key.remoteChainSelector),
-          ),
-        }
-      }),
+      records: records.map((raw) => POLICY_RECORD_DECODERS.remotePool(resultToObject(raw))),
     }
   },
   rateLimit: async (
@@ -83,14 +62,7 @@ export const POLICY_RECORD_READERS = {
     overrides: RecordReadOverrides = {},
   ): Promise<Records<GetMultiTokenPoolRateLimitPolicyResult>> => {
     const [tokenCount, decimals, records] = await pcm.getRateLimitPolicy(policyWord, overrides)
-    const decoded = records.map((raw) => {
-      const r = resultToObject(raw)
-      return {
-        ...decodePolicyRecordKey(r),
-        localDecimals: Number(r.localDecimals),
-        rateLimits: decodeRateLimits(r.rateLimitConfig),
-      }
-    })
+    const decoded = records.map((raw) => POLICY_RECORD_DECODERS.rateLimit(resultToObject(raw)))
     return {
       tokenCount: Number(tokenCount),
       // the policy's decimals are fixed by its first record; `0` with no record means unset
@@ -106,10 +78,7 @@ export const POLICY_RECORD_READERS = {
     const [tokenCount, records] = await pcm.getFeePolicy(policyWord, overrides)
     return {
       tokenCount: Number(tokenCount),
-      records: records.map((raw) => {
-        const r = resultToObject(raw)
-        return { ...decodePolicyRecordKey(r), feeConfig: decodeFeeConfig(r.feeConfig) }
-      }),
+      records: records.map((raw) => POLICY_RECORD_DECODERS.fee(resultToObject(raw))),
     }
   },
   destOverhead: async (
@@ -120,13 +89,7 @@ export const POLICY_RECORD_READERS = {
     const [tokenCount, records] = await pcm.getDestOverheadPolicy(policyWord, overrides)
     return {
       tokenCount: Number(tokenCount),
-      records: records.map((raw) => {
-        const r = resultToObject(raw)
-        return {
-          ...decodePolicyRecordKey(r),
-          destOverheadConfig: decodeDestOverheadConfig(r.destOverheadConfig),
-        }
-      }),
+      records: records.map((raw) => POLICY_RECORD_DECODERS.destOverhead(resultToObject(raw))),
     }
   },
   security: async (
@@ -137,13 +100,7 @@ export const POLICY_RECORD_READERS = {
     const [tokenCount, records] = await pcm.getSecurityPolicy(policyWord, overrides)
     return {
       tokenCount: Number(tokenCount),
-      records: records.map((raw) => {
-        const r = resultToObject(raw)
-        return {
-          ...decodePolicyRecordKey(r),
-          securityConfig: decodeSecurityConfig(r.securityConfig),
-        }
-      }),
+      records: records.map((raw) => POLICY_RECORD_DECODERS.security(resultToObject(raw))),
     }
   },
 } as const satisfies Record<
@@ -161,54 +118,45 @@ export const INLINE_RECORD_READERS = {
     token: string,
     overrides: RecordReadOverrides = {},
   ) =>
-    (await pcm.getInlineConnectionConfigs(token, overrides)).map((raw) => {
-      const c = resultToObject(raw)
-      const key = decodeInlineKey(c)
-      return { ...key, remoteToken: decodeRemoteAddress(c.remoteToken, key.remoteChainSelector) }
-    }),
+    (await pcm.getInlineConnectionConfigs(token, overrides)).map((raw) =>
+      INLINE_RECORD_DECODERS.connection(resultToObject(raw)),
+    ),
   remotePool: async (
     pcm: PoolConfigManagerReader,
     token: string,
     overrides: RecordReadOverrides = {},
   ) =>
     (await pcm.getInlineRemotePoolConfigs(token, overrides)).map((raw) =>
-      decodeInlineRemotePoolConfig(resultToObject(raw)),
+      INLINE_RECORD_DECODERS.remotePool(resultToObject(raw)),
     ),
   rateLimit: async (
     pcm: PoolConfigManagerReader,
     token: string,
     overrides: RecordReadOverrides = {},
   ) =>
-    (await pcm.getInlineRateLimitConfigs(token, overrides)).map((raw) => {
-      const c = resultToObject(raw)
-      return { ...decodeInlineKey(c), rateLimits: decodeRateLimits(c.rateLimitConfig) }
-    }),
+    (await pcm.getInlineRateLimitConfigs(token, overrides)).map((raw) =>
+      INLINE_RECORD_DECODERS.rateLimit(resultToObject(raw)),
+    ),
   fee: async (pcm: PoolConfigManagerReader, token: string, overrides: RecordReadOverrides = {}) =>
-    (await pcm.getInlineFeeConfigs(token, overrides)).map((raw) => {
-      const c = resultToObject(raw)
-      return { ...decodeInlineKey(c), feeConfig: decodeFeeConfig(c.feeConfig) }
-    }),
+    (await pcm.getInlineFeeConfigs(token, overrides)).map((raw) =>
+      INLINE_RECORD_DECODERS.fee(resultToObject(raw)),
+    ),
   destOverhead: async (
     pcm: PoolConfigManagerReader,
     token: string,
     overrides: RecordReadOverrides = {},
   ) =>
-    (await pcm.getInlineDestOverheadConfigs(token, overrides)).map((raw) => {
-      const c = resultToObject(raw)
-      return {
-        ...decodeInlineKey(c),
-        destOverheadConfig: decodeDestOverheadConfig(c.destOverheadConfig),
-      }
-    }),
+    (await pcm.getInlineDestOverheadConfigs(token, overrides)).map((raw) =>
+      INLINE_RECORD_DECODERS.destOverhead(resultToObject(raw)),
+    ),
   security: async (
     pcm: PoolConfigManagerReader,
     token: string,
     overrides: RecordReadOverrides = {},
   ) =>
-    (await pcm.getInlineSecurityConfigs(token, overrides)).map((raw) => {
-      const c = resultToObject(raw)
-      return { ...decodeInlineKey(c), securityConfig: decodeSecurityConfig(c.securityConfig) }
-    }),
+    (await pcm.getInlineSecurityConfigs(token, overrides)).map((raw) =>
+      INLINE_RECORD_DECODERS.security(resultToObject(raw)),
+    ),
 } as const satisfies {
   [T in LaneRecordType]: (
     pcm: PoolConfigManagerReader,

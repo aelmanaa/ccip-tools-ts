@@ -12,16 +12,19 @@ import { ZeroAddress, getAddress } from 'ethers'
 
 import type { LaneRecordType, RateLimiterState } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
+import { canonicalJson } from '../../canonical.ts'
 import {
   type MultiTokenPoolLaneFinding,
   type MultiTokenPoolRemoteAttestation,
   sortFindings,
 } from '../../multi-token-pool.ts'
-import { type MultiTokenPoolLaneKey, encodePolicyName } from './contracts.ts'
+import type { MultiTokenPoolLaneKey } from './contracts.ts'
 import {
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
+  laneKey,
   multiTokenPoolSupportedChains,
+  policyKey,
   resolveMultiTokenPoolLanes,
 } from './projection.ts'
 
@@ -112,7 +115,7 @@ export type MultiTokenPoolGuardFactRequests = {
 
 /** The lane key the facts maps use. @internal */
 export const guardLaneKey = ({ tokenAddress, remoteChainSelector }: MultiTokenPoolLaneKey) =>
-  `${getAddress(tokenAddress)}:${remoteChainSelector}`
+  laneKey(tokenAddress, remoteChainSelector)
 /** The remote pool key the facts maps use. @internal */
 export const guardPoolKey = (remoteChainSelector: bigint, address: string) =>
   `${remoteChainSelector}:${address}`
@@ -144,21 +147,7 @@ function sameLane(a: ProjectedMultiTokenPoolLane, b: ProjectedMultiTokenPoolLane
       remotePools: [...l.connection.remotePools].sort((x, y) => x.address.localeCompare(y.address)),
     },
   })
-  return canonicalEqual(norm(a), norm(b))
-}
-
-function canonicalEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true
-  if (typeof a !== typeof b || a === null || b === null || typeof a !== 'object') return false
-  if (Array.isArray(a) !== Array.isArray(b)) return false
-  const ka = Object.keys(a).filter((k) => (a as Record<string, unknown>)[k] !== undefined)
-  const kb = Object.keys(b as object).filter((k) => (b as Record<string, unknown>)[k] !== undefined)
-  return (
-    ka.length === kb.length &&
-    ka.every((k) =>
-      canonicalEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
-    )
-  )
+  return canonicalJson(norm(a)) === canonicalJson(norm(b))
 }
 
 /**
@@ -504,13 +493,10 @@ function policyBlastRadius(
   )
   const name = token?.policies[type]
   if (!name) return ''
-  const word = encodePolicyName('evaluateMultiTokenPoolGuards', 'policyName', name).toLowerCase()
+  const word = policyKey(name, 'policyName')
   const count = state.tokens.filter((t) => {
     const p = t.policies[type]
-    return (
-      p !== null &&
-      encodePolicyName('evaluateMultiTokenPoolGuards', 'policyName', p).toLowerCase() === word
-    )
+    return p !== null && policyKey(p, 'policyName') === word
   }).length
   return ` (from ${type} policy ${name}, shared by ${count} token${count === 1 ? '' : 's'})`
 }

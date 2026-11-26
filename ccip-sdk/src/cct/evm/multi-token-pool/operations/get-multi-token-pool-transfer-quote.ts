@@ -8,6 +8,7 @@
 import { toBeHex } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
+import { bpsFeeDeducted } from '../../../../evm/multi-token-pool.ts'
 import { encodeFinality } from '../../../../extra-args.ts'
 import type {
   GetMultiTokenPoolTransferQuoteParams,
@@ -20,9 +21,6 @@ import {
 import { EVMQuery } from '../../query.ts'
 import { validateAddress, validateFinalityRequested, validateUint256 } from '../../validate.ts'
 import { readMultiTokenPoolFee, resolveMultiTokenPoolFor } from '../pool-reads.ts'
-
-/** The store's divisor for basis-point fees. */
-const BPS_DIVIDER = 10_000n
 
 /**
  * Quotes a multi-token pool transfer.
@@ -62,8 +60,8 @@ export class GetMultiTokenPoolTransferQuote extends EVMQuery<
       amount: params.amount,
       ...(params.feeToken && { feeToken: params.feeToken }),
     })
-    // the store rounds the token fee down
-    const feeDeducted = (params.amount * BigInt(fee.tokenFeeBps)) / BPS_DIVIDER
+    // the store rounds the token fee down, as core's fee estimate does
+    const feeDeducted = bpsFeeDeducted(params.amount, fee.tokenFeeBps)
     return {
       feeUSDCents: fee.feeUSDCents,
       destGasOverhead: fee.destGasOverhead,

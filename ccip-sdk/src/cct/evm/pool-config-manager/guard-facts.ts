@@ -16,8 +16,9 @@ import {
 import { EVMChain } from '../../../evm/index.ts'
 import { decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
-import { ChainFamily, networkInfo } from '../../../networks.ts'
+import { ChainFamily } from '../../../networks.ts'
 import type { MultiTokenPoolRemoteAttestation } from '../../multi-token-pool.ts'
+import { laneFamilyOf } from '../../remote-address.ts'
 import {
   type MultiTokenPoolVersion,
   ANY_FINALITY_CONFIG,
@@ -215,22 +216,12 @@ async function readProviderDataLengths({
   return lengths
 }
 
-/** The family of a remote selector, or `undefined` for an unknown one. */
-function familyOf(remoteChainSelector: bigint): string | undefined {
-  try {
-    const info = networkInfo(remoteChainSelector)
-    return info.chainSelector === remoteChainSelector ? info.family : undefined
-  } catch {
-    return undefined
-  }
-}
-
 /** Resolves the remote chain, or explains why it cannot be read. */
 async function remoteChainOf(
   { getChain }: ReadMultiTokenPoolGuardFactsInput,
   remoteChainSelector: bigint,
 ): Promise<Chain | { status: 'unknown'; reason: string }> {
-  const family = familyOf(remoteChainSelector)
+  const family = laneFamilyOf(remoteChainSelector)
   if (family === undefined)
     return {
       status: 'unknown',
@@ -254,7 +245,7 @@ export function attestationRefusal(
   a: MultiTokenPoolRemoteAttestation,
   { now, makesLive }: { now: bigint; makesLive?: boolean },
 ): string | undefined {
-  const family = familyOf(a.remoteChainSelector)
+  const family = laneFamilyOf(a.remoteChainSelector)
   if (makesLive) return 'a check that makes lanes live always reads the remote side'
   if (family !== undefined && GET_CHAIN_FAMILIES.has(family))
     return `${family} remotes are read with getChain; an attestation never stands in for them`

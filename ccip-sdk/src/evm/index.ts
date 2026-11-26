@@ -185,6 +185,7 @@ import { type MessageV1TokenTransfer, encodeMessageV1 } from './messageCodec.ts'
 import type { CCIPMessage_V1_6_EVM, CleanAddressable } from './messages.ts'
 import {
   MULTI_TOKEN_POOL_LOCK_FLAVOR,
+  bpsFeeDeducted,
   decodeLaneConnection,
   decodePoolConfigManagerStaticConfig,
   decodeTokenProfileFields,
@@ -1998,7 +1999,7 @@ export class EVMChain extends Chain<typeof ChainFamily.EVM> {
     return {
       ccipFee,
       tokenTransferFee: {
-        feeDeducted: (BigInt(amount) * BigInt(bps)) / 10_000n,
+        feeDeducted: bpsFeeDeducted(amount, bps),
         bps,
       },
     }

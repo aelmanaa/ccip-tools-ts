@@ -54,6 +54,7 @@ import {
   type MultiTokenPoolGuardFacts,
   type MultiTokenPoolGuardOptions,
   evaluateMultiTokenPoolGuards,
+  guardLaneKey,
   multiTokenPoolAffectedLanes,
   multiTokenPoolCandidateLanes,
   multiTokenPoolChainLanes,
@@ -281,11 +282,7 @@ export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGua
           tokenAddress: getAddress(tokenAddress),
           remoteChainSelector,
         }))
-        .sort((a, b) =>
-          `${a.tokenAddress}:${a.remoteChainSelector}`.localeCompare(
-            `${b.tokenAddress}:${b.remoteChainSelector}`,
-          ),
-        ),
+        .sort((a, b) => guardLaneKey(a).localeCompare(guardLaneKey(b))),
     }),
     ...(o.migrationWindowChains?.length && {
       migrationWindowChains: [...o.migrationWindowChains].sort((a, b) =>

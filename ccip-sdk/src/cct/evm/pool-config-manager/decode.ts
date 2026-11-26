@@ -14,12 +14,23 @@ import { nullableAddress } from '../multi-token-pool/contracts.ts'
 import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
 import { type MultiTokenPoolLaneKey, type PolicyName, decodePolicyName } from './contracts.ts'
 import type {
+  ConnectionPolicyRecord,
+  DestOverheadPolicyRecord,
+  FeePolicyRecord,
+  InlineConnectionConfig,
+  InlineDestOverheadConfig,
+  InlineFeeConfig,
+  InlineRateLimitConfig,
   InlineRemotePoolConfig,
+  InlineSecurityConfig,
   MultiTokenPoolDestOverheadConfig,
   MultiTokenPoolFeeConfig,
   MultiTokenPoolRateLimits,
   MultiTokenPoolSecurityConfig,
   PolicyRecordKey,
+  RateLimitPolicyRecord,
+  RemotePoolPolicyRecord,
+  SecurityPolicyRecord,
 } from './records.ts'
 type AbiBucket = { isEnabled: boolean; capacity: bigint; rate: bigint }
 type AbiRateLimits = {
@@ -140,3 +151,99 @@ export function decodeTokenPolicies(c: {
     security: decodePolicyName(c.securityPolicyName),
   }
 }
+
+/** An ABI rate limit bucket. */
+type AbiRateLimitBucket = { isEnabled: boolean; capacity: bigint; rate: bigint }
+/** An ABI four-bucket rate limit config. */
+type AbiRateLimitConfig = {
+  outbound: AbiRateLimitBucket
+  inbound: AbiRateLimitBucket
+  fastFinalityOutbound: AbiRateLimitBucket
+  fastFinalityInbound: AbiRateLimitBucket
+}
+type AbiInlineKey = { localToken: string; remoteChainSelector: bigint }
+type AbiPolicyKey = { policyName: string; remoteChainSelector: bigint }
+
+/**
+ * One decoder per inline record struct, shared by the record reads (view outputs) and the calldata
+ * decoder (write inputs): the PCM takes and returns the same structs.
+ * @internal
+ */
+export const INLINE_RECORD_DECODERS = {
+  connection: (c: AbiInlineKey & { remoteToken: string }): InlineConnectionConfig => {
+    const key = decodeInlineKey(c)
+    return { ...key, remoteToken: decodeRemoteAddress(c.remoteToken, key.remoteChainSelector) }
+  },
+  remotePool: decodeInlineRemotePoolConfig,
+  rateLimit: (
+    c: AbiInlineKey & { rateLimitConfig: AbiRateLimitConfig },
+  ): InlineRateLimitConfig => ({
+    ...decodeInlineKey(c),
+    rateLimits: decodeRateLimits(c.rateLimitConfig),
+  }),
+  fee: (
+    c: AbiInlineKey & { feeConfig: Parameters<typeof decodeFeeConfig>[0] },
+  ): InlineFeeConfig => ({
+    ...decodeInlineKey(c),
+    feeConfig: decodeFeeConfig(c.feeConfig),
+  }),
+  destOverhead: (
+    c: AbiInlineKey & { destOverheadConfig: Parameters<typeof decodeDestOverheadConfig>[0] },
+  ): InlineDestOverheadConfig => ({
+    ...decodeInlineKey(c),
+    destOverheadConfig: decodeDestOverheadConfig(c.destOverheadConfig),
+  }),
+  security: (
+    c: AbiInlineKey & { securityConfig: Parameters<typeof decodeSecurityConfig>[0] },
+  ): InlineSecurityConfig => ({
+    ...decodeInlineKey(c),
+    securityConfig: decodeSecurityConfig(c.securityConfig),
+  }),
+} as const
+
+/**
+ * One decoder per policy record struct, shared by the policy reads and the calldata decoder.
+ * @internal
+ */
+export const POLICY_RECORD_DECODERS = {
+  connection: (r: AbiPolicyKey & { onlySubsetTokens: boolean }): ConnectionPolicyRecord => ({
+    ...decodePolicyRecordKey(r),
+    onlySubsetTokens: Boolean(r.onlySubsetTokens),
+  }),
+  remotePool: (
+    r: AbiPolicyKey & { remotePoolAddresses: readonly string[] },
+  ): RemotePoolPolicyRecord => {
+    const key = decodePolicyRecordKey(r)
+    return {
+      ...key,
+      remotePoolAddresses: r.remotePoolAddresses.map((a) =>
+        decodeRemoteAddress(a, key.remoteChainSelector),
+      ),
+    }
+  },
+  rateLimit: (
+    r: AbiPolicyKey & { localDecimals: bigint | number; rateLimitConfig: AbiRateLimitConfig },
+  ): RateLimitPolicyRecord => ({
+    ...decodePolicyRecordKey(r),
+    localDecimals: Number(r.localDecimals),
+    rateLimits: decodeRateLimits(r.rateLimitConfig),
+  }),
+  fee: (
+    r: AbiPolicyKey & { feeConfig: Parameters<typeof decodeFeeConfig>[0] },
+  ): FeePolicyRecord => ({
+    ...decodePolicyRecordKey(r),
+    feeConfig: decodeFeeConfig(r.feeConfig),
+  }),
+  destOverhead: (
+    r: AbiPolicyKey & { destOverheadConfig: Parameters<typeof decodeDestOverheadConfig>[0] },
+  ): DestOverheadPolicyRecord => ({
+    ...decodePolicyRecordKey(r),
+    destOverheadConfig: decodeDestOverheadConfig(r.destOverheadConfig),
+  }),
+  security: (
+    r: AbiPolicyKey & { securityConfig: Parameters<typeof decodeSecurityConfig>[0] },
+  ): SecurityPolicyRecord => ({
+    ...decodePolicyRecordKey(r),
+    securityConfig: decodeSecurityConfig(r.securityConfig),
+  }),
+} as const
