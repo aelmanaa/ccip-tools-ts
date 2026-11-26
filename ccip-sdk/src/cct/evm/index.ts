@@ -14,10 +14,12 @@ import type { UnsignedEVMTx } from '../../evm/types.ts'
 import { ChainFamily } from '../../networks.ts'
 import type {
   CheckMultiTokenPoolLaneParams,
+  GetMultiTokenPoolTransferQuoteParams,
   MultiTokenPoolLane,
   MultiTokenPoolLaneCheckResult,
   MultiTokenPoolLaneParams,
   MultiTokenPoolSnapshotCheck,
+  MultiTokenPoolTransferQuote,
 } from '../multi-token-pool.ts'
 import type { TransactionResult } from '../operation.ts'
 import { TokenManager } from '../token-manager.ts'
@@ -84,6 +86,7 @@ import {
   type MultiTokenPoolReadParams,
   GetMultiTokenPoolStack,
   GetMultiTokenPoolState,
+  GetMultiTokenPoolTransferQuote,
   IsMultiTokenPool,
 } from './multi-token-pool/operations/index.ts'
 import type { DeployResult, EVMExecuteParams } from './operation.ts'
@@ -481,6 +484,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   readonly #checkMultiTokenPoolSnapshot = new CheckMultiTokenPoolSnapshot()
   readonly #getMultiTokenPoolLane = new GetMultiTokenPoolLane()
   readonly #checkMultiTokenPoolLane = new CheckMultiTokenPoolLane()
+  readonly #getMultiTokenPoolTransferQuote = new GetMultiTokenPoolTransferQuote()
   readonly #getMultiTokenPoolHooksState = new GetMultiTokenPoolHooksState()
   readonly #getMultiTokenPoolProvider = new GetMultiTokenPoolProvider()
   readonly #getMultiTokenPoolPolicyNames = new GetMultiTokenPoolPolicyNames()
@@ -2295,9 +2299,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * Reads the fee parameters a **v2.0.0+** pool applies to a destination chain and finality.
    *
    * @remarks `getFee` reports the configured USD-cent and basis-point values, not a fee amount.
-   * `finality` defaults to `'finalized'`.
+   * `finality` defaults to `'finalized'`. On a multi-token pool pass `tokenAddress` (it keys every
+   * lane by token); a lane without a fee record throws there, since a send would revert. For the
+   * amount the receiver gets, use `getMultiTokenPoolTransferQuote`.
    *
-   * @throws {@link CCTParamsInvalidError} if a parameter is invalid
+   * @throws {@link CCTParamsInvalidError} if a parameter is invalid, or a multi-token pool lane has
+   * no fee record
+   * @throws {@link CCIPLocalTokenRequiredError} if the pool is a multi-token pool and `tokenAddress`
+   * is omitted
    * @throws {@link CCTContractTypeInvalidError} if the pool's reported type is not supported
    * @throws {@link CCTOperationUnsupportedError} on a pre-v2.0.0 pool
    * @throws {@link CCTContractVersionUnsupportedError} if the pool reports an unknown version
@@ -2319,8 +2328,11 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * Reads token-transfer fee configuration for a destination chain from a **v2.0.0+** pool.
    *
    * @remarks The pool token is read automatically. `finality` and `tokenArgs` default to
-   * `'finalized'` and `'0x'`, respectively, which are correct for standard pools.
+   * `'finalized'` and `'0x'`, respectively, which are correct for standard pools. A multi-token pool
+   * serves many tokens: pass `tokenAddress` there.
    *
+   * @throws {@link CCIPLocalTokenRequiredError} if the pool is a multi-token pool and `tokenAddress`
+   * is omitted
    * @throws {@link CCTParamsInvalidError} if a parameter is invalid
    * @throws {@link CCTContractTypeInvalidError} if the pool's reported type is not supported
    * @throws {@link CCTOperationUnsupportedError} on a pre-v2.0.0 pool
@@ -4446,6 +4458,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTParamsInvalidError} if `poolAddress` or `tokenAddress` is not a valid
    * address
    * @throws {@link CCTContractTypeInvalidError} if the pool's reported type is not supported
+   * @remarks On a multi-token pool: the token is registered with its PoolConfigManager and its
+   * lock-or-burn flavor is served.
    * @throws {@link CCTContractVersionUnsupportedError} if the pool reports an unknown version
    * @example
    * ```typescript
@@ -5247,6 +5261,32 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
     opts: CheckMultiTokenPoolLaneParams,
   ): Promise<MultiTokenPoolLaneCheckResult> {
     return this.#checkMultiTokenPoolLane.query(this.chain, opts)
+  }
+
+  /**
+   * Quotes a transfer from the pool's own `getFee`, adding the basis-point token fee the Router's
+   * quote leaves out: `feeDeducted` and the `netAmount` the receiver gets.
+   * @remarks A lane without a fee record makes the quote throw: a send would revert. The fee can
+   * change between quote and send. Any finality but `'finalized'` is quoted at the fast tier, as
+   * the pool charges it.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the lane has no fee
+   * record, or the token does not allow the requested finality
+   * @throws {@link CCIPLocalTokenRequiredError} if the pool serves multiple tokens and no token is given
+   * @throws {@link CCTContractTypeInvalidError} if the pool is not a multi-token pool
+   * @example
+   * ```typescript
+   * const { feeDeducted, netAmount } = await cct.getMultiTokenPoolTransferQuote({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   tokenAddress: '0xToken...',
+   *   remoteChainSelector: 16015286601757825753n,
+   *   amount: 1_000n * 10n ** 18n,
+   * })
+   * ```
+   */
+  getMultiTokenPoolTransferQuote(
+    opts: GetMultiTokenPoolTransferQuoteParams,
+  ): Promise<MultiTokenPoolTransferQuote> {
+    return this.#getMultiTokenPoolTransferQuote.query(this.chain, opts)
   }
 
   /**

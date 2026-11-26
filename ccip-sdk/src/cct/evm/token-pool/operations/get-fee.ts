@@ -9,6 +9,11 @@ import { toBeHex } from 'ethers'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { type FinalityRequested, encodeFinality } from '../../../../extra-args.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import {
+  isMultiTokenPoolRefusal,
+  readMultiTokenPoolFee,
+  resolveMultiTokenPoolFor,
+} from '../../multi-token-pool/pool-reads.ts'
 import { EVMQuery } from '../../query.ts'
 import { validateAddress, validateUint64 } from '../../validate.ts'
 import {
@@ -27,6 +32,11 @@ export type GetFeeParams = {
   remoteChainSelector: bigint
   /** Requested finality mode; defaults to `'finalized'`. */
   finality?: FinalityRequested
+  /**
+   * The local token. Required on a multi-token pool (which keys every lane by token); ignored by
+   * single-token pools.
+   */
+  tokenAddress?: string
 }
 
 /**
@@ -49,6 +59,8 @@ export class GetFee extends EVMQuery<GetFeeParams, GetFeeResult> {
   protected prepare(params: GetFeeParams): GetFeeParams {
     validateAddress(this.name, 'poolAddress', params.poolAddress)
     validateUint64(this.name, 'remoteChainSelector', params.remoteChainSelector)
+    if (params.tokenAddress !== undefined)
+      validateAddress(this.name, 'tokenAddress', params.tokenAddress)
     if (
       params.finality !== undefined &&
       params.finality !== 'finalized' &&
@@ -73,9 +85,22 @@ export class GetFee extends EVMQuery<GetFeeParams, GetFeeResult> {
    */
   protected async read(
     chain: EVMChain,
-    { poolAddress, remoteChainSelector, finality }: GetFeeParams,
+    { poolAddress, remoteChainSelector, finality, tokenAddress }: GetFeeParams,
   ): Promise<GetFeeResult> {
-    const { version } = await resolveTokenPool(chain, poolAddress)
+    let version
+    try {
+      ;({ version } = await resolveTokenPool(chain, poolAddress))
+    } catch (err) {
+      if (!isMultiTokenPoolRefusal(err)) throw err
+      // a multi-token pool: the token-keyed getFee, which reverts when the lane has no fee record
+      const pool = await resolveMultiTokenPoolFor(chain, poolAddress, tokenAddress)
+      return readMultiTokenPoolFee(this.name, chain, {
+        poolAddress,
+        ...pool,
+        remoteChainSelector,
+        finality: toBeHex(encodeFinality(finality ?? 'finalized'), 4),
+      })
+    }
     return resolveEncoder(this.readers, version, this.name)(
       chain,
       poolAddress,

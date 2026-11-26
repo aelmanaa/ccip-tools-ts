@@ -6,6 +6,11 @@
  */
 
 import type { EVMChain } from '../../../../evm/index.ts'
+import {
+  isMultiTokenPoolRefusal,
+  readMultiTokenPoolIsSupportedToken,
+  resolveMultiTokenPoolFor,
+} from '../../multi-token-pool/pool-reads.ts'
 import { EVMQuery } from '../../query.ts'
 import { validateAddress } from '../../validate.ts'
 import { readTokenPoolIsSupportedToken, resolveTokenPool } from '../contracts.ts'
@@ -49,7 +54,14 @@ export class IsSupportedToken extends EVMQuery<IsSupportedTokenParams, IsSupport
     chain: EVMChain,
     { poolAddress, tokenAddress }: IsSupportedTokenParams,
   ): Promise<IsSupportedTokenResult> {
-    await resolveTokenPool(chain, poolAddress)
+    try {
+      await resolveTokenPool(chain, poolAddress)
+    } catch (err) {
+      if (!isMultiTokenPoolRefusal(err)) throw err
+      // a multi-token pool: registered with its PoolConfigManager, and its flavor served
+      const pool = await resolveMultiTokenPoolFor(chain, poolAddress, tokenAddress)
+      return readMultiTokenPoolIsSupportedToken(chain, poolAddress, pool.version, pool.tokenAddress)
+    }
     return readTokenPoolIsSupportedToken(chain, poolAddress, tokenAddress)
   }
 }

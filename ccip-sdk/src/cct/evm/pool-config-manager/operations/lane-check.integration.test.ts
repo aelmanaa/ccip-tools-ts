@@ -12,6 +12,7 @@ import { before, describe, it } from 'node:test'
 import { reachableRpcEndpoint } from '../../../../../../scripts/test-endpoints.ts'
 import { useResource } from '../../../../../../scripts/useResource.ts'
 import type { ChainGetter } from '../../../../chain.ts'
+import { CCIPLocalTokenRequiredError } from '../../../../errors/index.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { EVMTokenManager } from '../../index.ts'
@@ -100,5 +101,61 @@ describe('MTTP lane view and lane check (Sepolia, read-only)', { skip, timeout: 
     const r = await cct.checkMultiTokenPoolLane({ ...V5V9_SOLANA, getChain })
     assert.equal(r.ok, false)
     assert.equal(r.remote, 'unknown')
+  })
+
+  it('quotes a transfer with the token fee the Router leaves out, rounded down as the pool does', async (t) => {
+    if (!deployed) return t.skip('stacks not deployed')
+    const amount = 123_456_789_012_345_678n
+    for (const lane of [CORE, V5V9_FUJI]) {
+      const q = await cct.getMultiTokenPoolTransferQuote({ ...lane, amount })
+      assert.equal(q.hasFeeRecord, true)
+      assert.equal(q.feeDeducted, (amount * BigInt(q.tokenFeeBps)) / 10_000n)
+      assert.equal(q.netAmount, amount - q.feeDeducted)
+    }
+    // the v5v9 token allows only finalized transfers
+    await assert.rejects(
+      cct.getMultiTokenPoolTransferQuote({ ...V5V9_FUJI, amount, finality: 5 }),
+      (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'finality',
+    )
+  })
+
+  it('answers getFee, getTokenTransferFeeConfig and isSupportedToken per token on a multi-token pool', async (t) => {
+    if (!deployed) return t.skip('stacks not deployed')
+    const fee = await cct.getFee({
+      poolAddress: CORE.poolAddress,
+      remoteChainSelector: FUJI,
+      tokenAddress: CORE.tokenAddress,
+    })
+    const quote = await cct.getMultiTokenPoolTransferQuote({ ...CORE, amount: 1n })
+    assert.deepEqual(
+      [fee.tokenFeeBps, fee.destGasOverhead, fee.destBytesOverhead],
+      [quote.tokenFeeBps, quote.destGasOverhead, quote.destBytesOverhead],
+    )
+    const config = await cct.getTokenTransferFeeConfig({
+      poolAddress: CORE.poolAddress,
+      remoteChainSelector: FUJI,
+      tokenAddress: CORE.tokenAddress,
+    })
+    assert.equal(config.isEnabled, true)
+    assert.equal(config.destBytesOverhead, fee.destBytesOverhead)
+    assert.equal(
+      await cct.isSupportedToken({
+        poolAddress: CORE.poolAddress,
+        tokenAddress: CORE.tokenAddress,
+      }),
+      true,
+    )
+    assert.equal(
+      await cct.isSupportedToken({
+        poolAddress: CORE.poolAddress,
+        tokenAddress: '0x000000000000000000000000000000000000dEaD',
+      }),
+      false,
+    )
+    // without the token a multi-token pool cannot say which lane
+    await assert.rejects(
+      cct.getFee({ poolAddress: CORE.poolAddress, remoteChainSelector: FUJI }),
+      CCIPLocalTokenRequiredError,
+    )
   })
 })
