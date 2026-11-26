@@ -6,6 +6,7 @@ import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../../../solana/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import type { TransactionResult } from '../../../operation.ts'
+import type { RateLimitConfig as SharedRateLimitConfig } from '../../../rate-limit.ts'
 import {
   type SolanaExecuteParams,
   type SolanaGenerateParams,
@@ -28,27 +29,12 @@ import {
 } from '../../validate.ts'
 
 /**
- * Configuration for one direction of a token pool rate limiter.
+ * Configuration for one direction of a token pool rate limiter, as CCT callers write it: the
+ * family-neutral {@link SharedRateLimitConfig}, bounded on Solana.
  *
- * @remarks For a mint with 6 decimals, pass `1_000_000n` to represent one token.
+ * @remarks Amounts are `u64`; an enabled bucket needs `rate <= capacity`, a disabled one zero amounts.
  */
-export type RateLimitConfig =
-  | {
-      /** Whether this directional rate limit is enforced. */
-      enabled: true
-      /** Maximum token amount in the bucket (`u64`), at least `rate`. */
-      capacity: bigint
-      /** Token amount restored to the bucket per second (`u64`), no greater than `capacity`. */
-      rate: bigint
-    }
-  | {
-      /** Whether this directional rate limit is enforced. */
-      enabled: false
-      /** Must be zero when provided; defaults to zero. */
-      capacity?: bigint
-      /** Must be zero when provided; defaults to zero. */
-      rate?: bigint
-    }
+export type RateLimitConfig = SharedRateLimitConfig
 
 /** A parsed {@link RateLimitConfig}, with omitted values of a disabled limit set to zero. */
 export type ParsedRateLimitConfig = {

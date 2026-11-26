@@ -11,7 +11,7 @@ import type { JsonRpcApiProvider } from 'ethers'
 import type { ChainContext } from '../../chain.ts'
 import { EVMChain } from '../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../evm/types.ts'
-import type { ChainFamily } from '../../networks.ts'
+import { ChainFamily } from '../../networks.ts'
 import type { MultiTokenPoolSnapshotCheck } from '../multi-token-pool.ts'
 import type { TransactionResult } from '../operation.ts'
 import { TokenManager } from '../token-manager.ts'
@@ -344,6 +344,8 @@ import {
 
 /** CCT admin operations for EVM chains, delegating each op to an operation class. */
 export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
+  /** The chain family, a literal for narrowing a union of managers (`manager.family === 'EVM'`). */
+  readonly family = ChainFamily.EVM
   readonly chain: EVMChain
   // Token operations
   readonly #deployToken = new DeployToken()

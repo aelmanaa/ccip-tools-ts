@@ -11,8 +11,11 @@
  */
 
 import type { TokenTransferFeeConfig } from '../../../chain.ts'
-import type { MultiTokenPoolRemotePool, PoolDataFormat } from '../../multi-token-pool.ts'
-import type { RateLimitConfig } from '../token-pool/rate-limit.ts'
+import type {
+  MultiTokenPoolRateLimits,
+  MultiTokenPoolRemotePool,
+  PoolDataFormat,
+} from '../../multi-token-pool.ts'
 import type { MultiTokenPoolLaneKey, PolicyName } from './contracts.ts'
 
 /** One policy record: a policy and a remote chain (`0n` = the policy's default record). */
@@ -60,17 +63,8 @@ export type RemotePoolPolicyRecord = PolicyRecordKey & {
   remotePoolAddresses: string[]
 }
 
-/** The four buckets of one lane or policy record, each the shared `RateLimitConfig`. */
-export type MultiTokenPoolRateLimits = {
-  /** Outbound bucket. */
-  outbound: RateLimitConfig
-  /** Inbound bucket. */
-  inbound: RateLimitConfig
-  /** Outbound faster-than-finality bucket. */
-  fastFinalityOutbound: RateLimitConfig
-  /** Inbound faster-than-finality bucket. */
-  fastFinalityInbound: RateLimitConfig
-}
+/** The four buckets of one lane or policy record (shared by both families). */
+export type { MultiTokenPoolRateLimits }
 
 /** An inline rate limit record. */
 export type InlineRateLimitConfig = MultiTokenPoolLaneKey & {

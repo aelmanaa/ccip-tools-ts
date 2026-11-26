@@ -7,7 +7,7 @@
 import type { Connection } from '@solana/web3.js'
 
 import type { ChainContext } from '../../chain.ts'
-import type { ChainFamily } from '../../networks.ts'
+import { ChainFamily } from '../../networks.ts'
 import type { SolanaChain } from '../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../solana/types.ts'
 import { TokenManager } from '../token-manager.ts'
@@ -240,6 +240,8 @@ import {
 
 /** CCT admin facade for Solana. */
 export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> {
+  /** The chain family, a literal for narrowing a union of managers (`manager.family === 'SVM'`). */
+  readonly family = ChainFamily.Solana
   readonly chain: SolanaChain
   // Token operations
   readonly #approveToken = new ApproveToken()

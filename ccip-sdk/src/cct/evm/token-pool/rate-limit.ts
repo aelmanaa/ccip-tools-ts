@@ -11,58 +11,25 @@
  */
 
 import { CCTParamsInvalidError } from '../../errors.ts'
+import type { RateLimitConfig as SharedRateLimitConfig } from '../../rate-limit.ts'
 import { parseRecord, validateBoolean, validateUint128 } from '../validate.ts'
 import { TokenPoolVersion } from './contracts.ts'
 
 /**
- * Configuration for one direction of a token pool rate limiter, as CCT callers write it.
+ * Configuration for one direction of a token pool rate limiter, as CCT callers write it: the
+ * family-neutral {@link SharedRateLimitConfig}, bounded on EVM.
  *
- * @remarks Field-for-field identical to the Solana `RateLimitConfig` in
- * `cct/solana/token-pool/operations/set-chain-rate-limit.ts`, so cross-family callers write one
- * shape; only the bound differs (EVM `uint128` here, Solana `u64` there).
+ * @remarks Amounts are `uint128`. The enabled-bucket rule the contracts enforce is
+ * **version-dependent**, so it is checked against the resolved pool version:
+ * - **v1.6.1 / v2.0.0**: `rate <= capacity`; `rate === capacity` and `rate === 0n` are both legal
+ *   (`RateLimiter._validateTokenBucketConfig` reverts `InvalidRateLimitRate` only when
+ *   `rate > capacity`).
+ * - **v1.5.0 / v1.5.1 / v1.6.0**: stricter, `0n < rate < capacity`; those versions revert when
+ *   `rate >= capacity || rate == 0`, so a config fine on a newer pool is refused here.
  *
- * The discriminant is spelled **`enabled`**, not the ABI's `isEnabled`: matching the Solana op's
- * public field name matters more than matching the ABI, because callers write cross-family code
- * against the SDK. Ops map `enabled` → `isEnabled` when building the on-chain
- * `RateLimiter.Config` tuple.
- *
- * Distinct from the read-side `RateLimiterState` in `chain.ts`, which additionally carries
- * the live `tokens` bucket balance — that is what a pool *reports*, this is what a caller *sets*.
- *
- * For a token with 6 decimals, pass `1_000_000n` to represent one token.
+ * Ops map `enabled` to the ABI's `isEnabled` when building the on-chain `RateLimiter.Config` tuple.
  */
-export type RateLimitConfig =
-  | {
-      /** Whether this directional rate limit is enforced. */
-      enabled: true
-      /**
-       * Maximum token amount in the bucket (`uint128`). Must be at least `rate` on v1.6.1/v2.0.0
-       * pools, and strictly greater than `rate` on v1.5.0/v1.5.1/v1.6.0 — see
-       * {@link RateLimitConfig.rate}.
-       */
-      capacity: bigint
-      /**
-       * Token amount restored to the bucket per second (`uint128`).
-       *
-       * The bound the contracts enforce is **version-dependent**, so this is checked against the
-       * resolved pool version rather than one global rule:
-       * - **v1.6.1 / v2.0.0** — `rate <= capacity`. `rate === capacity` and `rate === 0n` are both
-       *   legal (`RateLimiter._validateTokenBucketConfig` only reverts `InvalidRateLimitRate` when
-       *   `rate > capacity`).
-       * - **v1.5.0 / v1.5.1 / v1.6.0** — stricter: `0n < rate < capacity`. Those versions revert
-       *   when `rate >= capacity || rate == 0`, so a config that is fine on a newer pool is
-       *   rejected here.
-       */
-      rate: bigint
-    }
-  | {
-      /** Whether this directional rate limit is enforced. */
-      enabled: false
-      /** Must be zero when provided; defaults to zero. */
-      capacity?: bigint
-      /** Must be zero when provided; defaults to zero. */
-      rate?: bigint
-    }
+export type RateLimitConfig = SharedRateLimitConfig
 
 /**
  * A {@link RateLimitConfig} with its optional amounts resolved to concrete `bigint`s, still keyed
