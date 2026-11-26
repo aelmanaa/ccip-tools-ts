@@ -426,6 +426,17 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       judge(inlineLane(T1), { facts: missing }).factFailures.map((f) => f.status),
       ['missing'],
     )
+    // the error that left the side unread travels with the failure, for the refusal's context
+    const cause = new Error('request timeout')
+    const unread = goodFacts({
+      remoteLanes: new Map([
+        [
+          guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 }),
+          { status: 'unknown', reason: 'getChain could not serve it', cause },
+        ],
+      ]),
+    })
+    assert.equal(judge(inlineLane(T1), { facts: unread }).factFailures[0]?.cause, cause)
   })
 
   it('reports an attested remote fact as a warning', () => {

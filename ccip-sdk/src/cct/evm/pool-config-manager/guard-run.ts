@@ -186,13 +186,18 @@ export async function runMultiTokenPoolGuards(
 
   if (factFailures.length) {
     const unknown = factFailures.some((f) => f.status === 'unknown')
+    const cause = factFailures.find((f) => f.cause !== undefined)?.cause
     throw new CCTParamsInvalidError(
       errorOperation,
       unknown ? 'getChain' : 'remoteSide',
       `cannot check ${factFailures.length} affected lane(s), and a guard never passes on a fact it could not read: ${factFailures
         .map((f) => `${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
         .join('; ')}`,
-      { context: { ...input.errorContext, factFailures } },
+      {
+        context: { ...input.errorContext, factFailures },
+        // the first underlying error, so `err.cause` tells a missing RPC from a transient failure
+        ...(cause instanceof Error && { cause }),
+      },
     )
   }
   // a lane the write opens beyond the caller's planned set is refused (when the caller gives one)

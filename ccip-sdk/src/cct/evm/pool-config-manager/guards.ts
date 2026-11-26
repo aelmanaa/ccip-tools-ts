@@ -221,6 +221,8 @@ export type MultiTokenPoolGuardFactFailure = MultiTokenPoolLaneKey & {
   scope: 'remote' | 'local'
   /** What could not be read. */
   reason: string
+  /** The error that left it unread, when one did; see {@link MultiTokenPoolRemoteFact}. */
+  cause?: unknown
 }
 
 /** Inputs of {@link evaluateMultiTokenPoolGuards}. @internal */
@@ -407,6 +409,7 @@ export function evaluateMultiTokenPoolGuards({
           scope: 'remote',
           status: pool?.status ?? 'unknown',
           reason: pool?.status ? pool.reason : `remote pool ${p.address} was not read`,
+          ...(pool?.cause !== undefined && { cause: pool.cause }),
         })
         continue
       }
@@ -427,6 +430,7 @@ export function evaluateMultiTokenPoolGuards({
         scope: 'remote',
         status: remote?.status ?? 'unknown',
         reason: remote?.status ? remote.reason : 'the remote side of this lane was not read',
+        ...(remote?.cause !== undefined && { cause: remote.cause }),
       })
       continue
     }

@@ -5,12 +5,12 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { getAddress } from 'ethers'
+import { getAddress, isError } from 'ethers'
 
 import { sealMultiTokenPoolSnapshot } from '../../canonical.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
 import type { MultiTokenPoolRemoteAttestation } from '../../multi-token-pool.ts'
-import { MAX_ATTESTATION_SECONDS, attestationRefusal } from './guard-facts.ts'
+import { MAX_ATTESTATION_SECONDS, attestationRefusal, remoteChainOf } from './guard-facts.ts'
 import { assertSnapshotHolds, guardOptionsOf } from './guard-run.ts'
 
 const OP = 'applyMultiTokenPoolInlineFeeConfigUpdates'
@@ -121,5 +121,25 @@ describe('remote attestations (cct/evm pool-config-manager)', () => {
       attestationRefusal(att({ attestedAt: 5_000n, validUntil: 6_000n }), { now: 2_000n })!,
       /future/,
     )
+  })
+})
+
+describe('getChain failures (cct/evm pool-config-manager)', () => {
+  const FUJI = 14767482510784806043n
+
+  it('keeps a "no RPC for that chain" rejection as the cause, failing closed', async () => {
+    const noRpc = new CCTParamsInvalidError('app', 'getChain', `no RPC for ${FUJI}`)
+    const fact = await remoteChainOf({ getChain: () => Promise.reject(noRpc) }, FUJI)
+    assert.ok('status' in fact)
+    assert.equal(fact.status, 'unknown')
+    assert.equal(fact.cause, noRpc)
+  })
+
+  it('keeps a transient transport failure as the cause, so the caller can retry', async () => {
+    // the shape ethers gives a request timeout
+    const timeout = Object.assign(new Error('request timeout'), { code: 'TIMEOUT' })
+    const fact = await remoteChainOf({ getChain: () => Promise.reject(timeout) }, FUJI)
+    assert.ok('status' in fact)
+    assert.ok(isError(fact.cause, 'TIMEOUT'))
   })
 })

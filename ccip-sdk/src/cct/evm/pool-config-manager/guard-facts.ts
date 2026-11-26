@@ -216,11 +216,15 @@ async function readProviderDataLengths({
   return lengths
 }
 
-/** Resolves the remote chain, or explains why it cannot be read. */
-async function remoteChainOf(
-  { getChain }: ReadMultiTokenPoolGuardFactsInput,
+/**
+ * Resolves the remote chain, or explains why it cannot be read; a `getChain` rejection is kept as the
+ * fact's `cause`.
+ * @internal
+ */
+export async function remoteChainOf(
+  { getChain }: Pick<ReadMultiTokenPoolGuardFactsInput, 'getChain'>,
   remoteChainSelector: bigint,
-): Promise<Chain | { status: 'unknown'; reason: string }> {
+): Promise<Chain | { status: 'unknown'; reason: string; cause?: unknown }> {
   const family = laneFamilyOf(remoteChainSelector)
   if (family === undefined)
     return {
@@ -241,6 +245,7 @@ async function remoteChainOf(
   return getChain(remoteChainSelector).catch((err: unknown) => ({
     status: 'unknown' as const,
     reason: `getChain could not serve ${family} chain ${remoteChainSelector}: ${err instanceof Error ? err.message : String(err)}`,
+    cause: err,
   }))
 }
 

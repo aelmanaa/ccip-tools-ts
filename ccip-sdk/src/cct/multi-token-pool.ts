@@ -357,6 +357,11 @@ export type MultiTokenPoolRemoteFact<T> =
       status: 'missing' | 'unknown'
       /** What is missing or why it cannot be read. */
       reason: string
+      /**
+       * The error that left it unread, when one did (e.g. `getChain` rejecting): tells "no RPC for
+       * that chain" from a transient transport failure worth a retry.
+       */
+      cause?: unknown
     }
 
 /** Tri-state fact: `'unknown'` is never treated as `'missing'`. */
