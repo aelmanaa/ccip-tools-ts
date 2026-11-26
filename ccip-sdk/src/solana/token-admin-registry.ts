@@ -1,7 +1,13 @@
 import { Buffer } from 'buffer'
 
 import { BorshAccountsCoder } from '@coral-xyz/anchor'
-import { type Connection, PublicKey, SystemProgram } from '@solana/web3.js'
+import {
+  type Connection,
+  AddressLookupTableAccount,
+  AddressLookupTableProgram,
+  PublicKey,
+  SystemProgram,
+} from '@solana/web3.js'
 
 import { CCIPDataFormatUnsupportedError, CCIPTokenNotConfiguredError } from '../errors/index.ts'
 
@@ -141,18 +147,30 @@ export function decodeTokenAdminRegistryConfig(
   }
 }
 
+/** Options of {@link getTokenAdminRegistryConfig} and {@link getLookupTableTokenPool}. */
+export type LookupTableReadOptions = {
+  /**
+   * Let RPC errors propagate, and throw `CCIPDataFormatUnsupportedError` for a lookup table that is
+   * missing, not owned by the lookup table program, undecodable, deactivated or too short, instead
+   * of reading it as "names no pool". Only a table whose pool entry is the default key names none.
+   */
+  propagateRpcErrors?: boolean
+}
+
 /**
  * Fetches and decodes a token's TokenAdminRegistry account.
  *
  * @param connection - Solana RPC connection.
  * @param router - Router program that owns the registry account.
  * @param mint - Token mint registered with the Router.
+ * @param opts - See {@link LookupTableReadOptions}.
  * @returns TokenAdminRegistryConfig - The decoded registry configuration.
  */
 export async function getTokenAdminRegistryConfig(
   connection: Connection,
   router: PublicKey,
   mint: PublicKey,
+  opts?: LookupTableReadOptions,
 ): Promise<TokenAdminRegistryConfig> {
   const registry = PublicKey.findProgramAddressSync(
     [Buffer.from('token_admin_registry'), mint.toBuffer()],
@@ -164,19 +182,23 @@ export async function getTokenAdminRegistryConfig(
 
   const config = decodeTokenAdminRegistryConfig(account.data)
   const tokenPool =
-    config.lookupTable && (await getLookupTableTokenPool(connection, config.lookupTable))
+    config.lookupTable && (await getLookupTableTokenPool(connection, config.lookupTable, opts))
   return tokenPool ? { ...config, tokenPool } : config
 }
 
 /**
  * Reads the token pool state account that a registry's pool lookup table names.
  *
- * @returns The token pool, or `undefined` if the table is missing, unreadable, or names none.
+ * @param opts - See {@link LookupTableReadOptions}.
+ * @returns The token pool, or `undefined` if the table is missing, unreadable, or names none (with
+ *   `propagateRpcErrors`: only if it names none).
  */
 export async function getLookupTableTokenPool(
   connection: Connection,
   lookupTable: PublicKey,
+  opts?: LookupTableReadOptions,
 ): Promise<PublicKey | undefined> {
+  if (opts?.propagateRpcErrors) return readLookupTableTokenPool(connection, lookupTable)
   try {
     const table = await connection.getAddressLookupTable(lookupTable)
     const tokenPool = table.value?.state.addresses[LOOKUP_TABLE_TOKEN_POOL_INDEX]
@@ -184,4 +206,33 @@ export async function getLookupTableTokenPool(
   } catch {
     // Token pool may not be configured yet.
   }
+}
+
+const ACTIVE_LOOKUP_TABLE = 0xffff_ffff_ffff_ffffn
+
+async function readLookupTableTokenPool(
+  connection: Connection,
+  lookupTable: PublicKey,
+): Promise<PublicKey | undefined> {
+  const table = lookupTable.toBase58()
+  const account = await connection.getAccountInfo(lookupTable)
+  if (!account) throw new CCIPDataFormatUnsupportedError(`lookup table ${table} does not exist`)
+  if (!account.owner.equals(AddressLookupTableProgram.programId))
+    throw new CCIPDataFormatUnsupportedError(`${table} is not an address lookup table`)
+  let state
+  try {
+    state = AddressLookupTableAccount.deserialize(account.data)
+  } catch (cause) {
+    throw new CCIPDataFormatUnsupportedError(`lookup table ${table} cannot be decoded`, {
+      cause: cause instanceof Error ? cause : undefined,
+    })
+  }
+  if (BigInt(state.deactivationSlot) !== ACTIVE_LOOKUP_TABLE)
+    throw new CCIPDataFormatUnsupportedError(`lookup table ${table} is deactivated`)
+  const tokenPool = state.addresses[LOOKUP_TABLE_TOKEN_POOL_INDEX]
+  if (!tokenPool)
+    throw new CCIPDataFormatUnsupportedError(
+      `lookup table ${table} has no pool entry (index ${LOOKUP_TABLE_TOKEN_POOL_INDEX})`,
+    )
+  return tokenPool.equals(PublicKey.default) ? undefined : tokenPool
 }

@@ -3,11 +3,12 @@ import { Buffer } from 'node:buffer'
 import { describe, it } from 'node:test'
 
 import { BorshAccountsCoder } from '@coral-xyz/anchor'
-import { PublicKey } from '@solana/web3.js'
+import { type Connection, AddressLookupTableProgram, PublicKey } from '@solana/web3.js'
 
 import { CCIPDataFormatUnsupportedError } from '../errors/index.ts'
 import {
   decodeTokenAdminRegistryConfig,
+  getLookupTableTokenPool,
   isLatestTokenAdminRegistryLayout,
 } from './token-admin-registry.ts'
 
@@ -110,5 +111,61 @@ describe('isLatestTokenAdminRegistryLayout', () => {
     assert.equal(isLatestTokenAdminRegistryLayout(registryData(2, 1)), false)
     assert.equal(isLatestTokenAdminRegistryLayout(registryData(3, 1, 254, 2)), false)
     assert.equal(isLatestTokenAdminRegistryLayout(registryData(4, 1, 254, 2, 0)), true)
+  })
+})
+
+describe('getLookupTableTokenPool with propagateRpcErrors', () => {
+  const table = PublicKey.unique()
+  const pool = PublicKey.unique()
+  const lut = (addresses: PublicKey[], deactivated = false) => {
+    const meta = Buffer.alloc(56)
+    meta.writeUInt32LE(1, 0)
+    meta.writeBigUInt64LE(deactivated ? 5n : 0xffff_ffff_ffff_ffffn, 4)
+    return Buffer.concat([meta, ...addresses.map((a) => a.toBuffer())])
+  }
+  const connection = (
+    account: { data: Buffer; owner: PublicKey } | null | Error,
+    legacy?: { value: unknown } | Error,
+  ) =>
+    ({
+      getAccountInfo: async () => {
+        if (account instanceof Error) throw account
+        return account && { ...account, lamports: 1, executable: false }
+      },
+      getAddressLookupTable: async () => {
+        if (legacy instanceof Error) throw legacy
+        return legacy ?? { value: null }
+      },
+    }) as unknown as Connection
+  const owner = AddressLookupTableProgram.programId
+  const read = (c: Connection) => getLookupTableTokenPool(c, table, { propagateRpcErrors: true })
+
+  it('reads the pool entry; a default entry names none', async () => {
+    const entries = [table, PublicKey.unique(), PublicKey.unique()]
+    assert.ok((await read(connection({ data: lut([...entries, pool]), owner })))?.equals(pool))
+    assert.equal(
+      await read(connection({ data: lut([...entries, PublicKey.default]), owner })),
+      undefined,
+    )
+  })
+
+  it('propagates RPC errors', async () => {
+    await assert.rejects(read(connection(new Error('fetch failed: 503'))), /503/)
+  })
+
+  it('throws CCIPDataFormatUnsupportedError on a missing, foreign, bad, deactivated or short table', async () => {
+    for (const account of [
+      null,
+      { data: lut([table, table, table, pool]), owner: PublicKey.unique() },
+      { data: Buffer.alloc(10), owner },
+      { data: lut([table, table, table, pool], true), owner },
+      { data: lut([table, table]), owner },
+    ])
+      await assert.rejects(read(connection(account)), CCIPDataFormatUnsupportedError)
+  })
+
+  it('without the option, keeps swallowing every error', async () => {
+    const c = connection(null, new Error('fetch failed: 503'))
+    assert.equal(await getLookupTableTokenPool(c, table), undefined)
   })
 })
