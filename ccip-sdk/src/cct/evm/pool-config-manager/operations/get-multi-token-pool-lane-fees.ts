@@ -7,14 +7,13 @@
 
 import { toBeHex } from 'ethers'
 
-import { getErrorData } from '../../../../evm/errors.ts'
 import { resultToObject } from '../../../../evm/types.ts'
 import { type FinalityRequested, encodeFinality } from '../../../../extra-args.ts'
 import {
   type MultiTokenPoolVersion,
   getMultiTokenPoolInterface,
 } from '../../multi-token-pool/contracts.ts'
-import { isMissingFunction } from '../../query.ts'
+import { isRevertWith } from '../../query.ts'
 import { type TokenPoolFee, toTokenPoolFee } from '../../token-pool/contracts.ts'
 import { validateFinalityRequested } from '../../validate.ts'
 import {
@@ -83,10 +82,7 @@ export class GetMultiTokenPoolLaneFees extends LaneBatchQuery<
     })
     // the connection store reverts the whole batch when one lane's token disallows the finality
     const store = getMultiTokenPoolInterface('ConnectionPolicyStore', version)
-    const disallowsFinality = (err: unknown) => {
-      const data = isMissingFunction(err) ? getErrorData(err) : undefined
-      return !!data && store.parseError(data)?.name === 'InvalidRequestedFinality'
-    }
+    const disallowsFinality = (err: unknown) => isRevertWith(err, store, 'InvalidRequestedFinality')
     try {
       return (await pcm.getFeeBatch(lanes.map(toAbiLaneKey), requested)).map(toFee)
     } catch (err) {

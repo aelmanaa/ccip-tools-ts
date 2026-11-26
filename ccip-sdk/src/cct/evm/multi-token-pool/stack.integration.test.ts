@@ -26,6 +26,8 @@ if (!process.env.VERBOSE) testLogger.debug = () => {}
 // ── docs-cct-foundry v5v9 stack on Ethereum Sepolia ──
 const POOL = '0x6304228a2908E45fC87f6cc685E6fC309f5A8624'
 const PCM = '0x8AEe4112612168c05db5Dc204E18dCa6b3aD8Cc6'
+/** Block the PCM was deployed in (its constructor grants DEFAULT_ADMIN_ROLE there). */
+const PCM_DEPLOYMENT_BLOCK = 12_188_166
 const RAW = [
   'function owner() view returns (address)',
   'function getRouter() view returns (address)',
@@ -88,12 +90,16 @@ describe('multi-token pool stack reads (Sepolia v5v9)', { skip, timeout: 300_000
     }
   })
 
-  it('finds the default admin among the role holders, complete from deployment', async (t) => {
+  it('finds the default admin among the role holders from the deployment block', async (t) => {
     if (!deployed) return t.skip('v5v9 multi-token pool not deployed')
     const { defaultAdmin } = await cct.getPoolConfigManagerState({ poolConfigManager: PCM })
-    const holders = await cct.getMultiTokenPoolRoleHolders({ poolConfigManager: PCM })
+    // pinned: public endpoints may not serve the historical code the default search needs
+    const holders = await cct.getMultiTokenPoolRoleHolders({
+      poolConfigManager: PCM,
+      fromBlock: PCM_DEPLOYMENT_BLOCK,
+    })
     assert.ok(holders.holders.DEFAULT_ADMIN_ROLE.includes(defaultAdmin))
-    assert.equal(holders.complete, true)
+    assert.equal(holders.scanned.fromBlock, PCM_DEPLOYMENT_BLOCK)
     const [roles] = await cct.getMultiTokenPoolRoles({
       poolConfigManager: PCM,
       accounts: [defaultAdmin],
@@ -149,5 +155,31 @@ describe('multi-token pool stack reads (Sepolia v5v9)', { skip, timeout: 300_000
     // a finality no token on a lane allows is marked, not thrown
     const fees = await cct.getMultiTokenPoolLaneFees({ poolAddress: POOL, lanes, finality: 1 })
     assert.equal(fees.length, lanes.length)
+  })
+
+  it('reads every named policy and the UID provider of a factory token', async (t) => {
+    if (!deployed) return t.skip('v5v9 multi-token pool not deployed')
+    const names = await cct.getMultiTokenPoolPolicyNames({ poolAddress: POOL })
+    for (const name of names.fee) {
+      const fee = await cct.getMultiTokenPoolFeePolicy({ poolAddress: POOL, policyName: name })
+      assert.ok(fee.records.every((r) => r.policyName === name))
+    }
+    for (const name of names.rateLimit) {
+      const rl = await cct.getMultiTokenPoolRateLimitPolicy({ poolAddress: POOL, policyName: name })
+      assert.ok(rl.records.every((r) => r.localDecimals === rl.localDecimals))
+    }
+    const { tokens } = await cct.getMultiTokenPoolConfiguredTokens({ poolAddress: POOL })
+    const configs = await cct.getMultiTokenPoolTokenConfigs({
+      poolAddress: POOL,
+      tokenAddresses: tokens,
+    })
+    const uidToken = configs.find((c) => c.additionalPoolDataProvider)
+    if (!uidToken) return t.skip('no UID factory token on the stack')
+    const provider = await cct.getMultiTokenPoolProvider({
+      provider: uidToken.additionalPoolDataProvider!,
+      tokenAddress: uidToken.tokenAddress,
+    })
+    assert.equal(provider.type, 'FactoryTokenWithUIDPoolDataProvider')
+    assert.match(provider.additionalPoolData ?? '', /^0x[0-9a-f]{64}$/)
   })
 })

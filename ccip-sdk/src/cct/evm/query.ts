@@ -7,10 +7,11 @@
  */
 
 import type { Abi } from 'abitype'
-import { type InterfaceAbi, Contract, isError } from 'ethers'
+import { type Interface, type InterfaceAbi, Contract, isError } from 'ethers'
 import type { TypedContract } from 'ethers-abitype'
 
 import { CCIPTypeVersionInvalidError } from '../../errors/index.ts'
+import { getErrorData } from '../../evm/errors.ts'
 import type { EVMChain } from '../../evm/index.ts'
 import { CCTContractTypeInvalidError } from '../errors.ts'
 import { Query } from '../query.ts'
@@ -45,6 +46,22 @@ export function getTypedContract<const ABI extends Abi>(
  */
 export function isMissingFunction(err: unknown): boolean {
   return isError(err, 'CALL_EXCEPTION') || isError(err, 'BAD_DATA')
+}
+
+/**
+ * True only when a call reverted with the custom error `errorName` of `iface`: its revert data
+ * decodes to that error. Any other revert, a revert without data, and transport errors are not.
+ * @internal
+ */
+export function isRevertWith(err: unknown, iface: Interface, errorName: string): boolean {
+  if (!isError(err, 'CALL_EXCEPTION')) return false
+  const data = getErrorData(err)
+  if (!data) return false
+  try {
+    return iface.parseError(data)?.name === errorName
+  } catch {
+    return false // data too short for a selector
+  }
 }
 
 /**

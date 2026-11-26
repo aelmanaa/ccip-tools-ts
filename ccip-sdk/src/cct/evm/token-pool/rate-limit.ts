@@ -164,3 +164,18 @@ export function parseRateLimitConfig(
   }
   return { enabled, capacity, rate }
 }
+
+/**
+ * Converts an on-chain `RateLimiter.Config` (`isEnabled`, `capacity`, `rate`) to the SDK's
+ * {@link RateLimitConfig}, re-keying `isEnabled` to `enabled`, so read output can be written back.
+ * @internal
+ */
+export function fromAbiRateLimitConfig(config: {
+  isEnabled: boolean
+  capacity: bigint
+  rate: bigint
+}): RateLimitConfig {
+  return config.isEnabled
+    ? { enabled: true, capacity: BigInt(config.capacity), rate: BigInt(config.rate) }
+    : { enabled: false, capacity: BigInt(config.capacity), rate: BigInt(config.rate) }
+}

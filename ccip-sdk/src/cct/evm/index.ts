@@ -62,6 +62,16 @@ import {
   WithdrawFromLockbox,
 } from './lockbox/operations/index.ts'
 import {
+  type GetMultiTokenPoolHooksStateParams,
+  type GetMultiTokenPoolHooksStateResult,
+  GetMultiTokenPoolHooksState,
+} from './multi-token-pool-hooks/operations/index.ts'
+import {
+  type GetMultiTokenPoolProviderParams,
+  type GetMultiTokenPoolProviderResult,
+  GetMultiTokenPoolProvider,
+} from './multi-token-pool-providers/operations/index.ts'
+import {
   type GetMultiTokenPoolStackResult,
   type GetMultiTokenPoolStateResult,
   type MultiTokenPoolReadParams,
@@ -81,6 +91,11 @@ import {
   type GetMultiTokenPoolChainPausesResult,
   type GetMultiTokenPoolConfiguredTokensParams,
   type GetMultiTokenPoolConfiguredTokensResult,
+  type GetMultiTokenPoolConnectionPolicyResult,
+  type GetMultiTokenPoolDestOverheadPolicyResult,
+  type GetMultiTokenPoolFeePolicyResult,
+  type GetMultiTokenPoolInlineConfigsParams,
+  type GetMultiTokenPoolInlineConfigsResult,
   type GetMultiTokenPoolLaneBatchParams,
   type GetMultiTokenPoolLaneConnectionsResult,
   type GetMultiTokenPoolLaneFeesParams,
@@ -89,10 +104,17 @@ import {
   type GetMultiTokenPoolLaneRecordLevelsResult,
   type GetMultiTokenPoolLaneTokenTransferFeeConfigsResult,
   type GetMultiTokenPoolLaneVerificationsResult,
+  type GetMultiTokenPoolPolicyNamesResult,
+  type GetMultiTokenPoolPolicyParams,
+  type GetMultiTokenPoolRateLimitPolicyResult,
+  type GetMultiTokenPoolRemotePoolPolicyResult,
   type GetMultiTokenPoolRoleHoldersParams,
   type GetMultiTokenPoolRoleHoldersResult,
   type GetMultiTokenPoolRolesParams,
   type GetMultiTokenPoolRolesResult,
+  type GetMultiTokenPoolSecurityPolicyResult,
+  type GetMultiTokenPoolSubsetTokensParams,
+  type GetMultiTokenPoolSubsetTokensResult,
   type GetMultiTokenPoolTokenConfigsParams,
   type GetMultiTokenPoolTokenProfilesParams,
   type GetMultiTokenPoolTokenProfilesResult,
@@ -100,14 +122,23 @@ import {
   type MultiTokenPoolTokenConfig,
   GetMultiTokenPoolChainPauses,
   GetMultiTokenPoolConfiguredTokens,
+  GetMultiTokenPoolConnectionPolicy,
+  GetMultiTokenPoolDestOverheadPolicy,
+  GetMultiTokenPoolFeePolicy,
+  GetMultiTokenPoolInlineConfigs,
   GetMultiTokenPoolLaneConnections,
   GetMultiTokenPoolLaneFees,
   GetMultiTokenPoolLaneRateLimiterStates,
   GetMultiTokenPoolLaneRecordLevels,
   GetMultiTokenPoolLaneTokenTransferFeeConfigs,
   GetMultiTokenPoolLaneVerifications,
+  GetMultiTokenPoolPolicyNames,
+  GetMultiTokenPoolRateLimitPolicy,
+  GetMultiTokenPoolRemotePoolPolicy,
   GetMultiTokenPoolRoleHolders,
   GetMultiTokenPoolRoles,
+  GetMultiTokenPoolSecurityPolicy,
+  GetMultiTokenPoolSubsetTokens,
   GetMultiTokenPoolTokenConfigs,
   GetMultiTokenPoolTokenProfiles,
   GetPoolConfigManagerState,
@@ -434,6 +465,17 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
     new GetMultiTokenPoolLaneTokenTransferFeeConfigs()
   readonly #getMultiTokenPoolLaneRateLimiterStates = new GetMultiTokenPoolLaneRateLimiterStates()
   readonly #getMultiTokenPoolLaneVerifications = new GetMultiTokenPoolLaneVerifications()
+  readonly #getMultiTokenPoolHooksState = new GetMultiTokenPoolHooksState()
+  readonly #getMultiTokenPoolProvider = new GetMultiTokenPoolProvider()
+  readonly #getMultiTokenPoolPolicyNames = new GetMultiTokenPoolPolicyNames()
+  readonly #getMultiTokenPoolConnectionPolicy = new GetMultiTokenPoolConnectionPolicy()
+  readonly #getMultiTokenPoolRemotePoolPolicy = new GetMultiTokenPoolRemotePoolPolicy()
+  readonly #getMultiTokenPoolRateLimitPolicy = new GetMultiTokenPoolRateLimitPolicy()
+  readonly #getMultiTokenPoolFeePolicy = new GetMultiTokenPoolFeePolicy()
+  readonly #getMultiTokenPoolDestOverheadPolicy = new GetMultiTokenPoolDestOverheadPolicy()
+  readonly #getMultiTokenPoolSecurityPolicy = new GetMultiTokenPoolSecurityPolicy()
+  readonly #getMultiTokenPoolSubsetTokens = new GetMultiTokenPoolSubsetTokens()
+  readonly #getMultiTokenPoolInlineConfigs = new GetMultiTokenPoolInlineConfigs()
 
   /** Wraps an {@link EVMChain}; prefer the static factory methods. */
   constructor(chain: EVMChain) {
@@ -5135,6 +5177,212 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   ): Promise<GetMultiTokenPoolLaneVerificationsResult> {
     return this.#getMultiTokenPoolLaneVerifications.query(this.chain, opts)
   }
+
+  /**
+   * Reads a hook contract: allowlist, engine, blocklist, callers, owner and pending owner.
+   * @remarks Read-only: needs no wallet and builds no transaction. Gated on type only.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the address is not a hook contract
+   * @throws {@link CCTDataDecodeError} if its storage is not the `Ownable2Step` layout
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolHooksState({ hooks: '0xHooks...' })
+   * ```
+   */
+  getMultiTokenPoolHooksState(
+    opts: GetMultiTokenPoolHooksStateParams,
+  ): Promise<GetMultiTokenPoolHooksStateResult> {
+    return this.#getMultiTokenPoolHooksState.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a provider: its type, a UID provider's factory and a token's additional pool data, or a SameAddress provider's answer.
+   * @remarks The UID read is the pre-flight the token profile updates run, and the value a Solana lane's pool data must equal.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the address is not a provider
+   * @throws {@link CCTDataDecodeError} if a SameAddress provider answers a remote token that is not
+   * valid for the remote chain's family
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolProvider({ provider: '0xUidProvider...', tokenAddress: '0xToken...' })
+   * ```
+   */
+  getMultiTokenPoolProvider(
+    opts: GetMultiTokenPoolProviderParams,
+  ): Promise<GetMultiTokenPoolProviderResult> {
+    return this.#getMultiTokenPoolProvider.query(this.chain, opts)
+  }
+
+  /**
+   * Reads every policy name per record type, including unused ones.
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolPolicyNames({ poolAddress: '0xMultiTokenPool...' })
+   * ```
+   */
+  getMultiTokenPoolPolicyNames(
+    opts: PoolConfigManagerTarget,
+  ): Promise<GetMultiTokenPoolPolicyNamesResult> {
+    return this.#getMultiTokenPoolPolicyNames.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a connection policy, its remote token address provider and its records.
+   * @remarks `tokenCount` is the blast radius of a write to it. An unknown policy (a mistyped name) reads `exists: false`; a defined policy with no records reads `exists: true`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if a stored remote address is not valid for its chain's family
+   * @example
+   * ```typescript
+   * const policy = await cct.getMultiTokenPoolConnectionPolicy({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   policyName: 'default',
+   * })
+   * if (!policy.exists) throw new Error(`no connection policy named ${policy.policyName}`)
+   * // connection records are per chain only: a connection policy has no chain-0 default
+   * const toSolana = policy.records.find((r) => r.remoteChainSelector === 16423721717087811551n)
+   * ```
+   */
+  getMultiTokenPoolConnectionPolicy(
+    opts: GetMultiTokenPoolPolicyParams,
+  ): Promise<GetMultiTokenPoolConnectionPolicyResult> {
+    return this.#getMultiTokenPoolConnectionPolicy.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a remote pool policy and its records.
+   * @remarks `tokenCount` is the blast radius of a write to it. An unknown policy (a mistyped name) reads `exists: false`; a defined policy with no records reads `exists: true`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if a stored remote address is not valid for its chain's family
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolRemotePoolPolicy({ poolAddress: '0xMultiTokenPool...', policyName: 'default' })
+   * ```
+   */
+  getMultiTokenPoolRemotePoolPolicy(
+    opts: GetMultiTokenPoolPolicyParams,
+  ): Promise<GetMultiTokenPoolRemotePoolPolicyResult> {
+    return this.#getMultiTokenPoolRemotePoolPolicy.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a rate limit policy, its decimals and its records.
+   * @remarks `tokenCount` is the blast radius of a write to it. An unknown policy (a mistyped name) reads `exists: false`; a defined policy with no records reads `exists: true`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolRateLimitPolicy({ poolAddress: '0xMultiTokenPool...', policyName: 'default' })
+   * ```
+   */
+  getMultiTokenPoolRateLimitPolicy(
+    opts: GetMultiTokenPoolPolicyParams,
+  ): Promise<GetMultiTokenPoolRateLimitPolicyResult> {
+    return this.#getMultiTokenPoolRateLimitPolicy.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a fee policy and its records.
+   * @remarks `tokenCount` is the blast radius of a write to it. An unknown policy (a mistyped name) reads `exists: false`; a defined policy with no records reads `exists: true`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolFeePolicy({ poolAddress: '0xMultiTokenPool...', policyName: 'default' })
+   * ```
+   */
+  getMultiTokenPoolFeePolicy(
+    opts: GetMultiTokenPoolPolicyParams,
+  ): Promise<GetMultiTokenPoolFeePolicyResult> {
+    return this.#getMultiTokenPoolFeePolicy.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a destination overhead policy and its records.
+   * @remarks `tokenCount` is the blast radius of a write to it. An unknown policy (a mistyped name) reads `exists: false`; a defined policy with no records reads `exists: true`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolDestOverheadPolicy({ poolAddress: '0xMultiTokenPool...', policyName: 'default' })
+   * ```
+   */
+  getMultiTokenPoolDestOverheadPolicy(
+    opts: GetMultiTokenPoolPolicyParams,
+  ): Promise<GetMultiTokenPoolDestOverheadPolicyResult> {
+    return this.#getMultiTokenPoolDestOverheadPolicy.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a security policy and its records.
+   * @remarks `tokenCount` is the blast radius of a write to it. An unknown policy (a mistyped name) reads `exists: false`; a defined policy with no records reads `exists: true`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolSecurityPolicy({ poolAddress: '0xMultiTokenPool...', policyName: 'default' })
+   * ```
+   */
+  getMultiTokenPoolSecurityPolicy(
+    opts: GetMultiTokenPoolPolicyParams,
+  ): Promise<GetMultiTokenPoolSecurityPolicyResult> {
+    return this.#getMultiTokenPoolSecurityPolicy.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a connection policy's subset tokens for one chain, every page at one block.
+   * @remarks The subset is kept while `onlySubsetTokens` is `false`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolSubsetTokens({ poolAddress: '0xMultiTokenPool...', policyName: 'default', remoteChainSelector: 16015286601757825753n })
+   * ```
+   */
+  getMultiTokenPoolSubsetTokens(
+    opts: GetMultiTokenPoolSubsetTokensParams,
+  ): Promise<GetMultiTokenPoolSubsetTokensResult> {
+    return this.#getMultiTokenPoolSubsetTokens.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a token's inline records, including chains with no lane.
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PCM, or `poolAddress` is not
+   * a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @throws {@link CCTDataDecodeError} if a stored remote address is not valid for its chain's family
+   * @example
+   * ```typescript
+   * const result = await cct.getMultiTokenPoolInlineConfigs({ poolAddress: '0xMultiTokenPool...', tokenAddress: '0xToken...' })
+   * ```
+   */
+  getMultiTokenPoolInlineConfigs(
+    opts: GetMultiTokenPoolInlineConfigsParams,
+  ): Promise<GetMultiTokenPoolInlineConfigsResult> {
+    return this.#getMultiTokenPoolInlineConfigs.query(this.chain, opts)
+  }
 }
 
 export type * from './token-admin-registry/operations/index.ts'
@@ -5242,6 +5490,9 @@ export type * from '../multi-token-pool.ts'
 export type * from './multi-token-pool/operations/index.ts'
 export type * from './pool-config-manager/operations/index.ts'
 export type * from './policy-store/operations/index.ts'
+export type * from './multi-token-pool-hooks/operations/index.ts'
+export type * from './multi-token-pool-providers/operations/index.ts'
+export type * from './pool-config-manager/records.ts'
 export type {
   MultiTokenPoolLaneKey,
   PolicyName,

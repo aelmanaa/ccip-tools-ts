@@ -79,6 +79,41 @@ Single-token pools ignore the `token` option. Without it, a multi-token pool rea
 
 Each remote of a multi-token pool also has an `outboundStatus` and an `inboundStatus`. A status is `paused` when a global, chain or token pause stops transfers in that direction. It is `incomplete` when the lane lacks a config record that the transfer needs (`connection`, `remotePool`, `rateLimit`, `fee`, `destOverhead` or `security`; inbound transfers do not need the two fee records). A multi-token pool has no FeeQuoter fallback: a send on a lane without fee records reverts with `LaneFeeNotFound`. `getFee`, `getTotalFeesEstimate` and the send methods throw `CCIPTokenTransferPausedError` or `CCIPLaneConfigIncompleteError` before the send. The send methods also simulate the source pool's `lockOrBurn` with the sender, so a pool hook or blocklist rejects the send before it is signed (`CCIPSourcePoolRevertError`). `getLaneFeatures` with a `token` returns the outbound status as `LANE_STATUS`.
 
+### Reading a multi-token pool with the token manager
+
+The chain reads above answer for one token at a time. To audit a whole multi-token pool, use the read operations of `EVMTokenManager`. They take the pool address (or the PoolConfigManager address as `poolConfigManager`) and need no wallet:
+
+```typescript
+import { EVMChain } from '@chainlink/ccip-sdk'
+import { EVMTokenManager } from '@chainlink/ccip-sdk/cct/evm'
+
+const chain = await EVMChain.fromUrl(rpcUrl)
+const cct = EVMTokenManager.fromChain(chain)
+
+// the pool, its PoolConfigManager and stores, with findings for anything misconfigured
+const { findings } = await cct.getMultiTokenPoolStack({ poolAddress })
+for (const f of findings) console.log(f.severity, f.reason)
+
+// every registered token, read at one block, then its config and each of its lanes
+const { tokens } = await cct.getMultiTokenPoolConfiguredTokens({ poolAddress })
+const configs = await cct.getMultiTokenPoolTokenConfigs({ poolAddress, tokenAddresses: tokens })
+const lanes = configs.flatMap((c) =>
+  c.supportedChains.map((remoteChainSelector) => ({ tokenAddress: c.tokenAddress, remoteChainSelector })),
+)
+const connections = await cct.getMultiTokenPoolLaneConnections({ poolAddress, lanes })
+const levels = await cct.getMultiTokenPoolLaneRecordLevels({ poolAddress, lanes })
+
+// a policy the tokens share; `exists` is false for a name the PCM does not list
+const fee = await cct.getMultiTokenPoolFeePolicy({ poolAddress, policyName: 'default' })
+console.log(fee.exists, fee.tokenCount, fee.records)
+```
+
+A token's lane records resolve in this order: the token's inline record, then the policy record for that chain, then the policy default (chain `0`). Connection and remote pool records have no default. `getMultiTokenPoolLaneRecordLevels` returns where each record type resolves from (`'inline'`, `'policy-chain'`, `'policy-default'` or `'none'`), and works before a lane exists.
+
+The lane reads (`getMultiTokenPoolLaneConnections`, `...RecordLevels`, `...Fees`, `...TokenTransferFeeConfigs`, `...RateLimiterStates`, `...Verifications`) batch 100 lanes per call and return one entry per lane, in input order. `getMultiTokenPoolLaneFees` marks a lane whose token does not allow the requested finality with `finalityNotAllowed: true` instead of failing the batch. Remote addresses come back in the remote chain's own format, as the writes take them.
+
+The PCM does not enumerate role holders or paused chains. `getMultiTokenPoolRoleHolders` and `getMultiTokenPoolChainPauses` rebuild them from logs and confirm each one with a current read. Each result has `complete: true` only when the scan provably starts at the contract's deployment. Pass `fromBlock` on an RPC that does not serve historical state.
+
 ## Remote chain configuration
 
 `getTokenPoolRemotes` returns how the pool connects to other chains: remote token addresses, remote pool addresses, and rate limiter state.
@@ -268,6 +303,7 @@ await inspectTokenPool(
 | `getTokenPoolRemotes(pool, chainSelector?, { token? })` | Chain | Remote chain config: remote token, pools, rate limits; `token` is required for multi-token pools |
 | `getSupportedTokens(registry)` | Chain | List all tokens in the registry |
 | `getTokenInfo(token)` | Chain | Token metadata (symbol, decimals, name) |
+| `getMultiTokenPool*` | EVMTokenManager | Multi-token pool stack, tokens, lanes, policies, hooks and providers; see [Reading a multi-token pool](#reading-a-multi-token-pool-with-the-token-manager) |
 
 ## Related
 

@@ -65,3 +65,42 @@ export {
   GetMultiTokenPoolTokenProfiles,
 } from './get-multi-token-pool-token-profiles.ts'
 export type { GetMultiTokenPoolLaneBatchParams } from './lane-batch.ts'
+export {
+  type GetMultiTokenPoolConnectionPolicyResult,
+  GetMultiTokenPoolConnectionPolicy,
+} from './get-multi-token-pool-connection-policy.ts'
+export {
+  type GetMultiTokenPoolDestOverheadPolicyResult,
+  GetMultiTokenPoolDestOverheadPolicy,
+} from './get-multi-token-pool-dest-overhead-policy.ts'
+export {
+  type GetMultiTokenPoolFeePolicyResult,
+  GetMultiTokenPoolFeePolicy,
+} from './get-multi-token-pool-fee-policy.ts'
+export {
+  type GetMultiTokenPoolInlineConfigsParams,
+  type GetMultiTokenPoolInlineConfigsResult,
+  GetMultiTokenPoolInlineConfigs,
+} from './get-multi-token-pool-inline-configs.ts'
+export {
+  type GetMultiTokenPoolPolicyNamesResult,
+  GetMultiTokenPoolPolicyNames,
+} from './get-multi-token-pool-policy-names.ts'
+export {
+  type GetMultiTokenPoolRateLimitPolicyResult,
+  GetMultiTokenPoolRateLimitPolicy,
+} from './get-multi-token-pool-rate-limit-policy.ts'
+export {
+  type GetMultiTokenPoolRemotePoolPolicyResult,
+  GetMultiTokenPoolRemotePoolPolicy,
+} from './get-multi-token-pool-remote-pool-policy.ts'
+export {
+  type GetMultiTokenPoolSecurityPolicyResult,
+  GetMultiTokenPoolSecurityPolicy,
+} from './get-multi-token-pool-security-policy.ts'
+export {
+  type GetMultiTokenPoolSubsetTokensParams,
+  type GetMultiTokenPoolSubsetTokensResult,
+  GetMultiTokenPoolSubsetTokens,
+} from './get-multi-token-pool-subset-tokens.ts'
+export type { GetMultiTokenPoolPolicyParams } from './policy-query.ts'
