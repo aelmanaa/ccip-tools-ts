@@ -4796,3 +4796,36 @@ export type {
 export type { TransactionResult } from '../operation.ts'
 export type { SimulateEVMTxOptions, SimulateEVMTxResult } from './simulate.ts'
 export { simulateEVMTx } from './simulate.ts'
+// Multi-token pool (MTTP) taxonomy, the op map and the shared cross-family shapes. The resolvers in
+// `multi-token-pool/contracts.ts` stay internal, as the pool ones do.
+export type {
+  LockOrBurnFlavor,
+  MultiTokenPoolContractType,
+  MultiTokenPoolHooksType,
+  MultiTokenPoolOperationName,
+  MultiTokenPoolOperationTarget,
+  MultiTokenPoolProviderType,
+  MultiTokenPoolType,
+  PolicyStoreType,
+  PoolConfigManagerGrantableRole,
+  PoolConfigManagerRole,
+} from './multi-token-pool/contracts.ts'
+export {
+  LOCK_OR_BURN_FLAVORS,
+  MULTI_TOKEN_POOL_HOOKS_TYPES,
+  MULTI_TOKEN_POOL_OPERATIONS,
+  MULTI_TOKEN_POOL_PROVIDER_TYPES,
+  MULTI_TOKEN_POOL_TYPES,
+  MultiTokenPoolVersion,
+  POLICY_STORE_TYPES,
+  POOL_CONFIG_MANAGER_ROLES,
+  isPoolConfigManagerRole,
+  isSupportedMultiTokenPoolType,
+} from './multi-token-pool/contracts.ts'
+export type * from '../multi-token-pool.ts'
+export {
+  MULTI_TOKEN_POOL_LANE_CHECKS,
+  MULTI_TOKEN_POOL_STEP_SIGNER_KINDS,
+  parseMultiTokenPoolSnapshot,
+  serializeMultiTokenPoolSnapshot,
+} from '../multi-token-pool.ts'

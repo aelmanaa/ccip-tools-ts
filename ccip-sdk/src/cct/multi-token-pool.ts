@@ -1,12 +1,11 @@
 /**
  * Family-neutral multi-token pool (MTTP) types shared by the EVM and Solana CCT surfaces.
  *
- * Target location: `ccip-sdk/src/cct/multi-token-pool.ts`, next to `cct/remote-address.ts`. It holds
- * types, two runtime constant tuples (`MULTI_TOKEN_POOL_LANE_CHECKS`,
- * `MULTI_TOKEN_POOL_STEP_SIGNER_KINDS`) and two pure snapshot (de)serializers. Both
+ * It holds types, two runtime constant tuples (`MULTI_TOKEN_POOL_LANE_CHECKS`,
+ * `MULTI_TOKEN_POOL_STEP_SIGNER_KINDS`) and the two snapshot (de)serializers. Both
  * `@chainlink/ccip-sdk/cct/evm` and `@chainlink/ccip-sdk/cct/solana` re-export the types with
- * `export type` and the runtime values as values; the module has no side effects, imports no family
- * code and no value from core (the new error class lives in `cct/errors.ts`, see `errors.ts` here).
+ * `export type` and the runtime values as values. The module has no side effects and imports no
+ * family code; the canonical JSON it hashes with lives in the internal `canonical.ts`.
  *
  * "Multi-token pool" names the feature: on EVM a `BurnMintMultiTokenPool` with its `PoolConfigManager`
  * and three policy stores; on Solana the burn/mint pool program with pool groups. The word "group"
@@ -14,10 +13,6 @@
  *
  * @packageDocumentation
  */
-
-import { Buffer } from 'buffer'
-
-import { id as keccak256Utf8 } from 'ethers'
 
 import type {
   ChainGetter,
@@ -28,8 +23,9 @@ import type {
 } from '../chain.ts'
 import type { FinalityRequested } from '../extra-args.ts'
 import type { ChainFamily } from '../networks.ts'
-import { jsonParse, jsonStringify } from '../utils.ts'
-import { CCTParamsInvalidError } from './errors.ts'
+import { jsonParse } from '../utils.ts'
+import { canonicalHash, canonicalJson } from './canonical.ts'
+import { type CCTStateChange, CCTParamsInvalidError } from './errors.ts'
 
 /** A transfer direction. Structurally identical to the EVM `CCVMessageDirection`. */
 export type MultiTokenPoolDirection = 'outbound' | 'inbound'
@@ -46,7 +42,15 @@ export type MultiTokenPoolDirection = 'outbound' | 'inbound'
 export type PoolDataFormat = 'legacy' | 'long'
 
 /** A reference to a shared policy: an EVM policy name, or a Solana policy id. */
-export type MultiTokenPoolPolicyRef = { name: string } | { id: number }
+export type MultiTokenPoolPolicyRef =
+  | {
+      /** EVM policy name (see `PolicyName`). */
+      name: string
+    }
+  | {
+      /** Solana policy id within the pool group. */
+      id: number
+    }
 
 /**
  * Where a lane's record of one type comes from.
@@ -56,17 +60,36 @@ export type MultiTokenPoolPolicyRef = { name: string } | { id: number }
  * - `'none'`: no record resolves; a transfer that reads this type reverts.
  */
 export type MultiTokenPoolConfigSource =
-  | { kind: 'inline' }
-  | { kind: 'policy'; policy: MultiTokenPoolPolicyRef }
-  | { kind: 'default'; policy?: MultiTokenPoolPolicyRef }
-  | { kind: 'none' }
+  | {
+      /** The token's own record for this lane. */
+      kind: 'inline'
+    }
+  | {
+      /** A named, shared policy's record for this chain. */
+      kind: 'policy'
+      /** The policy the record belongs to. */
+      policy: MultiTokenPoolPolicyRef
+    }
+  | {
+      /** A shared default record. */
+      kind: 'default'
+      /** The policy whose default applies (EVM); absent for the Solana pool-group default. */
+      policy?: MultiTokenPoolPolicyRef
+    }
+  | {
+      /** No record resolves. */
+      kind: 'none'
+    }
 
 /** The four rate-limit buckets of one lane, as core `RateLimiterState` (`null` = disabled). */
 export type MultiTokenPoolLaneRateLimits = {
+  /** Outbound bucket (finality transfers, or every transfer without a fast-finality bucket). */
   outbound: RateLimiterState
+  /** Inbound bucket. */
   inbound: RateLimiterState
   /** `undefined` when the lane has no faster-than-finality bucket and the default bucket applies. */
   fastFinalityOutbound?: RateLimiterState
+  /** Inbound faster-than-finality bucket, as `fastFinalityOutbound`. */
   fastFinalityInbound?: RateLimiterState
 }
 
@@ -113,11 +136,13 @@ export type MultiTokenPoolLaneParams = {
  * - every attestation used is reported in the op's `warnings`.
  */
 export type MultiTokenPoolRemoteAttestation = {
+  /** CCIP selector of the remote chain. */
   remoteChainSelector: bigint
   /** The lane's remote token, in the remote chain's format. */
   remoteToken: string
   /** The remote pool the attestation is about; it must be one of the lane's trusted remote pools. */
   remotePoolAddress: string
+  /** Whether the remote pool reads long pool data (the F14 fact). */
   acceptsLongPoolData: boolean
   /** Unix seconds when the fact was checked. */
   attestedAt: bigint
@@ -145,19 +170,41 @@ export type MultiTokenPoolRemoteCheckOptions = {
 
 /** A family-neutral view of one token's lane. */
 export type MultiTokenPoolLane = {
+  /** Chain family of the local pool. */
   family: typeof ChainFamily.EVM | typeof ChainFamily.Solana
+  /** Local token (EVM address; Solana mint). */
   tokenAddress: string
+  /** CCIP selector of the remote chain. */
   remoteChainSelector: bigint
+  /** Whether the lane has any configuration at all. */
   exists: boolean
+  /** Remote token in the remote chain's format, or `null` when no connection resolves. */
   remoteToken: string | null
+  /** Remote pools the lane trusts for inbound messages. */
   remotePools: MultiTokenPoolRemotePool[]
+  /** Pool data the lane sends. */
   poolDataFormat: PoolDataFormat
+  /** Where each record type resolves from. */
   sources: Record<LaneRecordType, MultiTokenPoolConfigSource>
+  /** Resolved rate-limit buckets. */
   rateLimits: MultiTokenPoolLaneRateLimits
   /** Directions held by a stop: an enabled 0/0 bucket (e.g. written by `pauseMultiTokenPoolLanes`). */
-  stopped: { outbound: boolean; inbound: boolean }
+  stopped: {
+    /** Outbound is held by a stop. */
+    outbound: boolean
+    /** Inbound is held by a stop. */
+    inbound: boolean
+  }
+  /** Resolved fee and destination overheads, when an outbound fee record resolves. */
   tokenTransferFeeConfig?: TokenTransferFeeConfig
-  ccvs: { outbound: string[]; inbound: string[] }
+  /** Resolved CCV lists per direction (`address(0)` = the default CCVs). */
+  ccvs: {
+    /** CCVs an outbound transfer needs. */
+    outbound: string[]
+    /** CCVs an inbound transfer needs. */
+    inbound: string[]
+  }
+  /** Whether a hook contract resolves for the lane. */
   hasHooks: boolean
   /**
    * Core `LaneStatus`. Scope mapping on Solana: pool-group pause → `'global'`; chain record pause or
@@ -165,6 +212,7 @@ export type MultiTokenPoolLane = {
    * this token on this chain only; `getPoolGroupLane` gives the exact source.
    */
   outboundStatus: LaneStatus
+  /** Core `LaneStatus` inbound; scopes as `outboundStatus`. */
   inboundStatus: LaneStatus
 }
 
@@ -201,12 +249,17 @@ export type MultiTokenPoolLaneCheck = (typeof MULTI_TOKEN_POOL_LANE_CHECKS)[numb
 
 /** One finding of `checkMultiTokenPoolLane` and of the post-state guards of a write. */
 export type MultiTokenPoolLaneFinding = {
+  /** The check that produced the finding. */
   check: MultiTokenPoolLaneCheck
   /** `'error'`: a transfer fails or loses funds; the write is refused. `'warning'`: reported only. */
   severity: 'error' | 'warning'
+  /** Local token of the lane. */
   tokenAddress: string
+  /** Remote chain of the lane. */
   remoteChainSelector: bigint
+  /** The record type involved, when one is. */
   recordType?: LaneRecordType
+  /** What is wrong and how to fix it. */
   reason: string
 }
 
@@ -216,35 +269,58 @@ export type MultiTokenPoolFact = 'known' | 'missing' | 'unknown'
 /** Params of `checkMultiTokenPoolLane` on both families. */
 export type CheckMultiTokenPoolLaneParams = MultiTokenPoolLaneParams &
   MultiTokenPoolRemoteCheckOptions & {
+    /** Directions that must be open for `ok`; defaults to both. */
     expectOpen?: MultiTokenPoolDirection[]
+    /** Lowest acceptable `destGasOverhead`; defaults to 200,000 (plus 100,000 when a hook resolves). */
     minDestGasOverhead?: number
+    /** Highest acceptable transfer fee in bps, both tiers; defaults to 1,000. */
     maxTransferFeeBps?: number
-    lockBudget?: { extraAccounts?: number; feeToken?: string }
+    /** Solana only: extra accounts a program caller adds, for the send lock budget. */
+    lockBudget?: {
+      /** Accounts the calling program adds to the send. */
+      extraAccounts?: number
+      /** Fee token of the send (WSOL adds one account). */
+      feeToken?: string
+    }
   }
 
 /** Result of `checkMultiTokenPoolLane`. */
 export type MultiTokenPoolLaneCheckResult = {
+  /** The lane as read. */
   lane: MultiTokenPoolLane
+  /** Every finding, errors and warnings. */
   findings: MultiTokenPoolLaneFinding[]
+  /** Whether the remote side could be read. */
   remote: MultiTokenPoolFact
+  /** `true` when no finding is an error. */
   ok: boolean
 }
 
 /** Params of `getMultiTokenPoolTransferQuote` on both families. */
 export type GetMultiTokenPoolTransferQuoteParams = MultiTokenPoolLaneParams & {
+  /** Amount to transfer, in local token units. */
   amount: bigint
+  /** Requested finality; picks the fee tier. Defaults to waiting for finality. */
   finality?: FinalityRequested
+  /** Fee token for the Router fee; defaults to native. */
   feeToken?: string
 }
 
 /** A transfer quote with the pool's basis-point token fee, which the Router's `getFee` leaves out (F6). */
 export type MultiTokenPoolTransferQuote = {
+  /** Token transfer fee in USD cents the Router charges for this tier. */
   feeUSDCents: bigint
+  /** Destination gas overhead of the lane. */
   destGasOverhead: number
+  /** Destination bytes overhead of the lane. */
   destBytesOverhead: number
+  /** Basis-point fee the pool takes from the amount, for this tier. */
   tokenFeeBps: number
+  /** Token fee the pool takes, in local token units. */
   tokenFeeAmount: bigint
+  /** Amount the receiver gets: `amount - tokenFeeAmount`. */
   netAmount: bigint
+  /** Whether a fee record resolves; without one a send reverts. */
   hasFeeRecord: boolean
 }
 
@@ -271,9 +347,13 @@ export type MultiTokenPoolTransferQuote = {
  *   `stalePendingSteps`; the contracts cannot compare on chain (program-team ask, design §15).
  */
 export type MultiTokenPoolSnapshot = {
+  /** Block (EVM) or slot (Solana) the state was read at. */
   observedAt: bigint
+  /** Decoded values the write keeps, merges or replaces, by dotted path. */
   expected: Record<string, unknown>
+  /** keccak256 of every input the write's guards read for the affected lanes. */
   guardInputsHash: string
+  /** keccak256 of the exact calldata (EVM) or serialized instructions (Solana). */
   calldataHash: string
   /** keccak256 of the canonical JSON of the other fields. */
   hash: string
@@ -287,58 +367,17 @@ export type MultiTokenPoolExpectedSnapshot = {
 
 /** Result of the snapshot checks. */
 export type MultiTokenPoolSnapshotCheck = {
+  /** `true` when nothing moved and no error finding remains. */
   ok: boolean
   /** Paths whose value moved. */
-  changed: { path: string; expected: unknown; actual: unknown }[]
+  changed: CCTStateChange[]
   /** The guard re-run on the exact calldata against current state: error findings make `ok` false. */
   findings: MultiTokenPoolLaneFinding[]
-}
-
-/**
- * A deep copy of `value` with object keys sorted and byte arrays as `0x` hex, so that
- * {@link jsonStringify} of it is canonical: equal values always give equal text.
- */
-function canonicalize(value: unknown): unknown {
-  if (value instanceof Uint8Array) return '0x' + Buffer.from(value).toString('hex')
-  if (Array.isArray(value)) return value.map(canonicalize)
-  if (value !== null && typeof value === 'object')
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([, v]) => v !== undefined)
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([k, v]) => [k, canonicalize(v)]),
-    )
-  return value
-}
-
-/**
- * The canonical JSON of `value`: the SDK's {@link jsonStringify} (bigints as bare integers, other
- * numbers with a `.0` suffix, so {@link jsonParse} reads them back as the same types) over a copy
- * with sorted keys and byte arrays as `0x` hex. Snapshots, `step.inputsHash` and `planHash` hash it.
- * @internal
- */
-export function canonicalJson(value: unknown): string {
-  return jsonStringify(canonicalize(value))
-}
-
-/** keccak256 of {@link canonicalJson}. @internal */
-export function canonicalHash(value: unknown): string {
-  return keccak256Utf8(canonicalJson(value))
 }
 
 /** The hash a snapshot carries: over every field but `hash` itself. */
 function snapshotHash({ hash: _, ...fields }: MultiTokenPoolSnapshot): string {
   return canonicalHash(fields)
-}
-
-/**
- * Seals a snapshot by computing its `hash`. @internal
- * @param fields - Every snapshot field but `hash`.
- */
-export function sealMultiTokenPoolSnapshot(
-  fields: Omit<MultiTokenPoolSnapshot, 'hash'>,
-): MultiTokenPoolSnapshot {
-  return { ...fields, hash: canonicalHash(fields) }
 }
 
 /**
@@ -435,6 +474,7 @@ export type MultiTokenPoolStepSignerKind = (typeof MULTI_TOKEN_POOL_STEP_SIGNER_
 
 /** Who must sign a step, the same shape on both families. */
 export type MultiTokenPoolStepSigner = {
+  /** What kind of actor must sign. */
   kind: MultiTokenPoolStepSignerKind
   /** Contract, PCM, pool group or list the gate is on. */
   on?: string
@@ -448,11 +488,15 @@ export type MultiTokenPoolStepSigner = {
 
 /** One actor entry: the first entry whose given fields all match a step's signer supplies its address. */
 export type MultiTokenPoolActorMatcher = {
+  /** Actor kind the entry matches. */
   kind: MultiTokenPoolStepSignerKind
+  /** Matches only steps gated on this contract, PCM, pool group or list. */
   on?: string
   /** Matches when the step's `anyOf` contains this role. */
   role?: string
+  /** Matches only steps about this token. */
   tokenAddress?: string
+  /** The signer to use for matching steps. */
   address: string
 }
 
@@ -483,6 +527,7 @@ export type MultiTokenPoolPlanStep<Name extends string, Op extends string = stri
   operation: Op
   /** Ids of steps that must land first, possibly on another chain. */
   dependsOn: string[]
+  /** One-line human description. */
   summary: string
   /** The op params as the op takes them (`bigint`s stay `bigint`; the CLI converts to text). */
   inputs: Record<string, unknown>
@@ -495,33 +540,61 @@ export type MultiTokenPoolPlanStep<Name extends string, Op extends string = stri
    * including keys of records that do not exist yet. See {@link MultiTokenPoolPlanOptions}.
    */
   guardReads: string[]
-  changes?: { path: string; from: unknown; to: unknown }[]
-  estimate?: { transactions: number; gas?: bigint; rentLamports?: bigint; computeUnits?: number }
+  /** Values the step changes, as read before it. */
+  changes?: {
+    /** Dotted path of the value. */
+    path: string
+    /** Current value. */
+    from: unknown
+    /** Value after the step. */
+    to: unknown
+  }[]
+  /** Cost estimate. */
+  estimate?: {
+    /** Transactions the step needs. */
+    transactions: number
+    /** Estimated gas (EVM). */
+    gas?: bigint
+    /** Rent the step pays (Solana). */
+    rentLamports?: bigint
+    /** Estimated compute units (Solana). */
+    computeUnits?: number
+  }
   /** Tokens or lanes left for this step name; a repeated step advances when it goes down. */
   progress: number
+  /** Who must sign. */
   signer: MultiTokenPoolStepSigner
+  /** Unix seconds before which the step cannot land (e.g. an admin-transfer delay). */
   notBefore?: bigint
 }
 
 /** Why steps cannot run now. */
 export type MultiTokenPoolPlanBlock = {
+  /** Why the steps cannot run now, and what unblocks them. */
   reason: string
+  /** The actor the steps wait for, when it is not the caller. */
   actor?: MultiTokenPoolStepSigner
+  /** Ids of the blocked steps. */
   steps?: string[]
+  /** The remote chain the block is about, when it is one. */
   remoteChainSelector?: bigint
 }
 
 /** A proposed step whose state moved since it was built. */
 export type MultiTokenPoolStalePendingStep = {
+  /** Id of the proposed step. */
   id: string
   /** What moved; reject the proposal: executing it would overwrite or skip a guard on new state. */
   changed: MultiTokenPoolSnapshotCheck['changed']
+  /** Error findings the guard re-run gives on the current state. */
   findings: MultiTokenPoolLaneFinding[]
 }
 
 /** A plan: remaining steps from chain state. */
 export type MultiTokenPoolPlan<Name extends string, Op extends string = string> = {
+  /** Steps ready to run now (at most `maxReadySteps` on the unsigned path). */
   steps: MultiTokenPoolPlanStep<Name, Op>[]
+  /** Why the remaining steps cannot run now, if they cannot. */
   blockedBy?: MultiTokenPoolPlanBlock
   /** Steps matching `pendingStepHashes` that have not landed and whose snapshot still holds. */
   pendingSteps: string[]
@@ -531,6 +604,7 @@ export type MultiTokenPoolPlan<Name extends string, Op extends string = string> 
   moreReady: number
   /** Hash of the snapshot and every step's `inputsHash`. */
   planHash: string
+  /** Block (EVM) or slot (Solana) the plan was read at. */
   observedAt: bigint
 }
 
@@ -569,9 +643,11 @@ export type MultiTokenPoolPlan<Name extends string, Op extends string = string> 
  * `signal` and on the chain's own abort.
  */
 export type MultiTokenPoolPlanOptions = MultiTokenPoolRemoteCheckOptions & {
+  /** Who holds which role; see `MultiTokenPoolActors`. */
   actors?: MultiTokenPoolActors
   /** Called after each landed step, before the next one is built; throwing aborts the run. */
   onStep?: (step: MultiTokenPoolExecutedStep) => void | Promise<void>
+  /** Aborts the run between steps. */
   signal?: AbortSignal
   /** Parallel reads for lane checks and remote facts; defaults to 4. */
   concurrency?: number
@@ -586,6 +662,7 @@ export type MultiTokenPoolPlanOptions = MultiTokenPoolRemoteCheckOptions & {
 
 /** A landed step, as `onStep` and the execute results report it. */
 export type MultiTokenPoolExecutedStep = MultiTokenPoolPlanStep<string> & {
+  /** Transaction hashes the step landed. */
   hashes: string[]
   /** EVM deploy steps. */
   contractAddress?: string

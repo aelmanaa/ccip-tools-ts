@@ -3223,3 +3223,11 @@ export {
   type TokenOnboardingStepName,
   TOKEN_ONBOARDING_STEPS,
 } from './onboarding/onboard-token.ts'
+// Shared cross-family multi-token pool shapes, as on `cct/evm`.
+export type * from '../multi-token-pool.ts'
+export {
+  MULTI_TOKEN_POOL_LANE_CHECKS,
+  MULTI_TOKEN_POOL_STEP_SIGNER_KINDS,
+  parseMultiTokenPoolSnapshot,
+  serializeMultiTokenPoolSnapshot,
+} from '../multi-token-pool.ts'

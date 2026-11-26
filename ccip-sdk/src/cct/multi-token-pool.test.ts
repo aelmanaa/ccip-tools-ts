@@ -1,14 +1,12 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+import { canonicalHash, canonicalJson, sealMultiTokenPoolSnapshot } from './canonical.ts'
 import { CCTParamsInvalidError } from './errors.ts'
 import {
   MULTI_TOKEN_POOL_LANE_CHECKS,
   MULTI_TOKEN_POOL_STEP_SIGNER_KINDS,
-  canonicalHash,
-  canonicalJson,
   parseMultiTokenPoolSnapshot,
-  sealMultiTokenPoolSnapshot,
   serializeMultiTokenPoolSnapshot,
 } from './multi-token-pool.ts'
 

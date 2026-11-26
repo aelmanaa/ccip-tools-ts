@@ -10,7 +10,9 @@ import type { Abi } from 'abitype'
 import { type InterfaceAbi, Contract, isError } from 'ethers'
 import type { TypedContract } from 'ethers-abitype'
 
+import { CCIPTypeVersionInvalidError } from '../../errors/index.ts'
 import type { EVMChain } from '../../evm/index.ts'
+import { CCTContractTypeInvalidError } from '../errors.ts'
 import { Query } from '../query.ts'
 
 /** Shared base for read-only EVM CCT queries; see {@link Query}. */
@@ -43,4 +45,43 @@ export function getTypedContract<const ABI extends Abi>(
  */
 export function isMissingFunction(err: unknown): boolean {
   return isError(err, 'CALL_EXCEPTION') || isError(err, 'BAD_DATA')
+}
+
+/**
+ * True when an error means "the address is not a CCIP contract": it does not answer the call
+ * ({@link isMissingFunction}) or answers an unparseable `typeAndVersion`. Transport errors are not.
+ * @internal
+ */
+export function isNotCcipContract(err: unknown): boolean {
+  return isMissingFunction(err) || err instanceof CCIPTypeVersionInvalidError
+}
+
+/**
+ * Reads `typeAndVersion` for a contract-type check: an address that is not a CCIP contract becomes
+ * {@link CCTContractTypeInvalidError}, and any other failure (a transport error, a rate limit)
+ * propagates as it is.
+ * @param chain - Chain to read on.
+ * @param address - The address.
+ * @param expected - The accepted type(s), for the error.
+ * @returns The parsed `typeAndVersion` tuple.
+ * @throws {@link CCTContractTypeInvalidError} if the address reports no `typeAndVersion`
+ * @internal
+ */
+export async function readContractType(
+  chain: EVMChain,
+  address: string,
+  expected: string,
+): Promise<Awaited<ReturnType<EVMChain['typeAndVersion']>>> {
+  try {
+    return await chain.typeAndVersion(address)
+  } catch (cause) {
+    if (!isNotCcipContract(cause)) throw cause
+    throw new CCTContractTypeInvalidError(
+      address,
+      expected,
+      'unknown',
+      'the address reports no typeAndVersion — it has no code, or is not a CCIP contract',
+      { cause: cause instanceof Error ? cause : undefined },
+    )
+  }
 }

@@ -18,3 +18,18 @@
 export function isMultiTokenPoolType(type: string): boolean {
   return type.includes('MultiTokenPool')
 }
+
+/**
+ * The PCM `LockOrBurnFlavor` enum, kebab-cased like the SDK's other string enums, in enum order
+ * (index = on-chain value). `BurnMintMultiTokenPool` serves every flavor but `'lock'`. Shared by
+ * the core reads (which find a token's lock box) and the CCT layer.
+ */
+export const LOCK_OR_BURN_FLAVORS = [
+  'burn',
+  'burn-from',
+  'burn-with-from',
+  'burn-to-address',
+  'lock',
+] as const
+/** One lock-or-burn flavor. */
+export type LockOrBurnFlavor = (typeof LOCK_OR_BURN_FLAVORS)[number]
