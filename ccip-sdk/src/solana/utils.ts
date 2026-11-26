@@ -735,6 +735,14 @@ export function simulationProvider(
 }
 
 /**
+ * Whether `err` is a failed simulation (the program or runtime refused the transaction), as opposed
+ * to an RPC or transport failure.
+ */
+export function isSimulationFailure(err: unknown): boolean {
+  return err instanceof SimulationFailedError
+}
+
+/**
  * Returns the `InstructionError` of a failed simulation: the failed instruction's index relative
  * to the caller's instructions (negative if it's a prepended compute-budget ix), and its error.
  */
