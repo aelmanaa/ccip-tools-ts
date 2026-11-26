@@ -4,7 +4,6 @@ import {
   type MessageV1Args,
   type PublicKey,
   type TransactionInstruction,
-  ComputeBudgetProgram,
   MessageV1,
   PACKET_DATA_SIZE,
   SIGNATURE_LENGTH_IN_BYTES,
@@ -15,15 +14,21 @@ import {
 import bs58 from 'bs58'
 
 import { CCIPArgumentInvalidError, CCIPTransactionTooLargeError } from '../errors/index.ts'
+import {
+  REQUEST_HEAP_FRAME_TAG,
+  SET_COMPUTE_UNIT_LIMIT_TAG,
+  SET_COMPUTE_UNIT_PRICE_TAG,
+  isComputeBudgetInstruction,
+  readComputeUnitPrice,
+  readHeapFrameBytes,
+  totalPriorityFeeLamports,
+} from './compute-budget.ts'
 
 // v1 transaction-config wire mask bits (web3.js keeps these internal)
 const CONFIG_MASK_PRIORITY_FEE_BITS = 0b00011
 const CONFIG_MASK_COMPUTE_UNIT_LIMIT_BIT = 0b00100
 const CONFIG_MASK_LOADED_ACCOUNTS_DATA_SIZE_LIMIT_BIT = 0b01000
 const CONFIG_MASK_HEAP_SIZE_BIT = 0b10000
-
-// ComputeBudget instruction tag of `RequestHeapFrame { bytes: u32 }`
-const REQUEST_HEAP_FRAME_TAG = 1
 
 // SIMD-0385 transaction constraints; exceeding them fails sanitization
 const V1_MAX_ACCOUNTS = 64
@@ -169,6 +174,19 @@ export function serializeV1Transaction(
 }
 
 /**
+ * Whether `ix` is a ComputeBudget instruction that {@link compileV1Message} moves into the v1
+ * transactionConfig (heap frame, compute-unit limit, compute-unit price) instead of keeping it in
+ * the message.
+ */
+export function isV1ConfigInstruction(ix: TransactionInstruction): boolean {
+  return (
+    isComputeBudgetInstruction(ix, REQUEST_HEAP_FRAME_TAG) ||
+    isComputeBudgetInstruction(ix, SET_COMPUTE_UNIT_LIMIT_TAG) ||
+    isComputeBudgetInstruction(ix, SET_COMPUTE_UNIT_PRICE_TAG)
+  )
+}
+
+/**
  * Compiles instructions into a v1 transaction message. v1 has no address lookup
  * tables, so every account is static; compilation reuses web3.js' v0 compiler
  * (same dedupe/ordering/header semantics, same u8 account indexes) and only the
@@ -176,7 +194,16 @@ export function serializeV1Transaction(
  * into the message's transactionConfig instead of ComputeBudget instructions; both are
  * required, as v1 budgets 0 for an unset limit instead of a default (SIMD-0385). A
  * `requestHeapFrame` instruction among `instructions` moves into the transactionConfig too.
+ *
+ * Embedded `setComputeUnitLimit` and `setComputeUnitPrice` instructions are found by tag and moved
+ * into the transactionConfig as well: the limit is replaced by `computeUnitLimit` (the caller
+ * resolves which limit applies), and the price, per compute unit, becomes the v1 total
+ * `priorityFee` in lamports for `computeUnitLimit` units, rounded up. Without an embedded price the
+ * `priorityFee` stays unset. Because these instructions leave the message, an instruction index
+ * the runtime reports counts only the kept ones; map it back with {@link isV1ConfigInstruction}.
  * @throws if the compiled accounts exceed the 64 static keys the v1 format allows
+ * @throws {@link CCIPArgumentInvalidError} if the embedded price makes the total priority fee
+ * exceed `Number.MAX_SAFE_INTEGER` lamports
  */
 export function compileV1Message({
   payerKey,
@@ -191,13 +218,19 @@ export function compileV1Message({
   computeUnitLimit: number
   loadedAccountsDataSizeLimit: number
 }): SerializableMessageV1 {
-  let heapSize: number | null = null
-  instructions = instructions.filter(({ programId, data }) => {
-    if (!programId.equals(ComputeBudgetProgram.programId) || data[0] !== REQUEST_HEAP_FRAME_TAG)
-      return true
-    heapSize = data.readUInt32LE(1)
-    return false
-  })
+  const heapSize = readHeapFrameBytes(instructions) ?? null
+  const price = readComputeUnitPrice(instructions)
+  let priorityFee: number | null = null
+  if (price !== undefined) {
+    const total = totalPriorityFeeLamports(price, computeUnitLimit)
+    if (total > BigInt(Number.MAX_SAFE_INTEGER))
+      throw new CCIPArgumentInvalidError(
+        'priorityFee',
+        `a compute-unit price of ${price} micro-lamports for ${computeUnitLimit} units exceeds the largest representable total priority fee`,
+      )
+    priorityFee = Number(total)
+  }
+  instructions = instructions.filter((ix) => !isV1ConfigInstruction(ix))
   let messageV0
   try {
     messageV0 = new TransactionMessage({
@@ -228,7 +261,7 @@ export function compileV1Message({
       computeUnitLimit,
       heapSize,
       loadedAccountsDataSizeLimit,
-      priorityFee: null,
+      priorityFee,
     },
   }
   return new SerializableMessageV1(args)

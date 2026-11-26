@@ -23,6 +23,7 @@ import {
   CCIPPartialTransactionSubmissionError,
   CCIPTransactionTooLargeError,
 } from '../errors/index.ts'
+import { keypairWallet } from './send.test.helpers.ts'
 import { type Wallet, canSignV1Transactions } from './types.ts'
 import { simulateAndSendTxs, simulateTransaction } from './utils.ts'
 import {
@@ -373,13 +374,7 @@ describe('Solana v1 transaction support (SIMD-0385)', () => {
     }
 
     // only VersionedTransactions are ever passed by the send/simulate paths
-    const wallet = {
-      publicKey: PAYER.publicKey,
-      signTransaction: async (tx: VersionedTransaction) => {
-        tx.sign([PAYER])
-        return tx
-      },
-    } as unknown as Wallet
+    const wallet = keypairWallet(PAYER)
 
     it('simulateTransaction falls back to a raw v1 RPC simulation when v0 is oversized', async () => {
       const { connection, captured } = mockConnection()

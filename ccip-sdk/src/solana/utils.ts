@@ -36,12 +36,18 @@ import {
 } from '../errors/index.ts'
 import type { WithLogger } from '../types.ts'
 import { getDataBytes, jsonStringify, sleep } from '../utils.ts'
+import {
+  readComputeUnitLimit,
+  replaceComputeUnitPrice,
+  withComputeUnitLimit,
+} from './compute-budget.ts'
 import type { TokenPoolChainConfig } from './token-pool.ts'
 import { type UnsignedSolanaTx, type Wallet, canSignV1Transactions } from './types.ts'
 import {
   MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES,
   PACKET_DATA_SIZE,
   compileV1Message,
+  isV1ConfigInstruction,
   serializeV1Transaction,
 } from './v1.ts'
 import type { SolanaLog } from './index.ts'
@@ -498,13 +504,17 @@ export function getErrorFromLogs(
  */
 class SimulationFailedError extends SendTransactionError {
   readonly simulationError: NonNullable<SimulatedTransactionResponse['err']>
-  /** index of the caller's first instruction in the simulated tx (1 after a prepended compute-budget ix) */
-  readonly instructionOffset: number
+  /**
+   * Maps an instruction index of the simulated tx to the caller's own index: minus 1 after a
+   * prepended compute-budget ix (v0), or through the instructions a v1 message kept after its
+   * compute-budget ixs moved into the transactionConfig. Negative for an ix the caller did not pass.
+   */
+  readonly toCallerIndex: (simulatedIndex: number) => number
 
   /** Creates a simulation failed error. */
   constructor(
     simulationError: NonNullable<SimulatedTransactionResponse['err']>,
-    instructionOffset: number,
+    toCallerIndex: (simulatedIndex: number) => number,
     logs: string[] | null,
   ) {
     super({
@@ -514,7 +524,7 @@ class SimulationFailedError extends SendTransactionError {
       logs: logs ?? undefined,
     })
     this.simulationError = simulationError
-    this.instructionOffset = instructionOffset
+    this.toCallerIndex = toCallerIndex
   }
 }
 
@@ -547,9 +557,6 @@ export async function simulateTransaction(
   const maxComputeUnits = 1_400_000
   const recentBlockhash = '11111111111111111111111111111112'
   const computeUnitLimit = computeUnitsOverride || maxComputeUnits
-  const computeBudgetIx = ComputeBudgetProgram.setComputeUnitLimit({
-    units: computeUnitLimit,
-  })
 
   const config: SimulateTransactionConfig = {
     commitment: 'confirmed',
@@ -557,19 +564,34 @@ export async function simulateTransaction(
     sigVerify: false,
   }
 
-  // instructionOffset: 1 when computeBudgetIx was prepended (v0), 0 otherwise
-  const finish = (result: SimulatedTransactionResponse, instructionOffset: number) => {
+  // instructionOffset: 1 when a compute-unit limit was prepended (v0), 0 when an embedded one was
+  // raised in place; a v1 message drops its compute-budget ixs, so its indices map through `kept`
+  const byOffset = (instructionOffset: number) => (i: number) => i - instructionOffset
+  const byKept = (instructions: readonly TransactionInstruction[]) => {
+    const kept = instructions.flatMap((ix, i) => (isV1ConfigInstruction(ix) ? [] : [i]))
+    return (i: number) => kept[i] ?? -1
+  }
+  const finish = (
+    result: SimulatedTransactionResponse,
+    toCallerIndex: (simulatedIndex: number) => number,
+  ) => {
     logger.debug('Simulation results:', {
       logs: result.logs,
       unitsConsumed: result.unitsConsumed,
       returnData: result.returnData,
       err: result.err,
     })
-    if (result.err) throw new SimulationFailedError(result.err, instructionOffset, result.logs)
+    if (result.err) throw new SimulationFailedError(result.err, toCallerIndex, result.logs)
     return result
   }
 
-  if (!('tx' in rest)) {
+  // instructions (or a legacy Transaction's, rebuilt) are simulated as v0, falling back to v1
+  const simulateInstructions = async (
+    instructions: TransactionInstruction[],
+    addressLookupTableAccounts: AddressLookupTableAccount[] | undefined,
+    refuseV1: boolean,
+  ) => {
+    const sim = forSimulation(instructions, computeUnitLimit)
     // build the v0 transaction; undefined when v0 can't represent it (e.g. too many
     // accounts to compile) or its wire exceeds the 1232-byte packet
     let tx: VersionedTransaction | undefined
@@ -577,18 +599,21 @@ export async function simulateTransaction(
       const message = new TransactionMessage({
         payerKey,
         recentBlockhash,
-        instructions: [computeBudgetIx, ...rest.instructions],
+        instructions: sim.instructions,
       })
-      tx = new VersionedTransaction(message.compileToV0Message(rest.addressLookupTableAccounts))
+      tx = new VersionedTransaction(message.compileToV0Message(addressLookupTableAccounts))
       if (tx.serialize().length > PACKET_DATA_SIZE) tx = undefined
     } catch {
       tx = undefined
     }
 
     if (tx) {
-      return finish((await connection.simulateTransaction(tx, config)).value, 1)
+      return finish(
+        (await connection.simulateTransaction(tx, config)).value,
+        byOffset(sim.instructionOffset),
+      )
     }
-    if (!allowV1) {
+    if (refuseV1) {
       throw new CCIPTransactionTooLargeError(
         `Transaction too large for v0 (${PACKET_DATA_SIZE} bytes), and the signer can't sign v1`,
       )
@@ -599,7 +624,7 @@ export async function simulateTransaction(
     const message = compileV1Message({
       payerKey,
       recentBlockhash,
-      instructions: rest.instructions,
+      instructions: [...replaceComputeUnitPrice(instructions, 0)],
       computeUnitLimit,
       loadedAccountsDataSizeLimit: MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES,
     })
@@ -607,44 +632,36 @@ export async function simulateTransaction(
       message,
       new Array(message.header.numRequiredSignatures).fill(null),
     )
-    return finish(await simulateRawV1(connection, wire), 0)
+    return finish(await simulateRawV1(connection, wire), byKept(instructions))
   }
 
-  if (!('version' in rest.tx)) {
-    // legacy Transaction: rebuild as v0, with the same v1 fallback shape as above
-    let tx: VersionedTransaction | undefined
-    try {
-      const message = new TransactionMessage({
-        payerKey,
-        recentBlockhash,
-        instructions: [computeBudgetIx, ...rest.tx.instructions],
-      })
-      tx = new VersionedTransaction(message.compileToV0Message())
-      if (tx.serialize().length > PACKET_DATA_SIZE) tx = undefined
-    } catch {
-      tx = undefined
-    }
-
-    if (tx) {
-      return finish((await connection.simulateTransaction(tx, config)).value, 1)
-    }
-
-    const message = compileV1Message({
-      payerKey,
-      recentBlockhash,
-      instructions: rest.tx.instructions,
-      computeUnitLimit,
-      loadedAccountsDataSizeLimit: MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES,
-    })
-    const wire = serializeV1Transaction(
-      message,
-      new Array(message.header.numRequiredSignatures).fill(null),
-    )
-    return finish(await simulateRawV1(connection, wire), 0)
-  }
+  if (!('tx' in rest))
+    return simulateInstructions(rest.instructions, rest.addressLookupTableAccounts, !allowV1)
+  // legacy Transaction: rebuilt as v0 without lookup tables, with the same v1 fallback (which, as
+  // before, does not consult `allowV1`)
+  if (!('version' in rest.tx)) return simulateInstructions(rest.tx.instructions, undefined, false)
 
   // already-versioned transaction: simulate as-is
-  return finish((await connection.simulateTransaction(rest.tx, config)).value, 0)
+  return finish((await connection.simulateTransaction(rest.tx, config)).value, byOffset(0))
+}
+
+/**
+ * The instructions to simulate and the index of the caller's first one among them.
+ *
+ * Without an embedded compute-unit limit (every core caller), a limit is prepended, exactly as
+ * before. With one (found by tag, so a heap-frame request is never mistaken for it), it is raised in
+ * place to `limit` and nothing is prepended, since a second limit fails with `DuplicateInstruction`.
+ * An embedded price is set to 0, so the raised simulation limit is never priced against the payer.
+ */
+function forSimulation(
+  instructions: readonly TransactionInstruction[],
+  limit: number,
+): { instructions: TransactionInstruction[]; instructionOffset: number } {
+  const { instructions: limited, prepended } = withComputeUnitLimit(
+    replaceComputeUnitPrice(instructions, 0),
+    limit,
+  )
+  return { instructions: limited, instructionOffset: prepended ? 1 : 0 }
 }
 
 /**
@@ -723,11 +740,11 @@ export function simulationProvider(
  */
 export function getInstructionError(err: unknown): { index: number; error: unknown } | undefined {
   if (!(err instanceof SimulationFailedError)) return
-  const { simulationError, instructionOffset } = err
+  const { simulationError, toCallerIndex } = err
   if (typeof simulationError !== 'object' || !('InstructionError' in simulationError)) return
   const detail = simulationError.InstructionError
   if (!Array.isArray(detail) || typeof detail[0] !== 'number') return
-  return { index: detail[0] - instructionOffset, error: detail[1] as unknown }
+  return { index: toCallerIndex(detail[0]), error: detail[1] as unknown }
 }
 
 /** Returns the program-defined (`Custom`) error code of a failed simulation, if any. */
@@ -878,9 +895,21 @@ export async function simulateAndSendTxs(
         }
       }
 
+      // precedence: the caller's `computeUnits` (main slice only), then a limit the instructions
+      // embed (kept, never doubled), then the simulation when it exceeds the 200k default.
+      // An embedded limit is the builder's, sized for its whole transaction: builders that embed
+      // one use `split: 'atomic'`, so it never lands on only part of the instructions. Durable-nonce
+      // transactions never come here (signed ops refuse nonces), so prepending a limit cannot push
+      // `AdvanceNonceAccount` off index 0.
+      const embeddedLimit = readComputeUnitLimit(ixs)
       let computeUnitLimit
       if (includesMain && computeUnits != null) computeUnitLimit = computeUnits
+      else if (embeddedLimit != null) computeUnitLimit = embeddedLimit
       else if (simulated > 200000) computeUnitLimit = Math.ceil(simulated * 1.1)
+      if (embeddedLimit != null && computeUnitLimit === embeddedLimit && simulated > embeddedLimit)
+        ctx.logger?.warn(
+          `the embedded compute-unit limit (${embeddedLimit}) is below the simulated consumption (${simulated}); the transaction may fail with ComputationalBudgetExceeded`,
+        )
 
       const blockhash = await connection.getLatestBlockhash('confirmed')
 
@@ -894,16 +923,9 @@ export async function simulateAndSendTxs(
         const txMsg = new TransactionMessage({
           payerKey: wallet.publicKey,
           recentBlockhash: blockhash.blockhash,
-          instructions: [
-            ...(computeUnitLimit
-              ? [
-                  ComputeBudgetProgram.setComputeUnitLimit({
-                    units: computeUnitLimit,
-                  }),
-                ]
-              : []),
-            ...ixs,
-          ],
+          instructions: computeUnitLimit
+            ? withComputeUnitLimit(ixs, computeUnitLimit).instructions
+            : ixs,
         })
         txV0 = new VersionedTransaction(txMsg.compileToV0Message(addressLookupTableAccounts))
         if (txV0.serialize().length > PACKET_DATA_SIZE) txV0 = undefined
