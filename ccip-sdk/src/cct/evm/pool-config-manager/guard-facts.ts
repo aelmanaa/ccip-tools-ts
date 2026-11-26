@@ -342,7 +342,11 @@ async function readRemoteLane(
     readsLongData,
     registryPool,
     mapsBack: legacy ? pointsBack : true,
-    ...(input.readRemoteRateLimits && back && { remoteOutbound: back.outboundRateLimiterState }),
+    ...(input.readRemoteRateLimits &&
+      back && {
+        remoteOutbound: back.outboundRateLimiterState,
+        remoteDecimals: (await remote.getTokenInfo(remoteToken)).decimals,
+      }),
   }
 }
 

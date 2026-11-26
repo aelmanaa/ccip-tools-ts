@@ -72,6 +72,8 @@ export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   remoteTokenHasCode?: boolean
   /** The remote pool's outbound bucket toward this chain (read for the lane check), `null` when disabled. */
   remoteOutbound?: RateLimiterState
+  /** Decimals of the remote token (read with `remoteOutbound`), to compare the limits in one unit. */
+  remoteDecimals?: number
   /** The attestation the long-data fact came from, for a family the SDK cannot read. */
   attestation?: MultiTokenPoolRemoteAttestation
 }>

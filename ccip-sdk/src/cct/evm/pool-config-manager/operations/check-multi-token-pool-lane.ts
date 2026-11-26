@@ -162,15 +162,25 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
         evaluated.factFailures.find((f) => f.scope === 'remote')?.status ??
         read?.status ??
         'unknown'
-      // a remote burst the local inbound cannot absorb waits here until the bucket refills
+      // a remote burst the local inbound cannot absorb waits here until the bucket refills; the
+      // remote limit is in remote token units, so compare in local units
       const local = lane.rateLimits.inbound
       const theirs = read?.status === 'known' ? read.remoteOutbound : undefined
-      if (local && theirs && (local.capacity < theirs.capacity || local.rate < theirs.rate))
-        add(
-          'INBOUND_BELOW_REMOTE_OUTBOUND',
-          'warning',
-          `the inbound limit (capacity ${local.capacity}, rate ${local.rate}) is below the remote outbound one (capacity ${theirs.capacity}, rate ${theirs.rate}): a burst the remote side lets out waits here for the bucket to refill`,
-        )
+      const remoteDecimals = read?.status === 'known' ? read.remoteDecimals : undefined
+      if (local && theirs && remoteDecimals !== undefined) {
+        const localDecimals = decodeTokenProfileFields(token).localDecimals
+        const toLocal = (amount: bigint) =>
+          localDecimals >= remoteDecimals
+            ? amount * BigInt(10) ** BigInt(localDecimals - remoteDecimals)
+            : amount / BigInt(10) ** BigInt(remoteDecimals - localDecimals)
+        const [capacity, rate] = [toLocal(theirs.capacity), toLocal(theirs.rate)]
+        if (local.capacity < capacity || local.rate < rate)
+          add(
+            'INBOUND_BELOW_REMOTE_OUTBOUND',
+            'warning',
+            `the inbound limit (capacity ${local.capacity}, rate ${local.rate}) is below the remote outbound one (capacity ${capacity}, rate ${rate} in local units): a burst the remote side lets out waits here for the bucket to refill; raise the inbound limit`,
+          )
+      }
     }
 
     // pauses and stops, by the directions that must be open
