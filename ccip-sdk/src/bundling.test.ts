@@ -153,4 +153,36 @@ describe('bundling', () => {
     )
     assert.deepEqual([...anchorBuilds], ['browser'])
   })
+
+  it('keeps the Solana remote-lane reader out of a cct/evm bundle until a Solana lane loads it', async () => {
+    // the EVM MTTP guards load cct/solana/pool-group/remote-lane.ts with a dynamic import, only for
+    // a Solana remote: with code splitting, the entry chunk carries no Solana code
+    const { metafile } = await build({
+      stdin: {
+        contents:
+          "import { EVMTokenManager } from './cct/evm/index.ts'\nconsole.log(typeof EVMTokenManager)",
+        resolveDir: import.meta.dirname,
+        sourcefile: 'app.ts',
+        loader: 'ts',
+      },
+      bundle: true,
+      write: false,
+      metafile: true,
+      logLevel: 'silent',
+      platform: 'node',
+      format: 'esm',
+      splitting: true,
+      outdir: 'out',
+      packages: 'external',
+    })
+    const entry = Object.values(metafile.outputs).find((o) => o.entryPoint)!
+    const inEntry = Object.entries(entry.inputs)
+      .filter(([, input]) => input.bytesInOutput > 0)
+      .map(([path]) => path)
+    assert.ok(inEntry.some((p) => p.includes('cct/evm/')))
+    assert.deepEqual(
+      inEntry.filter((p) => /cct\/solana\/|\/solana\/index\.ts$/.test(p)),
+      [],
+    )
+  })
 })
