@@ -55,6 +55,14 @@ export const LANE_RECORD_TYPES = [
   'destOverhead',
   'security',
 ] as const satisfies readonly LaneRecordType[]
+// every LaneRecordType is listed: a new one fails to compile here instead of reading as missing
+const _ALL_LANE_RECORD_TYPES: Exclude<
+  LaneRecordType,
+  (typeof LANE_RECORD_TYPES)[number]
+> extends never
+  ? true
+  : never = true
+void _ALL_LANE_RECORD_TYPES
 /** Record types that an inbound transfer does not need. */
 const OUTBOUND_ONLY_RECORD_TYPES: ReadonlySet<LaneRecordType> = new Set(['fee', 'destOverhead'])
 

@@ -243,4 +243,24 @@ describe('lane batch views (cct/evm pool-config-manager)', () => {
       CCTDataDecodeError,
     )
   })
+
+  it('refuses a view whose columns are shorter than the lanes, instead of an ethers error', async () => {
+    const state = defaultStack()
+    state.views.getLaneVerificationBatch = () => [[], [[]], [[]]]
+    await assert.rejects(
+      new GetMultiTokenPoolLaneVerifications().query(stackChain(state).chain, {
+        poolAddress: POOL,
+        lanes: [lane],
+      }),
+      CCTDataDecodeError,
+    )
+    state.views.getFeeBatch = () => [[]]
+    await assert.rejects(
+      new GetMultiTokenPoolLaneFees().query(stackChain(state).chain, {
+        poolAddress: POOL,
+        lanes: [lane],
+      }),
+      CCTDataDecodeError,
+    )
+  })
 })

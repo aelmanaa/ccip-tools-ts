@@ -113,6 +113,9 @@ export async function resolvePoolConfigManagerTarget(
   return { address, version }
 }
 
+/** Pages a paged read follows before it gives up (2,000,000 items at the default size). */
+const MAX_PAGES = 10_000
+
 /** Default page size of the paged PCM views (`getAllConfiguredTokens`, `getSubsetTokens`). */
 export const PAGE_SIZE = 200
 
@@ -127,13 +130,25 @@ export async function readPagesAtBlock<T>(
   fetch: (start: bigint, count: bigint, blockTag: number) => Promise<T[]>,
   { blockTag, pageSize = PAGE_SIZE }: { blockTag?: number; pageSize?: number } = {},
 ): Promise<{ items: T[]; blockNumber: number }> {
+  if (!Number.isInteger(pageSize) || pageSize < 1)
+    throw new CCTParamsInvalidError(
+      'readPagesAtBlock',
+      'pageSize',
+      'must be an integer of at least 1',
+    )
   const blockNumber = blockTag ?? (await chain.provider.getBlockNumber())
   const items: T[] = []
-  for (;;) {
+  for (let pages = 0; pages < MAX_PAGES; pages++) {
     const page = await fetch(BigInt(items.length), BigInt(pageSize), blockNumber)
     items.push(...page)
     if (page.length < pageSize) return { items, blockNumber }
   }
+  // a contract that ignores the offset returns full pages forever
+  throw new CCTDataDecodeError(String(blockNumber), {
+    context: {
+      reason: `a paged view returned ${MAX_PAGES} full pages of ${pageSize}; it ignores the offset`,
+    },
+  })
 }
 
 /**
@@ -247,7 +262,12 @@ export async function scanLogs(
       'fromBlock',
       `the RPC cannot serve historical code to find the ${contract} deployment block: pass fromBlock (the block of its creation transaction, from an explorer, or 0), or use an archive RPC. The scan is complete only when it starts at or before deployment`,
     )
-  const topics = events.map((e) => iface.getEvent(e)!.topicHash)
+  const topics = events.map((e) => {
+    const event = iface.getEvent(e)
+    if (!event)
+      throw new CCTParamsInvalidError(operation, 'events', `${contract} declares no event ${e}`)
+    return event.topicHash
+  })
   const logs: LogDescription[] = []
   for await (const log of chain.getLogs({
     address,
@@ -281,7 +301,7 @@ const PRINTABLE = /^[\x20-\x7e]+$/
 
 /**
  * Encodes a {@link PolicyName} to its `bytes32`.
- * @throws {@link CCTParamsInvalidError} if the name is empty, longer than 32 bytes, not printable
+ * @throws {@link CCTParamsInvalidError} if the name is empty, longer than 31 bytes, not printable
  * ASCII, or the zero `bytes32` (which means "no policy")
  * @internal
  */
@@ -339,7 +359,11 @@ export const LANE_BATCH_SIZE = 100
  * @throws {@link CCTParamsInvalidError} naming the first invalid entry
  * @internal
  */
-export function validateLaneKeys(operation: string, param: string, lanes: unknown): void {
+export function validateLaneKeys(
+  operation: string,
+  param: string,
+  lanes: unknown,
+): asserts lanes is MultiTokenPoolLaneKey[] {
   validateArray(operation, param, lanes, 1)
   Array.from(lanes, (lane, i) => {
     const { tokenAddress, remoteChainSelector } = (lane ?? {}) as Record<string, unknown>
@@ -351,6 +375,23 @@ export function validateLaneKeys(operation: string, param: string, lanes: unknow
 /** A lane key in the PCM's `LaneKey` ABI shape. */
 export function toAbiLaneKey({ tokenAddress, remoteChainSelector }: MultiTokenPoolLaneKey) {
   return { localToken: tokenAddress, remoteChainSelector }
+}
+
+/**
+ * Asserts a view returned one result per lane.
+ * @throws {@link CCTDataDecodeError} if it did not (a contract this SDK does not know)
+ * @internal
+ */
+export function assertResultCount(
+  address: string,
+  view: string,
+  results: { length: number },
+  lanes: number,
+): void {
+  if (results.length !== lanes)
+    throw new CCTDataDecodeError(address, {
+      context: { reason: `${view} returned ${results.length} results for ${lanes} lanes` },
+    })
 }
 
 /**
@@ -387,14 +428,17 @@ export async function readPoolConfigManagerStaticConfig(
   version: MultiTokenPoolVersion,
 ): Promise<PoolConfigManagerStaticConfig> {
   // positional: abitype types the four outputs as a tuple; the runtime Result also has names
-  const [tokenAdminRegistry, connectionPolicyStore, feePolicyStore, securityPolicyStore] = (
-    await poolConfigManagerContract(chain, address, version).getStaticConfig()
-  ).map((a) => getAddress(resultToObject(a)))
+  const [tar, cps, fps, sps] = await poolConfigManagerContract(
+    chain,
+    address,
+    version,
+  ).getStaticConfig()
+  const toAddress = (a: typeof tar) => getAddress(resultToObject(a))
   return {
-    tokenAdminRegistry: tokenAdminRegistry!,
-    connectionPolicyStore: connectionPolicyStore!,
-    feePolicyStore: feePolicyStore!,
-    securityPolicyStore: securityPolicyStore!,
+    tokenAdminRegistry: toAddress(tar),
+    connectionPolicyStore: toAddress(cps),
+    feePolicyStore: toAddress(fps),
+    securityPolicyStore: toAddress(sps),
   }
 }
 

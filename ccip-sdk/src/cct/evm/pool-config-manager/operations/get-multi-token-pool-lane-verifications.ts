@@ -12,6 +12,7 @@ import { nullableAddress } from '../../multi-token-pool/contracts.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PoolConfigManagerReader,
+  assertResultCount,
   toAbiLaneKey,
 } from '../contracts.ts'
 import { type GetMultiTokenPoolLaneBatchParams, LaneBatchQuery } from './lane-batch.ts'
@@ -49,12 +50,16 @@ export class GetMultiTokenPoolLaneVerifications extends LaneBatchQuery<
   protected async readChunk(
     pcm: PoolConfigManagerReader,
     lanes: MultiTokenPoolLaneKey[],
+    _params: GetMultiTokenPoolLaneBatchParams,
+    { address }: { address: string },
   ): Promise<MultiTokenPoolLaneVerification[]> {
     // positional: `resultToObject` on the whole multi-output Result would return a named object
     const [hooks, outbound, inbound] = await pcm.getLaneVerificationBatch(
       lanes.map(toAbiLaneKey),
       IGNORED_FINALITY,
     )
+    for (const column of [hooks, outbound, inbound])
+      assertResultCount(address, 'getLaneVerificationBatch', column, lanes.length)
     const addresses = (list: readonly string[]) => list.map((a) => getAddress(a))
     return lanes.map((_, i) => ({
       hook: nullableAddress(resultToObject(hooks[i]!)),

@@ -5,7 +5,6 @@
  * @packageDocumentation
  */
 
-import type { LaneRecordType } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
 import { poolConfigManagerContract } from '../../multi-token-pool/contracts.ts'
@@ -54,13 +53,12 @@ export type PolicyReadContext = { chain: EVMChain; blockTag: number }
  * whose policy list decides `exists`; the base reads both at one block.
  * @internal
  */
-export abstract class PolicyQuery<P extends GetMultiTokenPoolPolicyParams, B> extends EVMQuery<
-  P,
-  B & MultiTokenPoolPolicyIdentity,
-  ParsedPolicyParams<P>
-> {
+export abstract class PolicyQuery<
+  P extends GetMultiTokenPoolPolicyParams,
+  B extends object,
+> extends EVMQuery<P, B & MultiTokenPoolPolicyIdentity, ParsedPolicyParams<P>> {
   /** The record type the policy belongs to. */
-  protected abstract readonly recordType: LaneRecordType
+  protected abstract readonly recordType: (typeof LANE_RECORD_TYPES)[number]
 
   /** Reads the policy's views at `blockTag`; `policyWord` is the encoded `bytes32`. */
   protected abstract readPolicy(

@@ -19,6 +19,7 @@ import { validateFinalityRequested } from '../../validate.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PoolConfigManagerReader,
+  assertResultCount,
   toAbiLaneKey,
 } from '../contracts.ts'
 import { type GetMultiTokenPoolLaneBatchParams, LaneBatchQuery } from './lane-batch.ts'
@@ -73,7 +74,7 @@ export class GetMultiTokenPoolLaneFees extends LaneBatchQuery<
     pcm: PoolConfigManagerReader,
     lanes: MultiTokenPoolLaneKey[],
     { finality = 'finalized' }: GetMultiTokenPoolLaneFeesParams,
-    { version }: { version: MultiTokenPoolVersion },
+    { address, version }: { address: string; version: MultiTokenPoolVersion },
   ): Promise<MultiTokenPoolLaneFee[]> {
     const requested = toBeHex(encodeFinality(finality), 4)
     const toFee = (raw: LaneFeeResult): MultiTokenPoolLaneFee => ({
@@ -84,7 +85,9 @@ export class GetMultiTokenPoolLaneFees extends LaneBatchQuery<
     const store = getMultiTokenPoolInterface('ConnectionPolicyStore', version)
     const disallowsFinality = (err: unknown) => isRevertWith(err, store, 'InvalidRequestedFinality')
     try {
-      return (await pcm.getFeeBatch(lanes.map(toAbiLaneKey), requested)).map(toFee)
+      const fees = await pcm.getFeeBatch(lanes.map(toAbiLaneKey), requested)
+      assertResultCount(address, 'getFeeBatch', fees, lanes.length)
+      return fees.map(toFee)
     } catch (err) {
       if (!disallowsFinality(err)) throw err
     }
@@ -92,8 +95,9 @@ export class GetMultiTokenPoolLaneFees extends LaneBatchQuery<
     return Promise.all(
       lanes.map(async (lane) => {
         try {
-          const [fee] = await pcm.getFeeBatch([toAbiLaneKey(lane)], requested)
-          return toFee(fee!)
+          const fees = await pcm.getFeeBatch([toAbiLaneKey(lane)], requested)
+          assertResultCount(address, 'getFeeBatch', fees, 1)
+          return toFee(fees[0]!)
         } catch (err) {
           if (!disallowsFinality(err)) throw err
           return { finalityNotAllowed: true } as const

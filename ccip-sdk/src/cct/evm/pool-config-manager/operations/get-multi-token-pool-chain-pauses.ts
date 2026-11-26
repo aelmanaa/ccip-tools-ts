@@ -17,6 +17,7 @@ import { EVMQuery } from '../../query.ts'
 import {
   type LogScanParams,
   type PoolConfigManagerTarget,
+  assertResultCount,
   readLaneBatches,
   readPoolConfigManagerStaticConfig,
   resolvePoolConfigManagerTarget,
@@ -108,11 +109,13 @@ export class GetMultiTokenPoolChainPauses extends EVMQuery<
       remoteChainSelector,
     }))
     const pcm = poolConfigManagerContract(chain, address, version)
-    const connections = await readLaneBatches(lanes, async (chunk) =>
-      (
+    const connections = await readLaneBatches(lanes, async (chunk) => {
+      const read = (
         await pcm.getLaneConnectionBatch(chunk.map(toAbiLaneKey), { blockTag: scanned.toBlock })
-      ).map((c) => resultToObject(c)),
-    )
+      ).map((c) => resultToObject(c))
+      assertResultCount(address, 'getLaneConnectionBatch', read, chunk.length)
+      return read
+    })
     return {
       global: connections.some((c) => c.isGloballyPaused),
       chains: selectors.length

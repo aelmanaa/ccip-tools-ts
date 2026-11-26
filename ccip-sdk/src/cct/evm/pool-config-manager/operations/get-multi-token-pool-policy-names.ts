@@ -47,7 +47,7 @@ export class GetMultiTokenPoolPolicyNames extends EVMQuery<
     return Object.fromEntries(
       LANE_RECORD_TYPES.map((type, i) => [
         type,
-        lists[i]!.map((w) => decodePolicyName(w)).filter((n): n is string => n !== null),
+        (lists[i] ?? []).map((w) => decodePolicyName(w)).filter((n): n is string => n !== null),
       ]),
     ) as GetMultiTokenPoolPolicyNamesResult
   }
