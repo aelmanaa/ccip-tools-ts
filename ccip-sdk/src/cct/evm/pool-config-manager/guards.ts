@@ -399,7 +399,7 @@ export function evaluateMultiTokenPoolGuards({
       add(
         'REMOTE_TOKEN_SHARED',
         'error',
-        `remote token ${c.remoteToken} is also the remote token of ${shared.map((o) => o.tokenAddress).join(', ')} on this chain`,
+        `remote token ${c.remoteToken} is also the remote token of ${shared.map((o) => o.tokenAddress).join(', ')} on this chain, so the destination cannot tell them apart: give each local token its own remote token`,
         'connection',
       )
 

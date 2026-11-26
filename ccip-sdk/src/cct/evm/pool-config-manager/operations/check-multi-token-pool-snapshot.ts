@@ -96,7 +96,7 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
     const { address, version } = await resolvePoolConfigManagerTarget(chain, {
       poolConfigManager: tx.to as string,
     })
-    const options = (snapshot.expected[GUARD_OPTIONS_PATH] ?? {}) as MultiTokenPoolGuardOptions
+    const options = guardOptionsFrom(snapshot.expected[GUARD_OPTIONS_PATH], this.name)
     const result = await runMultiTokenPoolGuards({
       ...options,
       chain,
@@ -129,4 +129,39 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
       findings: result.findings,
     }
   }
+}
+
+/**
+ * The guard options a snapshot sealed, shape-checked: the hash proves the snapshot was not edited,
+ * not that a hand-built one carries valid options.
+ */
+function guardOptionsFrom(value: unknown, operation: string): MultiTokenPoolGuardOptions {
+  if (value === undefined) return {}
+  const bad = () =>
+    new CCTParamsInvalidError(
+      operation,
+      `snapshot.expected.${GUARD_OPTIONS_PATH}`,
+      'is not the guard options an op sealed',
+    )
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw bad()
+  const o = value as Record<string, unknown>
+  const isLaneKey = (k: unknown) =>
+    !!k &&
+    typeof k === 'object' &&
+    typeof (k as Record<string, unknown>).tokenAddress === 'string' &&
+    typeof (k as Record<string, unknown>).remoteChainSelector === 'bigint'
+  if (
+    (o.allowDroppingDefaultCCVs !== undefined && typeof o.allowDroppingDefaultCCVs !== 'boolean') ||
+    (o.maxTransferFeeBps !== undefined && typeof o.maxTransferFeeBps !== 'number') ||
+    (o.minDestGasOverhead !== undefined && typeof o.minDestGasOverhead !== 'number') ||
+    (o.confirmClosing !== undefined &&
+      !(Array.isArray(o.confirmClosing) && o.confirmClosing.every(isLaneKey))) ||
+    (o.migrationWindowChains !== undefined &&
+      !(
+        Array.isArray(o.migrationWindowChains) &&
+        o.migrationWindowChains.every((c) => typeof c === 'bigint')
+      ))
+  )
+    throw bad()
+  return o as MultiTokenPoolGuardOptions
 }
