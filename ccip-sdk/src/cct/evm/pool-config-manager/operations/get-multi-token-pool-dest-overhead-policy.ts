@@ -4,9 +4,8 @@
  * @packageDocumentation
  */
 
-import { resultToObject } from '../../../../evm/types.ts'
 import type { PoolConfigManagerReader } from '../contracts.ts'
-import { decodeDestOverheadConfig, decodePolicyRecordKey } from '../decode.ts'
+import { POLICY_RECORD_READERS } from '../record-reads.ts'
 import type { DestOverheadPolicyRecord } from '../records.ts'
 import {
   type GetMultiTokenPoolPolicyParams,
@@ -44,16 +43,6 @@ export class GetMultiTokenPoolDestOverheadPolicy extends PolicyQuery<
     { policyWord }: ParsedPolicyParams<GetMultiTokenPoolPolicyParams>,
     { blockTag }: PolicyReadContext,
   ): Promise<PolicyRecords<GetMultiTokenPoolDestOverheadPolicyResult>> {
-    const [tokenCount, records] = await pcm.getDestOverheadPolicy(policyWord, { blockTag })
-    return {
-      tokenCount: Number(tokenCount),
-      records: records.map((raw) => {
-        const r = resultToObject(raw)
-        return {
-          ...decodePolicyRecordKey(r),
-          destOverheadConfig: decodeDestOverheadConfig(r.destOverheadConfig),
-        }
-      }),
-    }
+    return POLICY_RECORD_READERS.destOverhead(pcm, policyWord, { blockTag })
   }
 }

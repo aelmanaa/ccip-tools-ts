@@ -15,7 +15,11 @@ import {
   assertResultCount,
   toAbiLaneKey,
 } from '../contracts.ts'
-import { type GetMultiTokenPoolLaneBatchParams, LaneBatchQuery } from './lane-batch.ts'
+import {
+  type GetMultiTokenPoolLaneBatchParams,
+  type LaneChunkContext,
+  LaneBatchQuery,
+} from './lane-batch.ts'
 
 /** One lane's verification. */
 export type MultiTokenPoolLaneVerification = {
@@ -51,12 +55,13 @@ export class GetMultiTokenPoolLaneVerifications extends LaneBatchQuery<
     pcm: PoolConfigManagerReader,
     lanes: MultiTokenPoolLaneKey[],
     _params: GetMultiTokenPoolLaneBatchParams,
-    { address }: { address: string },
+    { address, blockTag }: LaneChunkContext,
   ): Promise<MultiTokenPoolLaneVerification[]> {
     // positional: `resultToObject` on the whole multi-output Result would return a named object
     const [hooks, outbound, inbound] = await pcm.getLaneVerificationBatch(
       lanes.map(toAbiLaneKey),
       IGNORED_FINALITY,
+      { blockTag },
     )
     for (const column of [hooks, outbound, inbound])
       assertResultCount(address, 'getLaneVerificationBatch', column, lanes.length)

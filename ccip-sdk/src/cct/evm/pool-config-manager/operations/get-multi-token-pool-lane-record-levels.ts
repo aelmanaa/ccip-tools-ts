@@ -13,7 +13,11 @@ import {
   decodeEnum,
   toAbiLaneKey,
 } from '../contracts.ts'
-import { type GetMultiTokenPoolLaneBatchParams, LaneBatchQuery } from './lane-batch.ts'
+import {
+  type GetMultiTokenPoolLaneBatchParams,
+  type LaneChunkContext,
+  LaneBatchQuery,
+} from './lane-batch.ts'
 
 /** The PCM `RecordLevel` enum, in order (index = on-chain value). */
 const RECORD_LEVELS = ['none', 'inline', 'policy-chain', 'policy-default'] as const
@@ -45,10 +49,10 @@ export class GetMultiTokenPoolLaneRecordLevels extends LaneBatchQuery<
     pcm: PoolConfigManagerReader,
     lanes: MultiTokenPoolLaneKey[],
     _params: GetMultiTokenPoolLaneBatchParams,
-    { address }: { address: string },
+    { address, blockTag }: LaneChunkContext,
   ): Promise<MultiTokenPoolLaneRecordLevels[]> {
     // one array per record type, in LANE_RECORD_TYPES order, each with one level per lane
-    const byType = await pcm.getLaneRecordLevelBatch(lanes.map(toAbiLaneKey))
+    const byType = await pcm.getLaneRecordLevelBatch(lanes.map(toAbiLaneKey), { blockTag })
     return lanes.map((_, i) => ({
       levels: Object.fromEntries(
         LANE_RECORD_TYPES.map((type, t) => [

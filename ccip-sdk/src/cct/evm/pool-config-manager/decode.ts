@@ -7,10 +7,11 @@
 
 import { getAddress } from 'ethers'
 
+import type { LaneRecordType } from '../../../chain.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
 import { nullableAddress } from '../multi-token-pool/contracts.ts'
 import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
-import { type MultiTokenPoolLaneKey, decodePolicyName } from './contracts.ts'
+import { type MultiTokenPoolLaneKey, type PolicyName, decodePolicyName } from './contracts.ts'
 import type {
   InlineRemotePoolConfig,
   MultiTokenPoolDestOverheadConfig,
@@ -118,5 +119,24 @@ export function decodeInlineRemotePoolConfig(c: {
       address: decodeRemoteAddress(p.remotePoolAddress, key.remoteChainSelector),
       allowLegacyPoolData: p.allowLegacyPoolDataOnReceive,
     })),
+  }
+}
+
+/** The policy assigned per record type in a `TokenConfig`, or `null`. @internal */
+export function decodeTokenPolicies(c: {
+  connectionPolicyName: string
+  remotePoolPolicyName: string
+  rateLimitPolicyName: string
+  feePolicyName: string
+  destOverheadPolicyName: string
+  securityPolicyName: string
+}): Record<LaneRecordType, PolicyName | null> {
+  return {
+    connection: decodePolicyName(c.connectionPolicyName),
+    remotePool: decodePolicyName(c.remotePoolPolicyName),
+    rateLimit: decodePolicyName(c.rateLimitPolicyName),
+    fee: decodePolicyName(c.feePolicyName),
+    destOverhead: decodePolicyName(c.destOverheadPolicyName),
+    security: decodePolicyName(c.securityPolicyName),
   }
 }

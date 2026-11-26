@@ -9,10 +9,7 @@ import { toBeHex } from 'ethers'
 
 import { resultToObject } from '../../../../evm/types.ts'
 import { type FinalityRequested, encodeFinality } from '../../../../extra-args.ts'
-import {
-  type MultiTokenPoolVersion,
-  getMultiTokenPoolInterface,
-} from '../../multi-token-pool/contracts.ts'
+import { getMultiTokenPoolInterface } from '../../multi-token-pool/contracts.ts'
 import { isRevertWith } from '../../query.ts'
 import { type TokenPoolFee, toTokenPoolFee } from '../../token-pool/contracts.ts'
 import { validateFinalityRequested } from '../../validate.ts'
@@ -22,7 +19,11 @@ import {
   assertResultCount,
   toAbiLaneKey,
 } from '../contracts.ts'
-import { type GetMultiTokenPoolLaneBatchParams, LaneBatchQuery } from './lane-batch.ts'
+import {
+  type GetMultiTokenPoolLaneBatchParams,
+  type LaneChunkContext,
+  LaneBatchQuery,
+} from './lane-batch.ts'
 
 /** Parameters for `getMultiTokenPoolLaneFees`. */
 export type GetMultiTokenPoolLaneFeesParams = GetMultiTokenPoolLaneBatchParams & {
@@ -74,7 +75,7 @@ export class GetMultiTokenPoolLaneFees extends LaneBatchQuery<
     pcm: PoolConfigManagerReader,
     lanes: MultiTokenPoolLaneKey[],
     { finality = 'finalized' }: GetMultiTokenPoolLaneFeesParams,
-    { address, version }: { address: string; version: MultiTokenPoolVersion },
+    { address, version, blockTag }: LaneChunkContext,
   ): Promise<MultiTokenPoolLaneFee[]> {
     const requested = toBeHex(encodeFinality(finality), 4)
     const toFee = (raw: LaneFeeResult): MultiTokenPoolLaneFee => ({
@@ -85,7 +86,7 @@ export class GetMultiTokenPoolLaneFees extends LaneBatchQuery<
     const store = getMultiTokenPoolInterface('ConnectionPolicyStore', version)
     const disallowsFinality = (err: unknown) => isRevertWith(err, store, 'InvalidRequestedFinality')
     try {
-      const fees = await pcm.getFeeBatch(lanes.map(toAbiLaneKey), requested)
+      const fees = await pcm.getFeeBatch(lanes.map(toAbiLaneKey), requested, { blockTag })
       assertResultCount(address, 'getFeeBatch', fees, lanes.length)
       return fees.map(toFee)
     } catch (err) {
@@ -95,7 +96,7 @@ export class GetMultiTokenPoolLaneFees extends LaneBatchQuery<
     return Promise.all(
       lanes.map(async (lane) => {
         try {
-          const fees = await pcm.getFeeBatch([toAbiLaneKey(lane)], requested)
+          const fees = await pcm.getFeeBatch([toAbiLaneKey(lane)], requested, { blockTag })
           assertResultCount(address, 'getFeeBatch', fees, 1)
           return toFee(fees[0]!)
         } catch (err) {

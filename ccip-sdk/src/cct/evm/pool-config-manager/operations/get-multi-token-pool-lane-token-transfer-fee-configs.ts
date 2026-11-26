@@ -13,7 +13,11 @@ import {
   type PoolConfigManagerReader,
   toAbiLaneKey,
 } from '../contracts.ts'
-import { type GetMultiTokenPoolLaneBatchParams, LaneBatchQuery } from './lane-batch.ts'
+import {
+  type GetMultiTokenPoolLaneBatchParams,
+  type LaneChunkContext,
+  LaneBatchQuery,
+} from './lane-batch.ts'
 
 /** Result of `multiTokenPoolLaneTokenTransferFeeConfigs`: one entry per lane, in input order, with its key. */
 export type GetMultiTokenPoolLaneTokenTransferFeeConfigsResult = (MultiTokenPoolLaneKey &
@@ -34,9 +38,11 @@ export class GetMultiTokenPoolLaneTokenTransferFeeConfigs extends LaneBatchQuery
   protected async readChunk(
     pcm: PoolConfigManagerReader,
     lanes: MultiTokenPoolLaneKey[],
+    _params: GetMultiTokenPoolLaneBatchParams,
+    { blockTag }: LaneChunkContext,
   ): Promise<TokenTransferFeeConfig[]> {
-    return (await pcm.getTokenTransferFeeConfigBatch(lanes.map(toAbiLaneKey))).map((raw) =>
-      toTokenTransferFeeConfig(resultToObject(raw)),
+    return (await pcm.getTokenTransferFeeConfigBatch(lanes.map(toAbiLaneKey), { blockTag })).map(
+      (raw) => toTokenTransferFeeConfig(resultToObject(raw)),
     )
   }
 }

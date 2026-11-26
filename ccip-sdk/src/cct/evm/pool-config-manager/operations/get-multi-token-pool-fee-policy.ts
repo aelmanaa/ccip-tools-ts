@@ -4,9 +4,8 @@
  * @packageDocumentation
  */
 
-import { resultToObject } from '../../../../evm/types.ts'
 import type { PoolConfigManagerReader } from '../contracts.ts'
-import { decodeFeeConfig, decodePolicyRecordKey } from '../decode.ts'
+import { POLICY_RECORD_READERS } from '../record-reads.ts'
 import type { FeePolicyRecord } from '../records.ts'
 import {
   type GetMultiTokenPoolPolicyParams,
@@ -44,13 +43,6 @@ export class GetMultiTokenPoolFeePolicy extends PolicyQuery<
     { policyWord }: ParsedPolicyParams<GetMultiTokenPoolPolicyParams>,
     { blockTag }: PolicyReadContext,
   ): Promise<PolicyRecords<GetMultiTokenPoolFeePolicyResult>> {
-    const [tokenCount, records] = await pcm.getFeePolicy(policyWord, { blockTag })
-    return {
-      tokenCount: Number(tokenCount),
-      records: records.map((raw) => {
-        const r = resultToObject(raw)
-        return { ...decodePolicyRecordKey(r), feeConfig: decodeFeeConfig(r.feeConfig) }
-      }),
-    }
+    return POLICY_RECORD_READERS.fee(pcm, policyWord, { blockTag })
   }
 }

@@ -10,9 +10,7 @@ import { getAddress } from 'ethers'
 import type { LaneRecordType } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
-import { resultToObject } from '../../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { decodeRemoteAddress } from '../../../remote-address.ts'
 import { poolConfigManagerContract } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
 import { validateAddress, validateArray } from '../../validate.ts'
@@ -21,14 +19,7 @@ import {
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from '../contracts.ts'
-import {
-  decodeDestOverheadConfig,
-  decodeFeeConfig,
-  decodeInlineKey,
-  decodeInlineRemotePoolConfig,
-  decodeRateLimits,
-  decodeSecurityConfig,
-} from '../decode.ts'
+import { INLINE_RECORD_READERS } from '../record-reads.ts'
 import type {
   InlineConnectionConfig,
   InlineDestOverheadConfig,
@@ -100,46 +91,10 @@ export class GetMultiTokenPoolInlineConfigs extends EVMQuery<
     const pcm = poolConfigManagerContract(chain, address, version)
     const token = getAddress(params.tokenAddress)
     const types = new Set(params.types ?? LANE_RECORD_TYPES)
-    const read = {
-      connection: async () =>
-        (await pcm.getInlineConnectionConfigs(token)).map((raw) => {
-          const c = resultToObject(raw)
-          const key = decodeInlineKey(c)
-          return {
-            ...key,
-            remoteToken: decodeRemoteAddress(c.remoteToken, key.remoteChainSelector),
-          }
-        }),
-      remotePool: async () =>
-        (await pcm.getInlineRemotePoolConfigs(token)).map((raw) =>
-          decodeInlineRemotePoolConfig(resultToObject(raw)),
-        ),
-      rateLimit: async () =>
-        (await pcm.getInlineRateLimitConfigs(token)).map((raw) => {
-          const c = resultToObject(raw)
-          return { ...decodeInlineKey(c), rateLimits: decodeRateLimits(c.rateLimitConfig) }
-        }),
-      fee: async () =>
-        (await pcm.getInlineFeeConfigs(token)).map((raw) => {
-          const c = resultToObject(raw)
-          return { ...decodeInlineKey(c), feeConfig: decodeFeeConfig(c.feeConfig) }
-        }),
-      destOverhead: async () =>
-        (await pcm.getInlineDestOverheadConfigs(token)).map((raw) => {
-          const c = resultToObject(raw)
-          return {
-            ...decodeInlineKey(c),
-            destOverheadConfig: decodeDestOverheadConfig(c.destOverheadConfig),
-          }
-        }),
-      security: async () =>
-        (await pcm.getInlineSecurityConfigs(token)).map((raw) => {
-          const c = resultToObject(raw)
-          return { ...decodeInlineKey(c), securityConfig: decodeSecurityConfig(c.securityConfig) }
-        }),
-    } satisfies Record<LaneRecordType, () => Promise<unknown[]>>
     const entries = await Promise.all(
-      LANE_RECORD_TYPES.filter((t) => types.has(t)).map(async (t) => [t, await read[t]()] as const),
+      LANE_RECORD_TYPES.filter((t) => types.has(t)).map(
+        async (t) => [t, await INLINE_RECORD_READERS[t](pcm, token)] as const,
+      ),
     )
     return Object.fromEntries(entries) as GetMultiTokenPoolInlineConfigsResult
   }

@@ -13,7 +13,11 @@ import {
   type PoolConfigManagerReader,
   toAbiLaneKey,
 } from '../contracts.ts'
-import { type GetMultiTokenPoolLaneBatchParams, LaneBatchQuery } from './lane-batch.ts'
+import {
+  type GetMultiTokenPoolLaneBatchParams,
+  type LaneChunkContext,
+  LaneBatchQuery,
+} from './lane-batch.ts'
 
 /** One decoded `LaneConnection`, the only lane view with pause state. */
 export type MultiTokenPoolLaneConnection = {
@@ -62,8 +66,10 @@ export class GetMultiTokenPoolLaneConnections extends LaneBatchQuery<
   protected async readChunk(
     pcm: PoolConfigManagerReader,
     lanes: GetMultiTokenPoolLaneBatchParams['lanes'],
+    _params: GetMultiTokenPoolLaneBatchParams,
+    { blockTag }: LaneChunkContext,
   ): Promise<MultiTokenPoolLaneConnection[]> {
-    const connections = await pcm.getLaneConnectionBatch(lanes.map(toAbiLaneKey))
+    const connections = await pcm.getLaneConnectionBatch(lanes.map(toAbiLaneKey), { blockTag })
     return connections.map((raw, i) => {
       const c = resultToObject(raw)
       const selector = lanes[i]!.remoteChainSelector

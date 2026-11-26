@@ -4,9 +4,8 @@
  * @packageDocumentation
  */
 
-import { resultToObject } from '../../../../evm/types.ts'
 import type { PoolConfigManagerReader } from '../contracts.ts'
-import { decodePolicyRecordKey, decodeRateLimits } from '../decode.ts'
+import { POLICY_RECORD_READERS } from '../record-reads.ts'
 import type { RateLimitPolicyRecord } from '../records.ts'
 import {
   type GetMultiTokenPoolPolicyParams,
@@ -46,20 +45,6 @@ export class GetMultiTokenPoolRateLimitPolicy extends PolicyQuery<
     { policyWord }: ParsedPolicyParams<GetMultiTokenPoolPolicyParams>,
     { blockTag }: PolicyReadContext,
   ): Promise<PolicyRecords<GetMultiTokenPoolRateLimitPolicyResult>> {
-    const [tokenCount, decimals, records] = await pcm.getRateLimitPolicy(policyWord, { blockTag })
-    const decoded = records.map((raw) => {
-      const r = resultToObject(raw)
-      return {
-        ...decodePolicyRecordKey(r),
-        localDecimals: Number(r.localDecimals),
-        rateLimits: decodeRateLimits(r.rateLimitConfig),
-      }
-    })
-    return {
-      tokenCount: Number(tokenCount),
-      // the policy's decimals are fixed by its first record; `0` with no record means unset
-      localDecimals: decoded.length ? Number(decimals) : null,
-      records: decoded,
-    }
+    return POLICY_RECORD_READERS.rateLimit(pcm, policyWord, { blockTag })
   }
 }

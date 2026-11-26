@@ -5,11 +5,9 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
-
-import { resultToObject } from '../../../../evm/types.ts'
 import { validateUint32, validateUint64 } from '../../validate.ts'
-import { type PoolConfigManagerReader, readPagesAtBlock } from '../contracts.ts'
+import type { PoolConfigManagerReader } from '../contracts.ts'
+import { readSubsetTokens } from '../record-reads.ts'
 import {
   type GetMultiTokenPoolPolicyParams,
   type MultiTokenPoolPolicyIdentity,
@@ -65,24 +63,6 @@ export class GetMultiTokenPoolSubsetTokens extends PolicyQuery<
     { policyWord, remoteChainSelector }: ParsedPolicyParams<GetMultiTokenPoolSubsetTokensParams>,
     { chain, blockTag }: PolicyReadContext,
   ): Promise<PolicyRecords<GetMultiTokenPoolSubsetTokensResult>> {
-    let onlySubsetTokens = false
-    const { items: tokens, blockNumber } = await readPagesAtBlock(
-      chain,
-      async (start, count, at) => {
-        const [only, page] = await pcm.getSubsetTokens(
-          policyWord,
-          remoteChainSelector,
-          start,
-          count,
-          {
-            blockTag: at,
-          },
-        )
-        onlySubsetTokens = only
-        return page.map((t) => getAddress(resultToObject(t)))
-      },
-      { blockTag },
-    )
-    return { onlySubsetTokens, tokens, blockNumber }
+    return readSubsetTokens(chain, pcm, policyWord, remoteChainSelector, blockTag)
   }
 }

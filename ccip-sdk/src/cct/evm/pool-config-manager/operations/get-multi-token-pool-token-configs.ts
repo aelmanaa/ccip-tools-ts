@@ -16,12 +16,12 @@ import {
   type MultiTokenPoolTokenProfileFields,
   type PolicyName,
   type PoolConfigManagerTarget,
-  decodePolicyName,
   decodeTokenProfile,
   readInBatches,
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from '../contracts.ts'
+import { decodeTokenPolicies } from '../decode.ts'
 
 /** A decoded PCM `TokenConfig`. */
 export type MultiTokenPoolTokenConfig = MultiTokenPoolTokenProfileFields & {
@@ -75,14 +75,7 @@ export class GetMultiTokenPoolTokenConfigs extends EVMQuery<
           return {
             ...decodeTokenProfile(batch[i]!, c, address),
             supportedChains: c.supportedChains.map(BigInt),
-            policies: {
-              connection: decodePolicyName(c.connectionPolicyName),
-              remotePool: decodePolicyName(c.remotePoolPolicyName),
-              rateLimit: decodePolicyName(c.rateLimitPolicyName),
-              fee: decodePolicyName(c.feePolicyName),
-              destOverhead: decodePolicyName(c.destOverheadPolicyName),
-              security: decodePolicyName(c.securityPolicyName),
-            },
+            policies: decodeTokenPolicies(c),
           }
         }),
       { batchSize: TOKEN_BATCH_SIZE },

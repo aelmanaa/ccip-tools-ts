@@ -4,10 +4,8 @@
  * @packageDocumentation
  */
 
-import { resultToObject } from '../../../../evm/types.ts'
-import { nullableAddress } from '../../multi-token-pool/contracts.ts'
 import type { PoolConfigManagerReader } from '../contracts.ts'
-import { decodePolicyRecordKey } from '../decode.ts'
+import { POLICY_RECORD_READERS } from '../record-reads.ts'
 import type { ConnectionPolicyRecord } from '../records.ts'
 import {
   type GetMultiTokenPoolPolicyParams,
@@ -47,14 +45,6 @@ export class GetMultiTokenPoolConnectionPolicy extends PolicyQuery<
     { policyWord }: ParsedPolicyParams<GetMultiTokenPoolPolicyParams>,
     { blockTag }: PolicyReadContext,
   ): Promise<PolicyRecords<GetMultiTokenPoolConnectionPolicyResult>> {
-    const [tokenCount, provider, records] = await pcm.getConnectionPolicy(policyWord, { blockTag })
-    return {
-      tokenCount: Number(tokenCount),
-      remoteTokenAddressProvider: nullableAddress(resultToObject(provider)),
-      records: records.map((raw) => {
-        const r = resultToObject(raw)
-        return { ...decodePolicyRecordKey(r), onlySubsetTokens: r.onlySubsetTokens }
-      }),
-    }
+    return POLICY_RECORD_READERS.connection(pcm, policyWord, { blockTag })
   }
 }

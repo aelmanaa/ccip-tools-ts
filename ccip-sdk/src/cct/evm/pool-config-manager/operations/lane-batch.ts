@@ -14,6 +14,7 @@ import {
   poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
+import { validateUint32 } from '../../validate.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PoolConfigManagerReader,
@@ -24,10 +25,20 @@ import {
   validatePoolConfigManagerTarget,
 } from '../contracts.ts'
 
+/** What a chunk read gets: the chain, the PCM, and the block every chunk is read at. @internal */
+export type LaneChunkContext = {
+  chain: EVMChain
+  address: string
+  version: MultiTokenPoolVersion
+  blockTag: number
+}
+
 /** Parameters for the PCM lane batch views; chunked into calls of 100 lanes. */
 export type GetMultiTokenPoolLaneBatchParams = PoolConfigManagerTarget & {
   /** Lanes to read, at least one. */
   lanes: MultiTokenPoolLaneKey[]
+  /** Block to read every chunk at; defaults to the latest block, read once. */
+  blockTag?: number
 }
 
 /**
@@ -44,25 +55,33 @@ export abstract class LaneBatchQuery<
     pcm: PoolConfigManagerReader,
     lanes: MultiTokenPoolLaneKey[],
     params: P,
-    ctx: { chain: EVMChain; address: string; version: MultiTokenPoolVersion },
+    ctx: LaneChunkContext,
   ): Promise<R[]>
 
   /** Validates the target and the lanes; subclasses add their own checks after calling it. */
   protected prepare(params: P): P {
     validatePoolConfigManagerTarget(this.name, params)
     validateLaneKeys(this.name, 'lanes', params.lanes)
+    if (params.blockTag !== undefined) validateUint32(this.name, 'blockTag', params.blockTag)
     return params
   }
 
   protected async read(chain: EVMChain, params: P): Promise<(MultiTokenPoolLaneKey & R)[]> {
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
     const pcm = poolConfigManagerContract(chain, address, version)
+    // one block for every chunk, so a large read does not mix states
+    const blockTag = params.blockTag ?? (await chain.provider.getBlockNumber())
     const lanes = params.lanes.map((l) => ({
       tokenAddress: getAddress(l.tokenAddress),
       remoteChainSelector: l.remoteChainSelector,
     }))
     return readLaneBatches(lanes, async (chunk) => {
-      const results = await this.readChunk(pcm, chunk, params, { chain, address, version })
+      const results = await this.readChunk(pcm, chunk, params, {
+        chain,
+        address,
+        version,
+        blockTag,
+      })
       if (results.length !== chunk.length)
         throw new CCTDataDecodeError(address, {
           context: {

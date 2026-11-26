@@ -4,9 +4,8 @@
  * @packageDocumentation
  */
 
-import { resultToObject } from '../../../../evm/types.ts'
 import type { PoolConfigManagerReader } from '../contracts.ts'
-import { decodePolicyRecordKey, decodeSecurityConfig } from '../decode.ts'
+import { POLICY_RECORD_READERS } from '../record-reads.ts'
 import type { SecurityPolicyRecord } from '../records.ts'
 import {
   type GetMultiTokenPoolPolicyParams,
@@ -44,16 +43,6 @@ export class GetMultiTokenPoolSecurityPolicy extends PolicyQuery<
     { policyWord }: ParsedPolicyParams<GetMultiTokenPoolPolicyParams>,
     { blockTag }: PolicyReadContext,
   ): Promise<PolicyRecords<GetMultiTokenPoolSecurityPolicyResult>> {
-    const [tokenCount, records] = await pcm.getSecurityPolicy(policyWord, { blockTag })
-    return {
-      tokenCount: Number(tokenCount),
-      records: records.map((raw) => {
-        const r = resultToObject(raw)
-        return {
-          ...decodePolicyRecordKey(r),
-          securityConfig: decodeSecurityConfig(r.securityConfig),
-        }
-      }),
-    }
+    return POLICY_RECORD_READERS.security(pcm, policyWord, { blockTag })
   }
 }

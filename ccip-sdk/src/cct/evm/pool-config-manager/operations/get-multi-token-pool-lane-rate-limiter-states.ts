@@ -12,7 +12,11 @@ import {
   type PoolConfigManagerReader,
   toAbiLaneKey,
 } from '../contracts.ts'
-import { type GetMultiTokenPoolLaneBatchParams, LaneBatchQuery } from './lane-batch.ts'
+import {
+  type GetMultiTokenPoolLaneBatchParams,
+  type LaneChunkContext,
+  LaneBatchQuery,
+} from './lane-batch.ts'
 
 /** One lane's four raw buckets, as the shared `TokenBucket`. */
 export type MultiTokenPoolLaneRateLimiterState = {
@@ -46,15 +50,19 @@ export class GetMultiTokenPoolLaneRateLimiterStates extends LaneBatchQuery<
   protected async readChunk(
     pcm: PoolConfigManagerReader,
     lanes: MultiTokenPoolLaneKey[],
+    _params: GetMultiTokenPoolLaneBatchParams,
+    { blockTag }: LaneChunkContext,
   ): Promise<MultiTokenPoolLaneRateLimiterState[]> {
-    return (await pcm.getCurrentRateLimiterStateBatch(lanes.map(toAbiLaneKey))).map((raw) => {
-      const s = resultToObject(raw)
-      return {
-        outbound: toTokenBucket(s.outbound),
-        inbound: toTokenBucket(s.inbound),
-        fastFinalityOutbound: toTokenBucket(s.fastFinalityOutbound),
-        fastFinalityInbound: toTokenBucket(s.fastFinalityInbound),
-      }
-    })
+    return (await pcm.getCurrentRateLimiterStateBatch(lanes.map(toAbiLaneKey), { blockTag })).map(
+      (raw) => {
+        const s = resultToObject(raw)
+        return {
+          outbound: toTokenBucket(s.outbound),
+          inbound: toTokenBucket(s.inbound),
+          fastFinalityOutbound: toTokenBucket(s.fastFinalityOutbound),
+          fastFinalityInbound: toTokenBucket(s.fastFinalityInbound),
+        }
+      },
+    )
   }
 }

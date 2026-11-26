@@ -4,10 +4,8 @@
  * @packageDocumentation
  */
 
-import { resultToObject } from '../../../../evm/types.ts'
-import { decodeRemoteAddress } from '../../../remote-address.ts'
 import type { PoolConfigManagerReader } from '../contracts.ts'
-import { decodePolicyRecordKey } from '../decode.ts'
+import { POLICY_RECORD_READERS } from '../record-reads.ts'
 import type { RemotePoolPolicyRecord } from '../records.ts'
 import {
   type GetMultiTokenPoolPolicyParams,
@@ -45,19 +43,6 @@ export class GetMultiTokenPoolRemotePoolPolicy extends PolicyQuery<
     { policyWord }: ParsedPolicyParams<GetMultiTokenPoolPolicyParams>,
     { blockTag }: PolicyReadContext,
   ): Promise<PolicyRecords<GetMultiTokenPoolRemotePoolPolicyResult>> {
-    const [tokenCount, records] = await pcm.getRemotePoolPolicy(policyWord, { blockTag })
-    return {
-      tokenCount: Number(tokenCount),
-      records: records.map((raw) => {
-        const r = resultToObject(raw)
-        const key = decodePolicyRecordKey(r)
-        return {
-          ...key,
-          remotePoolAddresses: r.remotePoolAddresses.map((a: string) =>
-            decodeRemoteAddress(a, key.remoteChainSelector),
-          ),
-        }
-      }),
-    }
+    return POLICY_RECORD_READERS.remotePool(pcm, policyWord, { blockTag })
   }
 }
