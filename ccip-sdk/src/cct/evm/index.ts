@@ -12,7 +12,11 @@ import type { ChainContext } from '../../chain.ts'
 import { EVMChain } from '../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../evm/types.ts'
 import { ChainFamily } from '../../networks.ts'
-import type { MultiTokenPoolSnapshotCheck } from '../multi-token-pool.ts'
+import type {
+  MultiTokenPoolLane,
+  MultiTokenPoolLaneParams,
+  MultiTokenPoolSnapshotCheck,
+} from '../multi-token-pool.ts'
 import type { TransactionResult } from '../operation.ts'
 import { TokenManager } from '../token-manager.ts'
 import {
@@ -129,6 +133,7 @@ import {
   GetMultiTokenPoolDestOverheadPolicy,
   GetMultiTokenPoolFeePolicy,
   GetMultiTokenPoolInlineConfigs,
+  GetMultiTokenPoolLane,
   GetMultiTokenPoolLaneConnections,
   GetMultiTokenPoolLaneFees,
   GetMultiTokenPoolLaneRateLimiterStates,
@@ -471,6 +476,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   readonly #getMultiTokenPoolLaneRateLimiterStates = new GetMultiTokenPoolLaneRateLimiterStates()
   readonly #getMultiTokenPoolLaneVerifications = new GetMultiTokenPoolLaneVerifications()
   readonly #checkMultiTokenPoolSnapshot = new CheckMultiTokenPoolSnapshot()
+  readonly #getMultiTokenPoolLane = new GetMultiTokenPoolLane()
   readonly #getMultiTokenPoolHooksState = new GetMultiTokenPoolHooksState()
   readonly #getMultiTokenPoolProvider = new GetMultiTokenPoolProvider()
   readonly #getMultiTokenPoolPolicyNames = new GetMultiTokenPoolPolicyNames()
@@ -5183,6 +5189,30 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
     opts: GetMultiTokenPoolLaneBatchParams,
   ): Promise<GetMultiTokenPoolLaneVerificationsResult> {
     return this.#getMultiTokenPoolLaneVerifications.query(this.chain, opts)
+  }
+
+  /**
+   * Reads the family-neutral view of one lane (same params and result on both managers), every view
+   * at one block.
+   * @remarks Read-only: needs no wallet and builds no transaction. `sources` says where each record
+   * type resolves from (the token's own record, a policy's chain record or its default); `stopped`
+   * marks a direction held by an enabled 0/0 bucket; the statuses are core `LaneStatus`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), or the registry names
+   * no pool for the token
+   * @throws {@link CCTContractTypeInvalidError} if the pool is not a multi-token pool
+   * @throws {@link CCTContractVersionUnsupportedError} if a version is unknown
+   * @example
+   * ```typescript
+   * const lane = await cct.getMultiTokenPoolLane({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   tokenAddress: '0xToken...',
+   *   remoteChainSelector: 16015286601757825753n,
+   * })
+   * if (lane.outboundStatus.status !== 'ok') console.log('outbound blocked:', lane.outboundStatus)
+   * ```
+   */
+  getMultiTokenPoolLane(opts: MultiTokenPoolLaneParams): Promise<MultiTokenPoolLane> {
+    return this.#getMultiTokenPoolLane.query(this.chain, opts)
   }
 
   /**

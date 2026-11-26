@@ -272,8 +272,12 @@ function isLockOrBurnSimulationArtifact(data: BytesLike, onRamp: string): boolea
 /** Raw on-chain TokenBucket struct returned by TokenPool rate limiter queries. */
 type RateLimiterBucket = { tokens: bigint; isEnabled: boolean; capacity: bigint; rate: bigint }
 
-/** Converts an on-chain bucket to the public RateLimiterState, stripping `isEnabled`. */
-function toRateLimiterState(b: RateLimiterBucket): RateLimiterState {
+/**
+ * Converts an on-chain bucket to the public RateLimiterState, stripping `isEnabled` (`null` when
+ * disabled).
+ * @internal
+ */
+export function toRateLimiterState(b: RateLimiterBucket): RateLimiterState {
   return b.isEnabled ? { tokens: b.tokens, capacity: b.capacity, rate: b.rate } : null
 }
 
