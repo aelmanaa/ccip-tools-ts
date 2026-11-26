@@ -13,7 +13,11 @@ import { getAddress, keccak256, toBeHex } from 'ethers'
 
 import type { ChainGetter } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
-import { decodeLaneConnection, nullableAddress } from '../../../evm/multi-token-pool.ts'
+import {
+  LANE_RECORD_TYPES,
+  decodeLaneConnection,
+  nullableAddress,
+} from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
@@ -37,9 +41,11 @@ import {
 } from '../multi-token-pool/contracts.ts'
 import { simulateEVMTx } from '../simulate.ts'
 import { toTokenTransferFeeConfig } from '../token-pool/contracts.ts'
+import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
 import { type DecodedMultiTokenPoolWrite, decodeMultiTokenPoolWrite } from './calldata.ts'
 import {
   type MultiTokenPoolLaneKey,
+  decodeEnum,
   readPoolConfigManagerStaticConfig,
   toAbiLaneKey,
 } from './contracts.ts'
@@ -53,10 +59,12 @@ import {
   multiTokenPoolChainLanes,
   requiredMultiTokenPoolGuardFacts,
 } from './guards.ts'
+import { RECORD_LEVELS } from './operations/get-multi-token-pool-lane-record-levels.ts'
 import {
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
   applyMultiTokenPoolRecordChanges,
+  multiTokenPoolChangeChains,
   requiredMultiTokenPoolProviderAnswers,
 } from './projection.ts'
 import { readMultiTokenPoolRecordState, readProviderAnswers } from './record-state.ts'
@@ -130,7 +138,11 @@ export async function runMultiTokenPoolGuards(
   const decoded = decodeMultiTokenPoolWrite(data, version)
   const blockNumber = input.blockTag ?? (await chain.provider.getBlockNumber())
   const [{ state: before }, { tokenAdminRegistry }] = await Promise.all([
-    readMultiTokenPoolRecordState(chain, poolConfigManager, version, { blockTag: blockNumber }),
+    // chains the write names may have no record yet, and can already be paused
+    readMultiTokenPoolRecordState(chain, poolConfigManager, version, {
+      blockTag: blockNumber,
+      extraChains: multiTokenPoolChangeChains(decoded.changes),
+    }),
     readPoolConfigManagerStaticConfig(chain, poolConfigManager, version),
   ])
   const after = applyMultiTokenPoolRecordChanges(before, decoded.changes)
@@ -374,6 +386,8 @@ async function crossCheckWithSimulateV1(
     pcm.encodeFunctionData('getLaneConnectionBatch', [keys]),
     pcm.encodeFunctionData('getTokenTransferFeeConfigBatch', [keys]),
     pcm.encodeFunctionData('getLaneVerificationBatch', [keys, ANY_FINALITY_CONFIG]),
+    pcm.encodeFunctionData('getCurrentRateLimiterStateBatch', [keys]),
+    pcm.encodeFunctionData('getLaneRecordLevelBatch', [keys]),
   ]
   let result: unknown
   try {
@@ -408,13 +422,44 @@ async function crossCheckWithSimulateV1(
     'getLaneVerificationBatch',
     calls[3]!.returnData,
   )
+  const [bucketsRaw] = pcm.decodeFunctionResult(
+    'getCurrentRateLimiterStateBatch',
+    calls[4]!.returnData,
+  )
+  const levelsRaw = pcm.decodeFunctionResult('getLaneRecordLevelBatch', calls[5]!.returnData)
   const byAddress = <T extends { address: string }>(xs: readonly T[]) =>
     [...xs].sort((a, b) => a.address.localeCompare(b.address))
   lanes.forEach((lane, i) => {
     const conn = decodeLaneConnection(resultToObject(connRaw[i]), (b) =>
       decodeRemoteAddress(b, lane.remoteChainSelector),
     )
+    const levels = Object.fromEntries(
+      LANE_RECORD_TYPES.map((type, t) => [
+        type,
+        decodeEnum(
+          RECORD_LEVELS,
+          (levelsRaw[t] as bigint[])[i] ?? NaN,
+          `${type} record level`,
+          poolConfigManager,
+        ),
+      ]),
+    )
+    const b = resultToObject(bucketsRaw[i]) as Record<
+      'outbound' | 'inbound' | 'fastFinalityOutbound' | 'fastFinalityInbound',
+      { isEnabled: boolean; capacity: bigint; rate: bigint }
+    >
     const simulated = {
+      levels,
+      // the store zeroes the buckets of a lane without a connection or a rate limit record
+      rateLimits:
+        conn.hasConnection && levels.rateLimit !== 'none'
+          ? {
+              outbound: fromAbiRateLimitConfig(b.outbound),
+              inbound: fromAbiRateLimitConfig(b.inbound),
+              fastFinalityOutbound: fromAbiRateLimitConfig(b.fastFinalityOutbound),
+              fastFinalityInbound: fromAbiRateLimitConfig(b.fastFinalityInbound),
+            }
+          : null,
       connection: { ...conn, remotePools: byAddress(conn.remotePools) },
       tokenTransferFeeConfig: toTokenTransferFeeConfig(resultToObject(feeRaw[i])),
       verification: {
@@ -424,6 +469,8 @@ async function crossCheckWithSimulateV1(
       },
     }
     const projected = {
+      levels: lane.levels,
+      rateLimits: lane.rateLimits,
       connection: { ...lane.connection, remotePools: byAddress(lane.connection.remotePools) },
       tokenTransferFeeConfig: lane.tokenTransferFeeConfig,
       verification: lane.verification,

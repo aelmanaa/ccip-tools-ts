@@ -502,6 +502,15 @@ export function applyMultiTokenPoolRecordChanges(
         if (change.inbound !== undefined) token.isInboundPaused = change.inbound
         break
       }
+      default: {
+        // a change kind this projection does not know must never pass as a no-op
+        const unknown: never = change
+        throw new CCTParamsInvalidError(
+          OPERATION,
+          param,
+          `has an unknown kind ${(unknown as { kind: string }).kind}: it cannot be projected`,
+        )
+      }
     }
   })
   return next
@@ -791,4 +800,25 @@ export function requiredMultiTokenPoolProviderAnswers(
       needed.set(key, { provider, tokenAddress: getAddress(tokenAddress), remoteChainSelector })
   }
   return [...needed.values()]
+}
+
+/**
+ * Every remote chain a set of changes names (record keys, pauses), so a reader can include chains no
+ * record names yet: a chain can be paused before any record exists.
+ * @internal
+ */
+export function multiTokenPoolChangeChains(
+  changes: readonly MultiTokenPoolRecordChange[],
+): bigint[] {
+  const chains = new Set<bigint>()
+  for (const c of changes) {
+    const chain =
+      'remoteChainSelector' in c
+        ? c.remoteChainSelector
+        : 'record' in c
+          ? c.record.remoteChainSelector
+          : undefined
+    if (chain !== undefined && chain !== 0n) chains.add(chain)
+  }
+  return [...chains]
 }

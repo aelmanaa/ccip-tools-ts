@@ -19,6 +19,7 @@ import {
   type MultiTokenPoolTokenRecords,
   type ProjectedMultiTokenPoolLane,
   applyMultiTokenPoolRecordChanges,
+  multiTokenPoolChangeChains,
   multiTokenPoolSupportedChains,
   requiredMultiTokenPoolProviderAnswers,
   resolveMultiTokenPoolLanes,
@@ -368,6 +369,29 @@ describe('multi-token pool lane projection (cct/evm pool-config-manager)', () =>
     assert.equal(one(next, T1, C1).levels.fee, 'policy-chain')
     assert.equal(one(next, T1, C1).tokenTransferFeeConfig.finalityFeeUSDCents, 7)
     assert.deepEqual(state, before)
+  })
+
+  it('names every chain a write touches, so a chain paused before its first record is read', () => {
+    assert.deepEqual(
+      multiTokenPoolChangeChains([
+        { kind: 'setChainPause', remoteChainSelector: C3, outbound: true },
+        {
+          kind: 'setPolicyRecord',
+          type: 'fee',
+          record: { policyName: 'p', remoteChainSelector: 0n, feeConfig: feeConfig(1) },
+        },
+        { kind: 'removeInline', type: 'fee', tokenAddress: T1, remoteChainSelector: C1 },
+        { kind: 'setGlobalPause', paused: true },
+      ]),
+      [C3, C1],
+    )
+  })
+
+  it('refuses a change kind it does not know instead of skipping it', () => {
+    assert.throws(
+      () => applyMultiTokenPoolRecordChanges(emptyState(), [{ kind: 'renameEverything' } as never]),
+      CCTParamsInvalidError,
+    )
   })
 
   it('agrees with the reference resolver on random states and writes (seeded)', () => {

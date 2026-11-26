@@ -20,7 +20,8 @@ import {
 } from './lane-batch.ts'
 
 /** The PCM `RecordLevel` enum, in order (index = on-chain value). */
-const RECORD_LEVELS = ['none', 'inline', 'policy-chain', 'policy-default'] as const
+/** The PCM `RecordLevel` enum, in on-chain order. @internal */
+export const RECORD_LEVELS = ['none', 'inline', 'policy-chain', 'policy-default'] as const
 /** The PCM `RecordLevel` enum. */
 export type MultiTokenPoolRecordLevel = (typeof RECORD_LEVELS)[number]
 /** One lane's record levels. */
