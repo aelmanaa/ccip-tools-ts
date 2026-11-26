@@ -12,20 +12,20 @@
 
 import { Buffer } from 'buffer'
 
-import type { IdlAccounts } from '@coral-xyz/anchor'
+import { type IdlAccounts, BorshAccountsCoder } from '@coral-xyz/anchor'
 import { PublicKey } from '@solana/web3.js'
 
 import { sizedCoder } from '../../../solana/coder.ts'
 import {
   type BurnmintTokenPoolGroups,
-  IDL as POOL_GROUPS_IDL,
+  IDL as POOL_GROUPS_BURN_MINT_IDL,
 } from '../../../solana/idl/pool-groups-7558722/BURN_MINT_TOKEN_POOL.ts'
 import { toLeArray } from '../../../utils.ts'
 import { CCTDataDecodeError } from '../../errors.ts'
 import type { PoolDataFormat } from '../../multi-token-pool.ts'
 
 /** Borsh coder of the pool-groups program's IDL. @internal */
-export const poolGroupsCoder = sizedCoder(POOL_GROUPS_IDL)
+export const poolGroupsCoder = sizedCoder(POOL_GROUPS_BURN_MINT_IDL)
 
 /** `ChainConfig` marker of a lane whose `ChainConfigV2` carries a tail: sha256("ccip_tokenpool:lane_extended")[..8]. @internal */
 export const LANE_LINKED_MARKER = Buffer.from('9addeb7061135af4', 'hex')
@@ -38,8 +38,10 @@ const CHAIN_CONFIG_INIT_SPACE = 4 + 4 + 64 + 1 + 2 * (8 + 8 + 17)
 /** Bytes of a `GroupChainPolicy` before its subset bitmap (`GROUP_CHAIN_POLICY_FIXED_LEN`). @internal */
 export const GROUP_CHAIN_POLICY_FIXED_LEN = 2074
 
-const GROUP_MEMBER_DISCRIMINATOR = Buffer.from('64c8588f53e3a5a6', 'hex')
-const GROUP_REGISTRY_DISCRIMINATOR = Buffer.from('c746ff66717a8902', 'hex')
+// `GroupMember` and `GroupRegistry` are not IDL accounts; their discriminators are Anchor's
+const GROUP_MEMBER_DISCRIMINATOR = BorshAccountsCoder.accountDiscriminator('GroupMember')
+const GROUP_REGISTRY_DISCRIMINATOR = BorshAccountsCoder.accountDiscriminator('GroupRegistry')
+const CHAIN_CONFIG_V2_DISCRIMINATOR = BorshAccountsCoder.accountDiscriminator('ChainConfigV2')
 const GROUP_REGISTRY_LEN = 8 + 1 + 1 + 32 + 4 + 4 + 32
 const CHAIN_CONFIG_V2_STANDARD = 1
 const CHAIN_CONFIG_V2_WITH_EXT = 2
@@ -83,6 +85,8 @@ export type PoolGroupChainConfigV2 = {
   version: number
   remoteChainSelector: bigint
   mint: string
+  /** The body's base CCV lists: on a lane with SECURITY from a policy, its synced copy. */
+  ccvs: { outbound: string[]; inbound: string[] }
   /** `null` on version 1 (no tail). */
   ext: PoolGroupLaneExt | null
 }
@@ -153,6 +157,9 @@ class Cursor {
 
 const DEFAULT_KEY = PublicKey.default.toBase58()
 
+/** Highest account versions the program writes (`MAX_*_V`, all 1 at 7558722). @internal */
+export const POOL_GROUP_MAX_ACCOUNT_VERSION = 1
+
 const POLICY_SLOTS = [0, 1, 2, 3] as const
 
 function classSourceOf(cursor: Cursor): PoolGroupClassSourceByte {
@@ -162,6 +169,25 @@ function classSourceOf(cursor: Cursor): PoolGroupClassSourceByte {
   const slot = POLICY_SLOTS[byte - 2]
   if (slot === undefined) return cursor.fail(`invalid class source ${byte}`)
   return { kind: 'policy', slot }
+}
+
+/** The part of a decoded `ChainConfig` its length depends on. @internal */
+export type ChainConfigPools = {
+  remote: { poolAddresses: readonly { address: { length: number } }[] }
+}
+
+/**
+ * `ChainConfig::standard_len`: what every writer allocates for an unmarked burn-mint or
+ * lock-release lane (`init_chain_remote_config`, `edit_chain_remote_config`,
+ * `append_remote_pool_addresses`).
+ * @internal
+ */
+export function chainConfigStandardLen(base: ChainConfigPools): number {
+  return (
+    8 +
+    CHAIN_CONFIG_INIT_SPACE +
+    base.remote.poolAddresses.reduce((sum, pool) => sum + 4 + pool.address.length, 0)
+  )
 }
 
 /**
@@ -176,12 +202,9 @@ function classSourceOf(cursor: Cursor): PoolGroupClassSourceByte {
  */
 export function decodePoolGroupLaneMarker(
   data: Buffer,
-  base: { remote: { poolAddresses: readonly { address: { length: number } }[] } },
+  base: ChainConfigPools,
 ): PoolGroupLaneMarker {
-  const len =
-    8 +
-    CHAIN_CONFIG_INIT_SPACE +
-    base.remote.poolAddresses.reduce((sum, pool) => sum + 4 + pool.address.length, 0)
+  const len = chainConfigStandardLen(base)
   if (data.length !== len + 8) return 'standard'
   const marker = data.subarray(len)
   if (marker.equals(LANE_LINKED_MARKER)) return 'linked'
@@ -205,7 +228,7 @@ export function decodePoolGroupChainConfigV2(
   account: string,
 ): PoolGroupChainConfigV2 {
   const c = new Cursor(data, account, 0)
-  if (!data.subarray(0, 8).equals(BorshAccountsDiscriminator.chainConfigV2))
+  if (!data.subarray(0, 8).equals(CHAIN_CONFIG_V2_DISCRIMINATOR))
     c.fail('not a ChainConfigV2 account')
   c.offset = 8
   c.u8() // bump
@@ -215,10 +238,14 @@ export function decodePoolGroupChainConfigV2(
   c.bytes(4) // allowed_finality_config
   c.bytes(4 + 4 + 4 + 4 + 2 + 2 + 1) // token_transfer_fee_config
   c.u64() // ccv threshold_amount
-  for (let i = 0; i < 4; i++) c.vec(c.pubkey)
+  const outbound = c.vec(c.pubkey)
+  c.vec(c.pubkey) // threshold_outbound_ccvs
+  const inbound = c.vec(c.pubkey)
+  c.vec(c.pubkey) // threshold_inbound_ccvs
+  const ccvs = { outbound, inbound }
   if (version === CHAIN_CONFIG_V2_STANDARD) {
     c.end()
-    return { version, remoteChainSelector, mint, ext: null }
+    return { version, remoteChainSelector, mint, ccvs, ext: null }
   }
   if (version !== CHAIN_CONFIG_V2_WITH_EXT) c.fail(`unknown ChainConfigV2 version ${version}`)
   const group = c.pubkey()
@@ -252,6 +279,7 @@ export function decodePoolGroupChainConfigV2(
     version,
     remoteChainSelector,
     mint,
+    ccvs,
     ext: {
       poolGroupAddress: group === DEFAULT_KEY ? null : group,
       classSource,
@@ -354,11 +382,6 @@ export function decodePoolGroupIdlAccount<N extends keyof IdlAccounts<BurnmintTo
       context: { reason: `not a ${name} account` },
     })
   }
-}
-
-/** Account discriminators the hand decoders check. */
-const BorshAccountsDiscriminator = {
-  chainConfigV2: Buffer.from([63, 128, 8, 247, 39, 249, 249, 204]),
 }
 
 /**

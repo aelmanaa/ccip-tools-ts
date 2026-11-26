@@ -9,8 +9,6 @@
  * @packageDocumentation
  */
 
-import { Buffer } from 'buffer'
-
 import { BN } from '@coral-xyz/anchor'
 import { type TransactionInstruction, Keypair, PublicKey, SystemProgram } from '@solana/web3.js'
 import { memoize } from 'micro-memoize'
@@ -23,11 +21,12 @@ import {
   SIMULATION_PAYER,
   customInstructionErrorCode,
   getInstructionError,
+  isSimulationFailure,
   simulateTransaction,
   simulationProvider,
 } from '../../../solana/utils.ts'
 import { CCTOperationUnsupportedError } from '../../errors.ts'
-import { deriveTokenPoolProgramDataPda } from '../programs/token-pool.ts'
+import { deriveEventAuthorityPda, deriveTokenPoolProgramDataPda } from '../programs/token-pool.ts'
 
 /** Pool-group features a program may have, oldest first. @internal */
 export const POOL_GROUP_PROBED_FEATURES = [
@@ -40,11 +39,12 @@ export const POOL_GROUP_PROBED_FEATURES = [
 export type PoolGroupProbedFeature = (typeof POOL_GROUP_PROBED_FEATURES)[number]
 
 /**
- * The pool-groups IDL with the base pool's events and errors, as `composeTokenPoolIdl` does for the
- * canonical pools.
+ * The pool-groups IDL with the base pool's events and errors, composed as `composeTokenPoolIdl`
+ * composes the canonical pools. It is not reused: that helper swaps in the 1.6 base types and
+ * widens the type, which loses the typed `Program` methods; this IDL already carries its types.
  * @internal
  */
-export const POOL_GROUPS_IDL = {
+export const POOL_GROUPS_PROGRAM_IDL = {
   ...POOL_GROUPS_BURN_MINT_IDL,
   events: POOL_GROUPS_BASE_IDL.events,
   errors: [...POOL_GROUPS_BASE_IDL.errors, ...POOL_GROUPS_BURN_MINT_IDL.errors],
@@ -64,7 +64,7 @@ export function createPoolGroupProgram(
   poolProgram: PublicKey,
   payer: PublicKey = SIMULATION_PAYER,
 ) {
-  return newProgram(POOL_GROUPS_IDL, poolProgram, simulationProvider(chain, payer))
+  return newProgram(POOL_GROUPS_PROGRAM_IDL, poolProgram, simulationProvider(chain, payer))
 }
 
 /** `InstructionFallbackNotFound`: the program has no such instruction. */
@@ -74,7 +74,8 @@ const OLD_LAYOUT = 102
 /** `AccountNotInitialized`: the instruction ran into the missing account, so it exists. */
 const PRESENT = 3012
 
-// Slot of the last deploy in `UpgradeableLoaderState::ProgramData` (u32 variant, then u64 slot)
+// `UpgradeableLoaderState::ProgramData`: u32 variant (3), then the u64 slot of the last deploy
+const PROGRAM_DATA_VARIANT = 3
 const PROGRAM_DATA_SLOT_OFFSET = 4
 const PROGRAM_DATA_HEADER_LEN = 45
 
@@ -86,10 +87,7 @@ async function probeInstruction(
 ): Promise<TransactionInstruction> {
   const program = createPoolGroupProgram(chain, poolProgram)
   const group = Keypair.generate().publicKey
-  const [eventAuthority] = PublicKey.findProgramAddressSync(
-    [Buffer.from('__event_authority')],
-    poolProgram,
-  )
+  const eventAuthority = deriveEventAuthorityPda(poolProgram)
   const lanes = {
     group,
     groupChainPolicy: Keypair.generate().publicKey,
@@ -135,12 +133,27 @@ async function probe(
   poolProgram: PublicKey,
   feature: PoolGroupProbedFeature,
 ): Promise<boolean> {
-  const ix = await probeInstruction(chain, poolProgram, feature)
+  let ix
+  try {
+    ix = await probeInstruction(chain, poolProgram, feature)
+  } catch (cause) {
+    // the vendored IDL and the probe's account list disagree: an SDK defect, not a program answer
+    throw new CCTOperationUnsupportedError('getPoolGroupFeatures', 'unknown', {
+      cause: cause instanceof Error ? cause : undefined,
+      context: {
+        poolProgram: poolProgram.toBase58(),
+        feature,
+        reason: 'the probe cannot be built',
+      },
+    })
+  }
   let code: number | undefined
   let detail: unknown
   try {
     await simulateTransaction(chain, { payerKey: SIMULATION_PAYER, instructions: [ix] })
   } catch (err) {
+    // transport failures are not answers
+    if (!isSimulationFailure(err)) throw err
     code = customInstructionErrorCode(err)
     detail = getInstructionError(err)?.error ?? (err instanceof Error ? err.message : err)
   }
@@ -163,7 +176,11 @@ async function lastDeploySlot(chain: SolanaChain, poolProgram: PublicKey): Promi
   const info = await chain.connection.getAccountInfo(deriveTokenPoolProgramDataPda(poolProgram), {
     dataSlice: { offset: 0, length: PROGRAM_DATA_HEADER_LEN },
   })
-  if (!info || info.data.length < PROGRAM_DATA_SLOT_OFFSET + 8)
+  if (
+    !info ||
+    info.data.length < PROGRAM_DATA_SLOT_OFFSET + 8 ||
+    info.data.readUInt32LE(0) !== PROGRAM_DATA_VARIANT
+  )
     throw new CCTOperationUnsupportedError('getPoolGroupFeatures', 'unknown', {
       context: {
         poolProgram: poolProgram.toBase58(),

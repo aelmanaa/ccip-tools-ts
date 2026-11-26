@@ -2,11 +2,12 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { describe, it } from 'node:test'
 
-import { BorshAccountsCoder } from '@coral-xyz/anchor'
+import { BN, BorshAccountsCoder } from '@coral-xyz/anchor'
 import { Keypair, PublicKey } from '@solana/web3.js'
 
 import { CCTDataDecodeError } from '../../errors.ts'
 import {
+  GROUP_CHAIN_POLICY_FIXED_LEN,
   LANE_DRIVEN_MARKER,
   LANE_LINKED_MARKER,
   decodePoolGroupChainConfigV2,
@@ -15,6 +16,7 @@ import {
   decodePoolGroupMember,
   decodePoolGroupRegistry,
   poolGroupChainAdmits,
+  poolGroupsCoder,
 } from './accounts.ts'
 
 const u32 = (n: number) => {
@@ -127,7 +129,12 @@ describe('pool-group account decoders', () => {
         u32(0),
       ])
     const v1 = decodePoolGroupChainConfigV2(body(1), 'a')
-    assert.deepEqual(v1, { version: 1, remoteChainSelector: 5n, mint: mint.toBase58(), ext: null })
+    assert.equal(v1.version, 1)
+    assert.equal(v1.remoteChainSelector, 5n)
+    assert.equal(v1.mint, mint.toBase58())
+    assert.equal(v1.ext, null)
+    assert.equal(v1.ccvs.outbound.length, 1)
+    assert.deepEqual(v1.ccvs.inbound, [])
     assert.throws(() =>
       decodePoolGroupChainConfigV2(Buffer.concat([body(1), Buffer.alloc(1)]), 'a'),
     )
@@ -201,6 +208,39 @@ describe('pool-group account decoders', () => {
     assert.equal(poolGroupChainAdmits(subset, data, 40), false)
     assert.equal(poolGroupChainAdmits({ laneMode: { allMembers: {} } }, data, 99), true)
     assert.equal(poolGroupChainAdmits({ laneMode: { off: {} } }, data, 0), false)
+  })
+
+  it('GROUP_CHAIN_POLICY_FIXED_LEN is 8 + INIT_SPACE of the IDL GroupChainPolicy', () => {
+    // the program pins no literal: INIT_SPACE is the record with every max_len vector full
+    // (MAX_POLICY_REMOTE_POOLS 8, RemoteAddress 64, MAX_POLICY_CCVS 8, engine statics 4) and every
+    // option set
+    const key = PublicKey.unique()
+    const ccvs = Array.from({ length: 8 }, () => key)
+    const record = poolGroupsCoder.types.decode<{
+      policy: Record<string, Record<string, unknown>>
+    }>('GroupChainPolicy', Buffer.alloc(4096))
+    record.policy.connection!.remotePools = Array.from({ length: 8 }, () => ({
+      address: { address: Buffer.alloc(64, 1) },
+      allowLegacyPoolData: true,
+    }))
+    const set = { outbound: ccvs, inbound: ccvs, epoch: new BN(1) }
+    Object.assign(record.policy.security!, {
+      current: set,
+      pending: { ...set, activatesAt: new BN(1) },
+      hook: {
+        allowlist: key,
+        blocklist: key,
+        policyEngine: {
+          program: key,
+          staticAccounts: [key, key, key, key],
+          writableStatics: 0,
+          onSend: true,
+          onReceive: true,
+        },
+      },
+    })
+    const encoded = poolGroupsCoder.types.encode('GroupChainPolicy', record)
+    assert.equal(8 + encoded.length, GROUP_CHAIN_POLICY_FIXED_LEN)
   })
 
   it('maps IDL decode failures to CCTDataDecodeError', () => {
