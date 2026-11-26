@@ -278,3 +278,53 @@ export class CCTDataDecodeError extends CCIPError {
     })
   }
 }
+
+// State drift
+
+/** One value that moved between a write's build and its re-check, in `CCTStateChangedError` context. */
+export type CCTStateChange = {
+  /** Dotted path of the value, e.g. `profile.lockOrBurnFlavor`. */
+  path: string
+  /** The value the write was built against. */
+  expected: unknown
+  /** The value now on chain. */
+  actual: unknown
+}
+
+/**
+ * Thrown by CCT writes that verify a snapshot of the state they read, when that state moved after
+ * the write was built: a snapshot the caller passed back no longer holds, or the signing form of
+ * the operation re-read the chain right before sending and found a change.
+ *
+ * @remarks Permanent (`isTransient: false`): retrying the same call with the same snapshot fails the
+ * same way, so generic retry wrappers must not loop on it. Re-read the state and rebuild the write,
+ * and reject any pending multisig proposal built from the old state. `context.changed`, when set,
+ * lists what moved as {@link CCTStateChange}`[]`.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await submitProposal() // any CCT write that verifies a snapshot
+ * } catch (error) {
+ *   if (error instanceof CCTStateChangedError) {
+ *     const changed = error.context.changed as CCTStateChange[] | undefined
+ *     console.log(`State moved for ${error.context.operation}:`, changed)
+ *   }
+ * }
+ * ```
+ */
+export class CCTStateChangedError extends CCIPError {
+  override readonly name = 'CCTStateChangedError'
+  /** Creates a state-changed error. */
+  constructor(operation: string, reason: string, options?: CCIPErrorOptions) {
+    super(
+      CCIPErrorCode.CCT_STATE_CHANGED,
+      `${operation}: on-chain state changed since the write was built: ${reason}`,
+      {
+        ...options,
+        isTransient: false,
+        context: { ...options?.context, operation, reason },
+      },
+    )
+  }
+}

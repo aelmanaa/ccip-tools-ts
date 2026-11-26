@@ -260,6 +260,8 @@ export const DEFAULT_RECOVERY_HINTS: Partial<Record<CCIPErrorCode, string>> = {
     'This operation is not available at the contract version in error.context. Verify the contract version supports it.',
   CCT_DATA_DECODE_FAILED:
     'Ensure the account belongs to a compatible CCT program and uses the expected data layout.',
+  CCT_STATE_CHANGED:
+    'On-chain state moved since this write was built. Re-read and rebuild; reject any pending proposal built from the old state.',
 }
 
 /** Returns default recovery hint for error code, or undefined if none. */

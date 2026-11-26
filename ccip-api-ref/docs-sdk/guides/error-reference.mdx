@@ -150,6 +150,22 @@ All transient — wait and retry.
 |-------|------|-------------|----------|
 | `CCIPViemAdapterError` | `VIEM_ADAPTER_ERROR` | Viem client misconfigured | Ensure `chain` and `account` are defined on client |
 
+## Cross-Chain Token (CCT)
+
+Thrown by the token managers in `@chainlink/ccip-sdk/cct/*` and exported from the package root.
+
+| Error | Code | Transient | When Thrown | Recovery |
+|-------|------|-----------|-------------|----------|
+| `CCTParamsInvalidError` | `CCT_PARAMS_INVALID` | No | An operation parameter, or an on-chain precondition the operation checks, is invalid | See `error.context.param` and `error.context.reason` |
+| `CCTTokenAccountMintMismatchError` | `CCT_TOKEN_ACCOUNT_MINT_MISMATCH` | No | A Solana token account belongs to another mint | Use a token account of the requested mint |
+| `CCTTxFailedError` | `CCT_TX_FAILED` | Sometimes (network errors before broadcast) | The transaction failed before broadcast, or mined without the expected effect | Check the caller's role; `error.context.committedHashes` lists any partial batch |
+| `CCTTxNotConfirmedError` | `CCT_TX_NOT_CONFIRMED` | Yes | Broadcast but not confirmed in time | Check `error.context.txHash` before resubmitting; it may still be mined |
+| `CCTContractTypeInvalidError` | `CONTRACT_TYPE_INVALID` | No | The contract is not of a type the operation accepts (the code is shared with core) | Compare `context.expected` and `context.actual`; `context.reason`, when present, names the operation to use |
+| `CCTContractVersionUnsupportedError` | `CCT_CONTRACT_VERSION_UNSUPPORTED` | No | The contract version is not on the supported list | Check the address and its `typeAndVersion` |
+| `CCTOperationUnsupportedError` | `CCT_OPERATION_UNSUPPORTED` | No | The contract version does not support the operation | Use a contract version that has it |
+| `CCTDataDecodeError` | `CCT_DATA_DECODE_FAILED` | No | Account data cannot be decoded | Check the account belongs to a compatible program |
+| `CCTStateChangedError` | `CCT_STATE_CHANGED` | No | The on-chain state a write was built against moved since it was built (raised by writes that verify a snapshot of the state they read) | Re-read and rebuild; reject any pending proposal built from the old state |
+
 ## Transient Error Codes
 
 These error codes have `isTransient: true` and may succeed on retry:
@@ -173,6 +189,7 @@ These error codes have `isTransient: true` and may succeed on retry:
 | `TIMEOUT` | 5s |
 | `SOLANA_LOOKUP_TABLE_NOT_FOUND` | 5s |
 | `SOLANA_REF_ADDRESSES_NOT_FOUND` | 5s |
+| `CCT_TX_NOT_CONFIRMED` | 5s (check `context.txHash` first: a blind resubmit can send twice) |
 
 Use `getRetryDelay(error)` to get the appropriate delay for a specific error instance (respects `retryAfterMs` hints).
 
