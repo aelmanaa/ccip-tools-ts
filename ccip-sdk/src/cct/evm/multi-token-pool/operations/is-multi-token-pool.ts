@@ -6,25 +6,15 @@
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { isMultiTokenPoolType } from '../../../../evm/multi-token-pool.ts'
-import { EVMQuery, getTypedContract, isMissingFunction, isNotCcipContract } from '../../query.ts'
+import { EVMQuery, isMissingFunction, isNotCcipContract } from '../../query.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
-import { I_MULTI_TOKEN_POOL_INTERFACE_ID } from '../contracts.ts'
+import { I_MULTI_TOKEN_POOL_INTERFACE_ID, multiTokenPoolProbe } from '../contracts.ts'
 
 /** Parameters for reads of one multi-token pool. */
 export type MultiTokenPoolReadParams = {
   /** The multi-token pool. */
   poolAddress: string
 }
-
-const ERC165_ABI = [
-  {
-    type: 'function',
-    name: 'supportsInterface',
-    inputs: [{ name: 'interfaceId', type: 'bytes4', internalType: 'bytes4' }],
-    outputs: [{ name: '', type: 'bool', internalType: 'bool' }],
-    stateMutability: 'view',
-  },
-] as const
 
 /**
  * Whether `poolAddress` is a multi-token pool.
@@ -43,7 +33,7 @@ export class IsMultiTokenPool extends EVMQuery<MultiTokenPoolReadParams, boolean
   }
 
   protected async read(chain: EVMChain, { poolAddress }: MultiTokenPoolReadParams) {
-    const erc165 = getTypedContract(chain, poolAddress, ERC165_ABI)
+    const erc165 = multiTokenPoolProbe(chain, poolAddress)
     try {
       if (await erc165.supportsInterface(I_MULTI_TOKEN_POOL_INTERFACE_ID)) return true
     } catch (err) {

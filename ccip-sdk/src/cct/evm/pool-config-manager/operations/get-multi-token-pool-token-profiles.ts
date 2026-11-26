@@ -15,6 +15,7 @@ import { validateAddressArray } from '../../validate.ts'
 import {
   type MultiTokenPoolTokenProfileFields,
   type PoolConfigManagerTarget,
+  LANE_BATCH_SIZE,
   decodeTokenProfile,
   readInBatches,
   readPoolConfigManagerStaticConfig,
@@ -80,7 +81,7 @@ export class GetMultiTokenPoolTokenProfiles extends EVMQuery<
             isInboundPaused: p.isInboundPaused,
           }
         }),
-      { batchSize: 100 },
+      { batchSize: LANE_BATCH_SIZE },
     )
   }
 }

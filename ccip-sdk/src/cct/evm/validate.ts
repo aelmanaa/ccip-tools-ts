@@ -294,3 +294,39 @@ export function validateAddressArray(
   validateArray(operation, param, value, minLength)
   Array.from(value, (a, i) => validateAddress(operation, `${param}[${i}]`, a))
 }
+
+/**
+ * Asserts a target names exactly one of two address params (an explicit `undefined` does not count
+ * as given), and that the given one is a non-zero address.
+ * @throws {@link CCTParamsInvalidError} if neither or both are given, or the given one is invalid
+ */
+export function validateExactlyOneTarget<A extends string, B extends string>(
+  operation: string,
+  target: Partial<Record<A | B, unknown>>,
+  first: A,
+  second: B,
+): void {
+  const hasSecond = target[second] !== undefined
+  if (hasSecond === (target[first] !== undefined))
+    throw new CCTParamsInvalidError(
+      operation,
+      first,
+      `provide exactly one of ${first} or ${second}`,
+    )
+  if (hasSecond) validateNonZeroAddress(operation, second, target[second])
+  else validateNonZeroAddress(operation, first, target[first])
+}
+
+/**
+ * Asserts `value` is one of `allowed` (a closed string union at runtime, for JS callers).
+ * @throws {@link CCTParamsInvalidError} if it is not
+ */
+export function validateOneOf<const T extends readonly string[]>(
+  operation: string,
+  param: string,
+  value: unknown,
+  allowed: T,
+): asserts value is T[number] {
+  if (!allowed.some((a) => a === value))
+    throw new CCTParamsInvalidError(operation, param, `must be one of ${allowed.join(', ')}`)
+}

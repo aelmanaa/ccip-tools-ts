@@ -8,6 +8,7 @@
 import { ZeroAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
+import { decodeLaneConnection } from '../../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../../evm/types.ts'
 import {
   getMultiTokenPoolInterface,
@@ -112,7 +113,7 @@ export class GetMultiTokenPoolChainPauses extends EVMQuery<
     const connections = await readLaneBatches(lanes, async (chunk) => {
       const read = (
         await pcm.getLaneConnectionBatch(chunk.map(toAbiLaneKey), { blockTag: scanned.toBlock })
-      ).map((c) => resultToObject(c))
+      ).map((c) => decodeLaneConnection(resultToObject(c), String))
       assertResultCount(address, 'getLaneConnectionBatch', read, chunk.length)
       return read
     })

@@ -18,8 +18,12 @@ import {
 } from 'ethers'
 
 import type { EVMChain } from '../../../evm/index.ts'
+import {
+  decodePoolConfigManagerStaticConfig,
+  decodeTokenProfileFields,
+} from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
-import { type FinalityAllowed, decodeFinalityAllowed } from '../../../extra-args.ts'
+import type { FinalityAllowed } from '../../../extra-args.ts'
 import { CCTDataDecodeError, CCTParamsInvalidError } from '../../errors.ts'
 import {
   type LockOrBurnFlavor,
@@ -28,7 +32,6 @@ import {
   POOL_CONFIG_MANAGER_TYPE,
   findDeploymentBlock,
   multiTokenPoolContract,
-  nullableAddress,
   poolConfigManagerContract,
   resolveMultiTokenPool,
   resolveMultiTokenPoolContract,
@@ -36,7 +39,7 @@ import {
 import {
   validateAddress,
   validateArray,
-  validateNonZeroAddress,
+  validateExactlyOneTarget,
   validateUint32,
   validateUint64,
 } from '../validate.ts'
@@ -69,16 +72,7 @@ export function validatePoolConfigManagerTarget(
   operation: string,
   target: PoolConfigManagerTarget,
 ): void {
-  // Value semantics: an explicit `undefined` does not count as provided.
-  const hasPcm = target.poolConfigManager !== undefined
-  if (hasPcm === (target.poolAddress !== undefined))
-    throw new CCTParamsInvalidError(
-      operation,
-      'poolAddress',
-      'provide exactly one of poolAddress or poolConfigManager',
-    )
-  if (hasPcm) validateNonZeroAddress(operation, 'poolConfigManager', target.poolConfigManager)
-  else validateNonZeroAddress(operation, 'poolAddress', target.poolAddress)
+  validateExactlyOneTarget(operation, target, 'poolAddress', 'poolConfigManager')
 }
 
 /**
@@ -351,7 +345,7 @@ export type MultiTokenPoolLaneKey = {
   remoteChainSelector: bigint
 }
 
-/** Lanes per PCM batch view call. */
+/** Lanes or tokens per PCM batch view call (every batch view chunks by it). */
 export const LANE_BATCH_SIZE = 100
 
 /**
@@ -428,18 +422,9 @@ export async function readPoolConfigManagerStaticConfig(
   version: MultiTokenPoolVersion,
 ): Promise<PoolConfigManagerStaticConfig> {
   // positional: abitype types the four outputs as a tuple; the runtime Result also has names
-  const [tar, cps, fps, sps] = await poolConfigManagerContract(
-    chain,
-    address,
-    version,
-  ).getStaticConfig()
-  const toAddress = (a: typeof tar) => getAddress(resultToObject(a))
-  return {
-    tokenAdminRegistry: toAddress(tar),
-    connectionPolicyStore: toAddress(cps),
-    feePolicyStore: toAddress(fps),
-    securityPolicyStore: toAddress(sps),
-  }
+  return decodePoolConfigManagerStaticConfig(
+    await poolConfigManagerContract(chain, address, version).getStaticConfig(),
+  )
 }
 
 /** The PCM handle the batch and policy readers get. @internal */
@@ -498,18 +483,16 @@ export function decodeTokenProfile(
   },
   source: string,
 ): MultiTokenPoolTokenProfileFields {
+  const fields = decodeTokenProfileFields(raw)
   return {
     tokenAddress,
     isRegistered: raw.isRegistered,
-    localDecimals: Number(raw.localDecimals),
+    ...fields,
     lockOrBurnFlavor: decodeEnum(
       LOCK_OR_BURN_FLAVORS,
-      raw.lockOrBurnFlavor,
+      fields.lockOrBurnFlavor,
       'lockOrBurnFlavor',
       source,
     ),
-    allowedFinality: decodeFinalityAllowed(raw.allowedFinalityConfig),
-    lockOrBurnAddress: nullableAddress(raw.lockOrBurnAddress),
-    additionalPoolDataProvider: nullableAddress(raw.additionalPoolDataProvider),
   }
 }

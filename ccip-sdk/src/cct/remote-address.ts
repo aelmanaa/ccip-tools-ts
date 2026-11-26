@@ -7,10 +7,24 @@
 
 import { type BytesLike, hexlify } from 'ethers'
 
-import { networkInfo } from '../networks.ts'
+import { type ChainFamily, networkInfo } from '../networks.ts'
 import { notRegisteredRecovery, supportedChains } from '../supported-chains.ts'
 import { decodeAddress, getAddressBytes } from '../utils.ts'
 import { CCTDataDecodeError, CCTParamsInvalidError } from './errors.ts'
+
+/**
+ * The chain family of a lane's remote chain selector, or `undefined` for an unknown selector.
+ * `networkInfo` also resolves chain IDs, which would key the lane wrong: only an exact selector
+ * match counts.
+ */
+function laneFamilyOf(remoteChainSelector: bigint): ChainFamily | undefined {
+  try {
+    const info = networkInfo(remoteChainSelector)
+    return info.chainSelector === remoteChainSelector ? info.family : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * Parses a remote chain's address into its canonical spelling, validated against the family of
@@ -41,21 +55,14 @@ export function parseRemoteAddress(
   value: unknown,
   remoteChainSelector: bigint,
 ): string {
-  let info
-  try {
-    info = networkInfo(remoteChainSelector)
-  } catch {
-    // unknown selector; reported below
-  }
-  // `networkInfo` also resolves a chain ID, which would configure the lane under the wrong key
-  if (info?.chainSelector !== remoteChainSelector) {
+  const family = laneFamilyOf(remoteChainSelector)
+  if (family === undefined) {
     throw new CCTParamsInvalidError(
       operation,
       param,
       `cannot be parsed: remote chain selector ${remoteChainSelector} is not a known chain selector, so its address format is unknown; pass a CCIP chain selector (not a chain ID), or upgrade the SDK`,
     )
   }
-  const { family } = info
   if (!supportedChains[family]) {
     throw new CCTParamsInvalidError(
       operation,
@@ -139,14 +146,7 @@ export function parseUniqueRemoteAddresses(
  * @internal
  */
 export function decodeRemoteAddress(value: BytesLike, remoteChainSelector: bigint): string {
-  let family
-  try {
-    const info = networkInfo(remoteChainSelector)
-    // `networkInfo` also resolves chain IDs: only a selector match identifies the lane's family
-    if (info.chainSelector === remoteChainSelector) family = info.family
-  } catch {
-    // an unknown selector: fall through to raw hex
-  }
+  const family = laneFamilyOf(remoteChainSelector)
   if (family === undefined || !supportedChains[family]) return hexlify(value)
   try {
     return decodeAddress(value, family)

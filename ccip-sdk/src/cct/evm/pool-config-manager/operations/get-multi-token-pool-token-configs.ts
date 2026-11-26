@@ -16,6 +16,7 @@ import {
   type MultiTokenPoolTokenProfileFields,
   type PolicyName,
   type PoolConfigManagerTarget,
+  LANE_BATCH_SIZE,
   decodeTokenProfile,
   readInBatches,
   resolvePoolConfigManagerTarget,
@@ -30,9 +31,6 @@ export type MultiTokenPoolTokenConfig = MultiTokenPoolTokenProfileFields & {
   /** The policy assigned for each record type, or `null` (inline records only). */
   policies: Record<LaneRecordType, PolicyName | null>
 }
-
-/** Tokens per `getTokenConfigBatch` call, as the lane views chunk lanes. */
-const TOKEN_BATCH_SIZE = 100
 
 /** Parameters for `getMultiTokenPoolTokenConfigs`. */
 export type GetMultiTokenPoolTokenConfigsParams = PoolConfigManagerTarget & {
@@ -78,7 +76,7 @@ export class GetMultiTokenPoolTokenConfigs extends EVMQuery<
             policies: decodeTokenPolicies(c),
           }
         }),
-      { batchSize: TOKEN_BATCH_SIZE },
+      { batchSize: LANE_BATCH_SIZE },
     )
   }
 }

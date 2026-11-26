@@ -10,6 +10,7 @@ import { getAddress } from 'ethers'
 import { CCIPTokenNotConfiguredError } from '../../../../errors/index.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { CCTContractTypeInvalidError, CCTContractVersionUnsupportedError } from '../../../errors.ts'
+import { sortFindings } from '../../../multi-token-pool.ts'
 import {
   type GetPolicyStoreStateResult,
   GetPolicyStoreState,
@@ -250,12 +251,7 @@ export class GetMultiTokenPoolStack extends EVMQuery<
     )
 
     // deterministic order: severity, then check, then reason (the reads above run concurrently)
-    findings.sort(
-      (a, b) =>
-        (a.severity === b.severity ? 0 : a.severity === 'error' ? -1 : 1) ||
-        a.check.localeCompare(b.check) ||
-        a.reason.localeCompare(b.reason),
-    )
+    sortFindings(findings)
 
     return {
       pool,

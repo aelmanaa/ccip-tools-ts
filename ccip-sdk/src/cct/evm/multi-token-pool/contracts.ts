@@ -9,12 +9,13 @@
  * @packageDocumentation
  */
 
-import { Interface, ZeroAddress, getAddress, id as keccak256Utf8 } from 'ethers'
+import { Interface, ZeroAddress, getAddress, id as keccak256Utf8, toBeHex } from 'ethers'
 import type { TypedContract } from 'ethers-abitype'
 
 import type { EVMChain } from '../../../evm/index.ts'
 import { isMultiTokenPoolType } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
+import { encodeFinality } from '../../../extra-args.ts'
 import {
   CCTContractTypeInvalidError,
   CCTContractVersionUnsupportedError,
@@ -151,7 +152,18 @@ export function poolConfigManagerRoleId(role: PoolConfigManagerRole): string {
   return role === 'DEFAULT_ADMIN_ROLE' ? '0x' + '00'.repeat(32) : keccak256Utf8(role)
 }
 
-export { type LockOrBurnFlavor, LOCK_OR_BURN_FLAVORS } from '../../../evm/multi-token-pool.ts'
+export {
+  type LockOrBurnFlavor,
+  LOCK_OR_BURN_FLAVORS,
+  nullableAddress,
+} from '../../../evm/multi-token-pool.ts'
+
+/**
+ * The finality `bytes4` the MTTP views take where finality does not change the answer (CCVs, a
+ * provider's pool data): the finalized flag, `encodeFinality('finalized')`.
+ * @internal
+ */
+export const ANY_FINALITY_CONFIG = toBeHex(encodeFinality('finalized'), 4)
 
 /** The op map's literal; exported as {@link MULTI_TOKEN_POOL_OPERATIONS}. */
 const OPERATIONS = {
@@ -646,16 +658,20 @@ function wordToAddress(word: string): string {
   return getAddress('0x' + word.slice(-40))
 }
 
-/** The `Ownable2Step` owner getter, as every contract of the stack declares it. */
-const OWNABLE_ABI = [
-  {
-    type: 'function',
-    name: 'owner',
-    inputs: [],
-    outputs: [{ name: '', type: 'address', internalType: 'address' }],
-    stateMutability: 'view',
-  },
-] as const
+/**
+ * The getters every contract of the stack shares (`Ownable2Step.owner`, and ERC-165 on the pool),
+ * through the vendored pool ABI, for a probe that does not know the contract's type yet.
+ * @internal
+ */
+export function multiTokenPoolProbe(
+  chain: EVMChain,
+  address: string,
+): Pick<
+  TypedContract<typeof BURN_MINT_MULTI_TOKEN_POOL_V2_1_0_DEV_ABI>,
+  'owner' | 'supportsInterface'
+> {
+  return multiTokenPoolContract(chain, address, MultiTokenPoolVersion.V2_1_0_DEV)
+}
 
 /** A contract's owner and its pending `Ownable2Step` transfer. */
 export type PendingOwner = {
@@ -685,7 +701,7 @@ export async function readOwnership(
   // layout mismatch
   const block = blockTag ?? (await chain.provider.getBlockNumber())
   const [owner, ownerWord, pendingWord] = await Promise.all([
-    getTypedContract(chain, address, OWNABLE_ABI)
+    multiTokenPoolProbe(chain, address)
       .owner({ blockTag: block })
       .then((o) => getAddress(resultToObject(o))),
     chain.provider.getStorage(address, OWNER_SLOT, block),
@@ -746,13 +762,4 @@ export async function findDeploymentBlock(
  */
 export function resolveMultiTokenPool(chain: EVMChain, address: string) {
   return resolveMultiTokenPoolContract(chain, address, MULTI_TOKEN_POOL_TYPES)
-}
-
-/**
- * `address(0)` in an optional address field reads as `null`.
- * @internal
- */
-export function nullableAddress(value: string): string | null {
-  const a = getAddress(value)
-  return a === ZeroAddress ? null : a
 }

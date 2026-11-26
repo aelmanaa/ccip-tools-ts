@@ -29,9 +29,7 @@ describe('GetPoolConfigManagerState (cct/evm pool-config-manager)', () => {
         feePolicyStore: FPS,
         securityPolicyStore: SPS,
         defaultAdmin: OWNER,
-        pendingDefaultAdmin: null,
         defaultAdminDelay: 86_400,
-        pendingDefaultAdminDelay: null,
         defaultAdminDelayIncreaseWait: 432_000,
       },
     )

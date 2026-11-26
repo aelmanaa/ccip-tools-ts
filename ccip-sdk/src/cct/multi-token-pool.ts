@@ -263,6 +263,22 @@ export type MultiTokenPoolLaneFinding = {
   reason: string
 }
 
+/**
+ * Sorts findings in place, deterministically: errors first, then by check code, then by reason.
+ * Every finding list the MTTP reads and guards return goes through it.
+ * @internal
+ */
+export function sortFindings<
+  F extends { severity: 'error' | 'warning'; check: string; reason: string },
+>(findings: F[]): F[] {
+  return findings.sort(
+    (a, b) =>
+      (a.severity === b.severity ? 0 : a.severity === 'error' ? -1 : 1) ||
+      a.check.localeCompare(b.check) ||
+      a.reason.localeCompare(b.reason),
+  )
+}
+
 /** Tri-state fact: `'unknown'` is never treated as `'missing'`. */
 export type MultiTokenPoolFact = 'known' | 'missing' | 'unknown'
 

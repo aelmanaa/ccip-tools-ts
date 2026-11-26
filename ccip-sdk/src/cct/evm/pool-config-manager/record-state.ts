@@ -8,7 +8,11 @@
 import { ZeroAddress, getAddress, isError } from 'ethers'
 
 import type { EVMChain } from '../../../evm/index.ts'
-import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
+import {
+  LANE_RECORD_TYPES,
+  decodeLaneConnection,
+  isZeroHex,
+} from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
 import {
@@ -174,7 +178,9 @@ export async function readMultiTokenPoolRecordState(
   const flags = await readLaneBatches(
     chainList.map((remoteChainSelector) => ({ tokenAddress: ZeroAddress, remoteChainSelector })),
     async (chunk) =>
-      (await pcm.getLaneConnectionBatch(chunk.map(toAbiLaneKey), at)).map((c) => resultToObject(c)),
+      (await pcm.getLaneConnectionBatch(chunk.map(toAbiLaneKey), at)).map((c) =>
+        decodeLaneConnection(resultToObject(c), String),
+      ),
   )
 
   const state: MultiTokenPoolRecordState = {
@@ -232,7 +238,7 @@ export async function readProviderAnswers(
             q.remoteChainSelector,
             { blockTag },
           )
-          remoteToken = /^(0x)?0*$/.test(answer)
+          remoteToken = isZeroHex(answer)
             ? null
             : decodeRemoteAddress(answer, q.remoteChainSelector)
         } catch (err) {

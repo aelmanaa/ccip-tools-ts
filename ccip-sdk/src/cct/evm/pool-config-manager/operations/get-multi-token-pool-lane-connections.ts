@@ -5,6 +5,7 @@
  * @packageDocumentation
  */
 
+import { decodeLaneConnection } from '../../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../../evm/types.ts'
 import type { MultiTokenPoolRemotePool, PoolDataFormat } from '../../../multi-token-pool.ts'
 import { decodeRemoteAddress } from '../../../remote-address.ts'
@@ -45,8 +46,6 @@ export type MultiTokenPoolLaneConnection = {
   remotePools: MultiTokenPoolRemotePool[]
 }
 
-const isZero = (bytes: string) => /^(0x)?0*$/.test(bytes)
-
 /** Result of `multiTokenPoolLaneConnections`: one entry per lane, in input order, with its key. */
 export type GetMultiTokenPoolLaneConnectionsResult = (MultiTokenPoolLaneKey &
   MultiTokenPoolLaneConnection)[]
@@ -71,26 +70,10 @@ export class GetMultiTokenPoolLaneConnections extends LaneBatchQuery<
   ): Promise<MultiTokenPoolLaneConnection[]> {
     const connections = await pcm.getLaneConnectionBatch(lanes.map(toAbiLaneKey), { blockTag })
     return connections.map((raw, i) => {
-      const c = resultToObject(raw)
       const selector = lanes[i]!.remoteChainSelector
-      return {
-        hasConnection: c.hasConnection,
-        isOutboundPaused: c.isOutboundPaused,
-        isInboundPaused: c.isInboundPaused,
-        isGloballyPaused: c.isGloballyPaused,
-        isTokenOutboundPaused: c.isTokenOutboundPaused,
-        isTokenInboundPaused: c.isTokenInboundPaused,
-        isChainOutboundPaused: c.isChainOutboundPaused,
-        isChainInboundPaused: c.isChainInboundPaused,
-        poolDataFormat: c.useLegacyPoolDataOnSend ? 'legacy' : 'long',
-        remoteToken: isZero(c.remoteToken) ? null : decodeRemoteAddress(c.remoteToken, selector),
-        remotePools: c.remotePools
-          .filter((p: { remotePoolAddress: string }) => !isZero(p.remotePoolAddress))
-          .map((p: { remotePoolAddress: string; allowLegacyPoolDataOnReceive: boolean }) => ({
-            address: decodeRemoteAddress(p.remotePoolAddress, selector),
-            allowLegacyPoolData: p.allowLegacyPoolDataOnReceive,
-          })),
-      }
+      return decodeLaneConnection(resultToObject(raw), (bytes) =>
+        decodeRemoteAddress(bytes, selector),
+      )
     })
   }
 }

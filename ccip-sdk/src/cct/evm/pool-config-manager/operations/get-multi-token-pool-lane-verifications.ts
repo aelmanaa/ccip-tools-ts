@@ -8,7 +8,7 @@
 import { getAddress } from 'ethers'
 
 import { resultToObject } from '../../../../evm/types.ts'
-import { nullableAddress } from '../../multi-token-pool/contracts.ts'
+import { ANY_FINALITY_CONFIG, nullableAddress } from '../../multi-token-pool/contracts.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PoolConfigManagerReader,
@@ -30,9 +30,6 @@ export type MultiTokenPoolLaneVerification = {
   /** CCVs an inbound transfer needs. */
   inboundCCVs: string[]
 }
-
-/** The finality argument the view takes and ignores. */
-const IGNORED_FINALITY = '0x00000000'
 
 /** Result of `multiTokenPoolLaneVerifications`: one entry per lane, in input order, with its key. */
 export type GetMultiTokenPoolLaneVerificationsResult = (MultiTokenPoolLaneKey &
@@ -60,7 +57,7 @@ export class GetMultiTokenPoolLaneVerifications extends LaneBatchQuery<
     // positional: `resultToObject` on the whole multi-output Result would return a named object
     const [hooks, outbound, inbound] = await pcm.getLaneVerificationBatch(
       lanes.map(toAbiLaneKey),
-      IGNORED_FINALITY,
+      ANY_FINALITY_CONFIG,
       { blockTag },
     )
     for (const column of [hooks, outbound, inbound])

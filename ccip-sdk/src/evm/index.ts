@@ -185,7 +185,11 @@ import { type MessageV1TokenTransfer, encodeMessageV1 } from './messageCodec.ts'
 import type { CCIPMessage_V1_6_EVM, CleanAddressable } from './messages.ts'
 import {
   MULTI_TOKEN_POOL_LOCK_FLAVOR,
+  decodeLaneConnection,
+  decodePoolConfigManagerStaticConfig,
+  decodeTokenProfileFields,
   isMultiTokenPoolType,
+  isZeroHex,
   toMultiTokenLaneStatus,
 } from './multi-token-pool.ts'
 import {
@@ -1614,7 +1618,7 @@ export class EVMChain extends Chain<typeof ChainFamily.EVM> {
         this.provider,
       ) as unknown as TypedContract<typeof PoolConfigManager_2_1_ABI>
       const registry = await pcm.getStaticConfig().then(
-        ([tokenAdminRegistry]) => tokenAdminRegistry as string,
+        (config) => decodePoolConfigManagerStaticConfig(config).tokenAdminRegistry,
         (err) => {
           if (isError(err, 'CALL_EXCEPTION')) return undefined
           throw CCIPError.from(err)
@@ -2669,17 +2673,17 @@ export class EVMChain extends Chain<typeof ChainFamily.EVM> {
       opts?.token,
     )
     const token = getAddress(opts!.token!)
+    const profile = decodeTokenProfileFields(tokenConfig)
     const [router, typeAndVersion, stores, tokenTransferFeeConfig] = await Promise.all([
       pool.getRouter() as Promise<string>,
       this.typeAndVersion(tokenPool).then(([, , typeAndVersion]) => typeAndVersion),
       // best-effort: getStaticConfig is not part of IPoolConfigManager, so a PCM without it
       // stays readable, only without its stores; anything else (transport) propagates
       pcm.getStaticConfig().then(
-        ([, connectionStore, feeStore, securityStore]) => ({
-          connectionPolicyStore: connectionStore as string,
-          feePolicyStore: feeStore as string,
-          securityPolicyStore: securityStore as string,
-        }),
+        (config) => {
+          const { tokenAdminRegistry: _, ...stores } = decodePoolConfigManagerStaticConfig(config)
+          return stores
+        },
         (err) => {
           if (isError(err, 'CALL_EXCEPTION')) return undefined
           throw CCIPError.from(err)
@@ -2696,15 +2700,13 @@ export class EVMChain extends Chain<typeof ChainFamily.EVM> {
       token,
       router,
       typeAndVersion,
-      decimals: Number(tokenConfig.localDecimals),
+      decimals: profile.localDecimals,
       poolConfigManager,
       ...stores,
       // a token with the Lock flavor keeps its liquidity in its own lock box
-      ...(Number(tokenConfig.lockOrBurnFlavor) === MULTI_TOKEN_POOL_LOCK_FLAVOR &&
-        !tokenConfig.lockOrBurnAddress.match(/^(0x)?0*$/) && {
-          lockBox: tokenConfig.lockOrBurnAddress,
-        }),
-      ...decodeFinalityAllowed(tokenConfig.allowedFinalityConfig),
+      ...(profile.lockOrBurnFlavor === MULTI_TOKEN_POOL_LOCK_FLAVOR &&
+        profile.lockOrBurnAddress && { lockBox: profile.lockOrBurnAddress }),
+      ...profile.allowedFinality,
       ...(tokenTransferFeeConfig != null && { tokenTransferFeeConfig }),
     }
   }
@@ -3033,18 +3035,18 @@ export class EVMChain extends Chain<typeof ChainFamily.EVM> {
         if (
           !connection.hasConnection ||
           !connection.remoteToken ||
-          connection.remoteToken.match(/^(0x)?0*$/)
+          isZeroHex(connection.remoteToken)
         )
           throw new CCIPTokenPoolChainConfigNotFoundError(tokenPool, tokenPool, chain.name)
+        const decoded = decodeLaneConnection(connection, (bytes) =>
+          decodeAddress(bytes, chain.family),
+        )
         const levels = recordLevels.map((byType) => byType[i] ?? 0n)
         return [
           chain.name,
           {
-            remoteToken: decodeAddress(connection.remoteToken, chain.family),
-            remotePools: connection.remotePools
-              .map(({ remotePoolAddress }) => remotePoolAddress)
-              .filter((pool) => !pool.match(/^(0x)?0*$/))
-              .map((pool) => decodeAddress(pool, chain.family)),
+            remoteToken: decoded.remoteToken!,
+            remotePools: decoded.remotePools.map(({ address }) => address),
             outboundRateLimiterState: toRateLimiterState(buckets.outbound),
             inboundRateLimiterState: toRateLimiterState(buckets.inbound),
             fastOutboundRateLimiterState: toRateLimiterState(buckets.fastFinalityOutbound),

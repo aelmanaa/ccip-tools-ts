@@ -11,7 +11,7 @@
  */
 
 import type { TokenTransferFeeConfig } from '../../../chain.ts'
-import type { PoolDataFormat } from '../../multi-token-pool.ts'
+import type { MultiTokenPoolRemotePool, PoolDataFormat } from '../../multi-token-pool.ts'
 import type { RateLimitConfig } from '../token-pool/rate-limit.ts'
 import type { MultiTokenPoolLaneKey, PolicyName } from './contracts.ts'
 
@@ -41,16 +41,8 @@ export type ConnectionPolicyRecord = PolicyRecordKey & {
   onlySubsetTokens: boolean
 }
 
-/** One remote pool of an inline remote pool record. */
-export type InlineRemotePool = {
-  /** Remote pool in the remote chain's own format; an EVM pool is encoded as `abi.encode(pool)`. */
-  address: string
-  /**
-   * Accept 32-byte legacy pool data from it (F3; see `migrationWindowChains`). The contract field is
-   * `allowLegacyPoolDataOnReceive`; the SDK name matches the Solana pool group's.
-   */
-  allowLegacyPoolData: boolean
-}
+/** One remote pool of an inline remote pool record: the shared lane remote-pool shape. */
+export type InlineRemotePool = MultiTokenPoolRemotePool
 
 /** An inline remote pool record. A set replaces the whole record. */
 export type InlineRemotePoolConfig = MultiTokenPoolLaneKey & {

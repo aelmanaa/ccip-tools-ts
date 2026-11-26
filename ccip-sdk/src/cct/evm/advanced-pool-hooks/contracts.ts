@@ -28,7 +28,7 @@ import {
   resolveEncoder,
   resolveTokenPool,
 } from '../token-pool/contracts.ts'
-import { validateNonZeroAddress } from '../validate.ts'
+import { validateExactlyOneTarget } from '../validate.ts'
 
 /** The `typeAndVersion` contract type an `AdvancedPoolHooks` reports (`"AdvancedPoolHooks 2.0.0"`). */
 export const ADVANCED_POOL_HOOKS_TYPE = 'AdvancedPoolHooks'
@@ -325,16 +325,7 @@ export function validateAdvancedPoolHooksTarget(
   operation: string,
   target: AdvancedPoolHooksTarget,
 ): void {
-  // Value semantics: an explicit `undefined` does not count as provided.
-  const hasHooks = target.advancedPoolHooks !== undefined
-  if (hasHooks === (target.poolAddress !== undefined))
-    throw new CCTParamsInvalidError(
-      operation,
-      'poolAddress',
-      'provide exactly one of poolAddress or advancedPoolHooks',
-    )
-  if (hasHooks) validateNonZeroAddress(operation, 'advancedPoolHooks', target.advancedPoolHooks)
-  else validateNonZeroAddress(operation, 'poolAddress', target.poolAddress)
+  validateExactlyOneTarget(operation, target, 'poolAddress', 'advancedPoolHooks')
 }
 
 /**

@@ -8,6 +8,7 @@
 import { getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
+import { decodeRemotePools } from '../../../evm/multi-token-pool.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
 import { nullableAddress } from '../multi-token-pool/contracts.ts'
 import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
@@ -115,10 +116,9 @@ export function decodeInlineRemotePoolConfig(c: {
     ...key,
     trustPolicyRemotePools: c.trustPolicyRemotePools,
     poolDataFormat: c.remotePoolConfig.useLegacyPoolDataOnSend ? 'legacy' : 'long',
-    remotePools: c.remotePoolConfig.remotePools.map((p) => ({
-      address: decodeRemoteAddress(p.remotePoolAddress, key.remoteChainSelector),
-      allowLegacyPoolData: p.allowLegacyPoolDataOnReceive,
-    })),
+    remotePools: decodeRemotePools(c.remotePoolConfig.remotePools, (bytes) =>
+      decodeRemoteAddress(bytes, key.remoteChainSelector),
+    ),
   }
 }
 

@@ -10,10 +10,9 @@ import { getAddress } from 'ethers'
 import type { LaneRecordType } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
 import { poolConfigManagerContract } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
-import { validateAddress, validateArray } from '../../validate.ts'
+import { validateAddress, validateArray, validateOneOf } from '../../validate.ts'
 import {
   type PoolConfigManagerTarget,
   resolvePoolConfigManagerTarget,
@@ -71,14 +70,9 @@ export class GetMultiTokenPoolInlineConfigs extends EVMQuery<
     validateAddress(this.name, 'tokenAddress', params.tokenAddress)
     if (params.types !== undefined) {
       validateArray(this.name, 'types', params.types, 1)
-      Array.from(params.types, (t, i) => {
-        if (!LANE_RECORD_TYPES.some((k) => k === t))
-          throw new CCTParamsInvalidError(
-            this.name,
-            `types[${i}]`,
-            `must be one of ${LANE_RECORD_TYPES.join(', ')}`,
-          )
-      })
+      Array.from(params.types, (t, i) =>
+        validateOneOf(this.name, `types[${i}]`, t, LANE_RECORD_TYPES),
+      )
     }
     return params
   }

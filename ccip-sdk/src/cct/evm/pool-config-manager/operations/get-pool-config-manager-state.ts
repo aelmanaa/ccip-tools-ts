@@ -4,7 +4,7 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
+import { ZeroAddress, getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { resultToObject } from '../../../../evm/types.ts'
@@ -13,6 +13,7 @@ import {
   poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
+import type { PendingTokenDefaultAdmin } from '../../token/operations/get-token-default-admin.ts'
 import {
   type PoolConfigManagerTarget,
   readPoolConfigManagerStaticConfig,
@@ -38,22 +39,20 @@ export type GetPoolConfigManagerStateResult = {
   securityPolicyStore: string
   /** Holder of `DEFAULT_ADMIN_ROLE`. */
   defaultAdmin: string
-  /** A scheduled default-admin transfer, or `null`. */
-  pendingDefaultAdmin: {
-    /** The new admin. */
-    newAdmin: string
-    /** Unix seconds from which it can accept. */
-    schedule: bigint
-  } | null
+  /**
+   * A scheduled default-admin transfer, present only when one is pending (as
+   * `getTokenDefaultAdmin`): test with `'pendingDefaultAdmin' in result`.
+   */
+  pendingDefaultAdmin?: PendingTokenDefaultAdmin
   /** Seconds a default-admin transfer waits; `0` makes PCM governance changes instant (F8). */
   defaultAdminDelay: number
-  /** A scheduled delay change, or `null`. */
-  pendingDefaultAdminDelay: {
+  /** A scheduled delay change, present only when one is pending. */
+  pendingDefaultAdminDelay?: {
     /** The new delay, in seconds. */
     newDelay: number
     /** Unix seconds from which it applies. */
     schedule: bigint
-  } | null
+  }
   /** Seconds a delay increase waits before it applies. */
   defaultAdminDelayIncreaseWait: number
 }
@@ -101,14 +100,18 @@ export class GetPoolConfigManagerState extends EVMQuery<
       typeAndVersion,
       ...staticConfig,
       defaultAdmin: getAddress(resultToObject(admin)),
-      // OpenZeppelin AccessControlDefaultAdminRules: schedule 0 means nothing is pending
-      pendingDefaultAdmin: BigInt(adminSchedule)
-        ? { newAdmin: getAddress(resultToObject(newAdmin)), schedule: BigInt(adminSchedule) }
-        : null,
+      // OpenZeppelin AccessControlDefaultAdminRules resets both fields together; the token read
+      // (`getTokenDefaultAdmin`) tests `newAdmin`, so this does too
+      ...(getAddress(resultToObject(newAdmin)) !== ZeroAddress && {
+        pendingDefaultAdmin: {
+          newAdmin: getAddress(resultToObject(newAdmin)),
+          schedule: BigInt(adminSchedule),
+        },
+      }),
       defaultAdminDelay: Number(delay),
-      pendingDefaultAdminDelay: BigInt(delaySchedule)
-        ? { newDelay: Number(newDelay), schedule: BigInt(delaySchedule) }
-        : null,
+      ...(BigInt(delaySchedule) !== 0n && {
+        pendingDefaultAdminDelay: { newDelay: Number(newDelay), schedule: BigInt(delaySchedule) },
+      }),
       defaultAdminDelayIncreaseWait: Number(wait),
     }
   }

@@ -13,6 +13,7 @@ import { CCTParamsInvalidError } from '../../../errors.ts'
 import { decodeRemoteAddress } from '../../../remote-address.ts'
 import {
   type MultiTokenPoolProviderType,
+  ANY_FINALITY_CONFIG,
   MULTI_TOKEN_POOL_PROVIDER_TYPES,
   MultiTokenPoolVersion,
   assertMultiTokenPoolAuxContract,
@@ -52,9 +53,6 @@ const UID_PROVIDER_INTERFACE = getMultiTokenPoolInterface(
   'FactoryTokenWithUIDPoolDataProvider',
   MultiTokenPoolVersion.V2_1_0_DEV,
 )
-
-/** Finality and extra args the UID provider takes and ignores for the UID. */
-const ANY_FINALITY = '0x00000000'
 
 /**
  * Reads a provider.
@@ -108,7 +106,7 @@ export class GetMultiTokenPoolProvider extends EVMQuery<
         await c.getAdditionalPoolData(
           getAddress(tokenAddress),
           remoteChainSelector ?? 0n,
-          ANY_FINALITY,
+          ANY_FINALITY_CONFIG,
           '0x',
         ),
       )
