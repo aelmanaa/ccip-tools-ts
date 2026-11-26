@@ -19,7 +19,12 @@ import {
   type TokenOnboardingPlan,
   OnboardToken,
 } from './onboarding/onboard-token.ts'
-import { type SerializedSolanaTxEncoding, serializeUnsignedSolanaTx } from './serialize.ts'
+import {
+  type SerializeUnsignedTxOptions,
+  type SerializedSolanaTxEncoding,
+  type SolanaDurableNonce,
+  serializeUnsignedSolanaTx,
+} from './serialize.ts'
 import {
   type ExecuteAcceptAdminParams,
   type ExecuteAcceptAdminResult,
@@ -3146,10 +3151,24 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   }
 
   /**
-   * Serializes an unsigned Solana CCT tx for external signing.
+   * Serializes an unsigned Solana CCT tx for external signing (e.g. a Squads proposal or a
+   * hardware wallet).
    *
-   * @throws {@link CCTParamsInvalidError} If `encoding` is unsupported or the transaction uses
-   * address lookup tables, which legacy-message serialization cannot represent.
+   * @remarks The message is legacy, or v0 when the transaction carries `lookupTables`; tell them
+   * apart by the first byte, whose high bit (`0x80`) is set only on a v0 message. A transaction
+   * built on a durable nonce carries `durableNonce` (set by the CCT builders that take nonces) and
+   * needs the nonce's current value as `nonce`, which becomes the message's blockhash; the
+   * `AdvanceNonceAccount` instruction is the builder's, and is never added here. Every
+   * positional-encoding call keeps working.
+   *
+   * @param unsigned - The unsigned transaction, as a `generateUnsigned*` builder returned it.
+   * @param payer - The fee payer (e.g. the Squads vault).
+   * @param encodingOrOpts - An encoding (`'base58'` by default), or {@link SerializeUnsignedTxOptions}.
+   * @returns The encoded legacy or v0 message.
+   * @throws {@link CCTParamsInvalidError} If the encoding is unsupported; the transaction has a
+   * durable nonce and no valid `nonce` value, or does not start by advancing that nonce; it starts
+   * with `AdvanceNonceAccount` but carries no `durableNonce`; or a `nonce` is given for a
+   * transaction without one.
    *
    * @example
    * ```ts
@@ -3157,14 +3176,19 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * const unsigned = await cct.generateUnsignedSetPool({ ...params, payer })
    * const base58 = await cct.serializeUnsignedTx(unsigned, payer)
    * const base64 = await cct.serializeUnsignedTx(unsigned, payer, 'base64')
+   * // a transaction built on a durable nonce: pass the nonce's current value
+   * const { nonce } = (await connection.getNonce(new PublicKey(tx.durableNonce.nonceAccount)))!
+   * const onNonce = await cct.serializeUnsignedTx(tx, payer, { encoding: 'base64', nonce })
    * ```
    */
   serializeUnsignedTx(
-    unsigned: Pick<UnsignedSolanaTx, 'instructions' | 'lookupTables'>,
+    unsigned: Pick<UnsignedSolanaTx, 'instructions' | 'lookupTables'> & {
+      durableNonce?: SolanaDurableNonce
+    },
     payer: string,
-    encoding?: SerializedSolanaTxEncoding,
+    encodingOrOpts?: SerializedSolanaTxEncoding | SerializeUnsignedTxOptions,
   ): Promise<string> {
-    return serializeUnsignedSolanaTx(this.provider, unsigned, payer, encoding)
+    return serializeUnsignedSolanaTx(this.provider, unsigned, payer, encodingOrOpts)
   }
 }
 
@@ -3179,7 +3203,11 @@ export {
 export { TOKEN_AUTHORITY_TYPES } from './token/constants.ts'
 export { DEFAULT_WRITABLE_INDEXES, REGISTRATION_METHODS } from './token-admin-registry/constants.ts'
 export type { TransactionResult } from '../operation.ts'
-export type { SerializedSolanaTxEncoding } from './serialize.ts'
+export type {
+  SerializeUnsignedTxOptions,
+  SerializedSolanaTxEncoding,
+  SolanaDurableNonce,
+} from './serialize.ts'
 export type * from './token/operations/index.ts'
 export type * from './token-pool/operations/index.ts'
 export type * from './token-admin-registry/operations/index.ts'

@@ -99,7 +99,14 @@ const base64 = await cct.serializeUnsignedTx(unsigned, payer.toBase58(), 'base64
 // Send `base64` to the external signer for deserialization and submission.
 ```
 
-`serializeUnsignedTx` always produces a legacy message, regardless of encoding. It cannot serialize transactions that use address lookup tables. Serialize those versioned transactions in the wallet or multisig instead.
+`serializeUnsignedTx` produces a legacy message, or a v0 message when the transaction carries `lookupTables` (a v0 message's first byte has its high bit, `0x80`, set). The third argument is an encoding or an options object, `{ encoding, nonce }`.
+
+A transaction built on a durable nonce carries a `durableNonce` field. Pass the nonce's current value as `nonce`; it becomes the message's blockhash, so the signed transaction does not expire while a multisig approves it:
+
+```typescript
+const { nonce } = (await connection.getNonce(new PublicKey(tx.durableNonce.nonceAccount)))!
+const base64 = await cct.serializeUnsignedTx(tx, payer.toBase58(), { encoding: 'base64', nonce })
+```
 
 ## Configure token administration
 

@@ -140,7 +140,7 @@ for (;;) {
   console.log('next step:', step.name, step.remoteChainSelectors ?? '')
   for (const tx of transactions) {
     // tx.instructions can go straight into a Squads vault transaction;
-    // serializeUnsignedTx gives a legacy message for tools that import one
+    // serializeUnsignedTx gives a legacy message, or v0 when tx.lookupTables is set
     const message = await cct.serializeUnsignedTx(tx, payer)
     if (step.name === 'createLookupTable') await signWithHotWalletAndSend(message)
     else await proposeAndWaitForExecution(message) // your Squads integration
