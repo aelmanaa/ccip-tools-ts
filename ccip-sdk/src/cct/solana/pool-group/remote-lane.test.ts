@@ -29,6 +29,7 @@ import {
   poolGroupsCoder,
 } from './accounts.ts'
 import { readSolanaRemoteLaneFacts, readSolanaRemotePoolFacts } from './remote-lane.ts'
+import { KNOWN_SOLANA_ROUTERS } from './routers.ts'
 
 const SEPOLIA = networkInfo('ethereum-testnet-sepolia').chainSelector
 const PROGRAM = Keypair.generate().publicKey
@@ -219,7 +220,7 @@ type TypeAndVersion = () => Promise<[string, string, string]>
 
 function chainWith(
   accounts: Accounts,
-  opts: { failOn?: PublicKey; typeAndVersion?: TypeAndVersion } = {},
+  opts: { failOn?: PublicKey; typeAndVersion?: TypeAndVersion; network?: string } = {},
 ): SolanaChain {
   const get = (key: PublicKey) => {
     if (opts.failOn?.equals(key)) throw new Error('fetch failed: 503')
@@ -231,7 +232,9 @@ function chainWith(
     getMultipleAccountsInfo: async (keys: PublicKey[]) => keys.map(get),
     getSignaturesForAddress: async () => [],
   } as unknown as Connection
-  const chain = new SolanaChain(connection, networkInfo('solana-devnet'), { apiClient: null })
+  const chain = new SolanaChain(connection, networkInfo(opts.network ?? 'solana-devnet'), {
+    apiClient: null,
+  })
   const routerType: TypeAndVersion = async () => ['CCIPRouter', '2.0.0', 'ccip-router 2.0.0']
   Object.assign(chain, { typeAndVersion: opts.typeAndVersion ?? routerType })
   return chain
@@ -281,7 +284,7 @@ async function known(accounts: Accounts, q: Query = query()) {
 async function unknownReason(
   accounts: Accounts,
   q: Query = query(),
-  chainOpts: { typeAndVersion?: TypeAndVersion } = {},
+  chainOpts: { typeAndVersion?: TypeAndVersion; network?: string } = {},
 ) {
   const facts = await readSolanaRemoteLaneFacts(chainWith(accounts, chainOpts), q)
   assert.equal(facts.status, 'unknown')
@@ -594,40 +597,73 @@ describe('readSolanaRemoteLaneFacts', () => {
     const fakeState = deriveTokenPoolConfigPda(OTHER_PROGRAM, MINT)
     const forged = lane({ extra: [[fakeState, stateData(MINT, fakeRouter), OTHER_PROGRAM]] })
     const q = { ...query(), trustedPools: [fakeState.toBase58()] }
+    // the caller's `router` overrides the table
     assert.match(await unknownReason(forged, q), /is not the CCIP Router/)
-    // without a known Router, its type_version decides
+    // without it, the cluster's known Router (Devnet's is in the table)
     const { router: _, ...noRouter } = q
+    assert.match(await unknownReason(forged, noRouter), /is not the CCIP Router \(Ccip842/)
+    // an unset (default) router fails the same way
+    const unset = lane({ extra: [[fakeState, stateData(MINT, PublicKey.default), OTHER_PROGRAM]] })
+    await unknownReason(unset, q)
+    await unknownReason(unset, noRouter)
+  })
+
+  it("verifies the Router against the cluster's table, the caller's override, or not at all", async () => {
+    const ccip = new PublicKey(
+      KNOWN_SOLANA_ROUTERS.get(networkInfo('solana-devnet').chainSelector)![0]!,
+    )
+    const viaTable = new Map([[STATE.toBase58(), { data: stateData(MINT, ccip), owner: PROGRAM }]])
+    const { router: _, ...noRouter } = query()
+    const matched = await known(viaTable, noRouter)
+    assert.equal(matched.routerVerified, true)
+    assert.equal(matched.registryPool, null) // the registry has no entry for the mint
+    // the override: ROUTER is in no table, yet given, it verifies
+    assert.equal((await known(lane({ cc: chainConfigData() }))).routerVerified, true)
+    // a cluster with no known Router: the type_version fallback, never verified
+    const testnet = { network: 'solana-testnet' }
+    const fallback = await readSolanaRemoteLaneFacts(
+      chainWith(lane({ cc: chainConfigData() }), testnet),
+      noRouter,
+    )
+    assert.equal(fallback.status === 'known' && fallback.routerVerified, false)
+    const fakeState = deriveTokenPoolConfigPda(OTHER_PROGRAM, MINT)
+    const forged = lane({
+      extra: [[fakeState, stateData(MINT, Keypair.generate().publicKey), OTHER_PROGRAM]],
+    })
+    const forgedQuery = { ...noRouter, trustedPools: [fakeState.toBase58()] }
     const typed =
       (type: string): TypeAndVersion =>
       async () => [type, '2.0.0', `${type} 2.0.0`]
+    // a forged Router that claims to be one passes the fallback, unverified
+    const claimed = await readSolanaRemoteLaneFacts(
+      chainWith(forged, { ...testnet, typeAndVersion: typed('CCIPRouter') }),
+      forgedQuery,
+    )
+    assert.equal(claimed.status === 'known' && claimed.routerVerified, false)
     assert.match(
-      await unknownReason(forged, noRouter, { typeAndVersion: typed('burnmintTokenPool') }),
+      await unknownReason(forged, forgedQuery, {
+        ...testnet,
+        typeAndVersion: typed('burnmintTokenPool'),
+      }),
       /not a Router/,
     )
     const invalid: TypeAndVersion = async () => {
       throw new CCIPTypeVersionInvalidError('garbage')
     }
     assert.match(
-      await unknownReason(forged, noRouter, { typeAndVersion: invalid }),
+      await unknownReason(forged, forgedQuery, { ...testnet, typeAndVersion: invalid }),
       /is not a CCIP Router/,
     )
     const down: TypeAndVersion = async () => {
       throw new Error('fetch failed: 503')
     }
     await assert.rejects(
-      readSolanaRemoteLaneFacts(chainWith(forged, { typeAndVersion: down }), noRouter),
+      readSolanaRemoteLaneFacts(
+        chainWith(forged, { ...testnet, typeAndVersion: down }),
+        forgedQuery,
+      ),
       /503/,
     )
-    // an unset (default) router fails the same way
-    const unset = lane({ extra: [[fakeState, stateData(MINT, PublicKey.default), OTHER_PROGRAM]] })
-    await unknownReason(unset, q)
-    // a real Router reached without `router`: read, but not verified
-    const fallback = await known(lane({ cc: chainConfigData() }), {
-      ...noRouter,
-      trustedPools: [STATE.toBase58()],
-    })
-    assert.equal(fallback.laneKind, 'standard')
-    assert.equal(fallback.routerVerified, false)
   })
 
   it('reads the registry pool when it differs from the trusted pool, and checks it', async () => {

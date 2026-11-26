@@ -4,7 +4,7 @@
  * of that pool's lane back toward the EVM chain, and what that lane trusts and allows.
  *
  * Loaded lazily by the EVM guard, only for a Solana remote, so `cct/evm` takes no static Solana
- * import. Reads accounts only, plus the Router's `type_version` when no Router is given.
+ * import. Reads accounts only, plus the Router's `type_version` on a cluster with no known Router.
  *
  * @packageDocumentation
  */
@@ -46,6 +46,7 @@ import {
   tryDecode,
   unknown,
 } from './lane.ts'
+import { KNOWN_SOLANA_ROUTERS } from './routers.ts'
 
 /** What the EVM guard asks about one EVM → Solana lane. @internal */
 export type SolanaRemoteLaneQuery = {
@@ -56,8 +57,9 @@ export type SolanaRemoteLaneQuery = {
   /** The pool `State` PDAs the EVM lane trusts (base58); the first one names the Router. */
   trustedPools: readonly string[]
   /**
-   * The CCIP Router of the Solana chain, when the caller knows it: the trusted pool's Router must
-   * be this one. Without it, the trusted pool's Router must report a `Router` `type_version`.
+   * The CCIP Router of the Solana chain: the trusted pool's Router must be this one. It overrides
+   * the cluster's known Routers ({@link KNOWN_SOLANA_ROUTERS}); on a cluster with none and without
+   * it, the trusted pool's Router must report a `Router` `type_version` (not verified).
    */
   router?: string
   /** Also read the lane back's outbound bucket (for the lane check). */
@@ -127,8 +129,9 @@ export type SolanaRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   /** The pool `State` the Router's registry names for the mint, or `null` when it names none. */
   registryPool: string | null
   /**
-   * `true` only when the caller passed `router` and the trusted pool's Router matched it. With the
-   * `type_version` fallback it is `false`: any program can answer that it is a Router.
+   * `true` when the trusted pool's Router matched the caller's `router` or the cluster's known
+   * Router. With the `type_version` fallback it is `false`: any program can answer that it is a
+   * Router.
    */
   routerVerified: boolean
   /** The program owning `registryPool`. */
@@ -198,16 +201,25 @@ function poolState(
 const notRouter = (err: unknown) =>
   isSimulationFailure(err) || (err instanceof CCIPError && !err.isTransient)
 
-/** Checks the trusted pool's Router: the given one, else whatever reports a Router `type_version`. */
+/**
+ * Checks the trusted pool's Router against the given one, else the cluster's known Routers
+ * ({@link KNOWN_SOLANA_ROUTERS}); on a cluster with none, it must report a Router `type_version`.
+ * @returns Whether the Router was verified (matched a given or known one), or why it is refused.
+ */
 async function checkRouter(
   solana: SolanaChain,
   router: PublicKey,
-  expected: string | undefined,
-): Promise<Unread | undefined> {
-  if (expected !== undefined)
-    return router.toBase58() === expected
-      ? undefined
-      : unknown(`the trusted pool's Router ${router.toBase58()} is not the CCIP Router ${expected}`)
+  given: string | undefined,
+): Promise<boolean | Unread> {
+  const expected =
+    given !== undefined ? [given] : KNOWN_SOLANA_ROUTERS.get(solana.network.chainSelector)
+  if (expected)
+    return (
+      expected.includes(router.toBase58()) ||
+      unknown(
+        `the trusted pool's Router ${router.toBase58()} is not the CCIP Router (${expected.join(', ')})`,
+      )
+    )
   try {
     const [type] = await solana.typeAndVersion(router.toBase58())
     if (!type.includes('Router'))
@@ -217,6 +229,7 @@ async function checkRouter(
       return unknown(`the trusted pool's Router ${router.toBase58()} is not a CCIP Router`)
     throw err
   }
+  return false
 }
 
 /** The registry entry of `mint`: its pool and interface, with transport errors propagating. */
@@ -325,11 +338,10 @@ async function readFromTrusted(
   mint: PublicKey,
   trusted: PoolState,
 ): Promise<SolanaRemoteLaneFacts> {
-  const routerCheck = await checkRouter(solana, trusted.state.router, query.router)
-  if (routerCheck) return routerCheck
+  const routerVerified = await checkRouter(solana, trusted.state.router, query.router)
+  if (isUnread(routerVerified)) return routerVerified
   const registry = await readRegistry(solana, trusted.state.router, mint)
   if (isUnread(registry)) return registry
-  const routerVerified = query.router !== undefined
   if (!registry.registryPool)
     return {
       status: 'known',
