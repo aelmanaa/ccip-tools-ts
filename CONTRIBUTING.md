@@ -13,7 +13,7 @@ For project overview and architecture, see the [documentation](docs/index.md).
 npm ci           # Install dependencies
 npm run test:unit  # Unit tests only (no network access; integration/e2e/fork excluded)
 npm test         # Run all tests (unit + integration + e2e + fork)
-npm run check   # Lint + typecheck
+npm run check   # Lint + typecheck + CCT docs gate
 ```
 
 ## Quality Gates
@@ -23,6 +23,7 @@ Run before submitting a PR:
 ```bash
 npm run lint        # Oxfmt + Oxlint
 npm run typecheck   # TypeScript validation
+npm run lint:docs:cct  # Undocumented public CCT symbols (also in npm run check)
 npm run test:unit   # Unit tests only with coverage
 npm run test        # All tests with coverage
 npm run build       # Full build
@@ -420,6 +421,14 @@ const chain = await EVMChain.fromUrl(rpcUrl, { apiClient: null });
  */
 async getLaneLatency(destChainSelector: bigint): Promise<LaneLatencyResponse>
 ````
+
+`npm run check` includes `npm run lint:docs:cct`, a TypeDoc pass over the CCT entry points
+(`cct/evm`, `cct/solana`; `cct/canton` is not gated yet) that fails on any public symbol without
+documentation. It takes up to about two minutes. Symbols that were undocumented when the gate was
+added are listed in `scripts/lint-docs-cct.baseline.txt`, and the list only shrinks: a new
+undocumented symbol fails the gate, and so does a listed symbol that is now documented. After
+documenting one, run `npm run lint:docs:cct -- --prune`, which removes documented entries and never
+adds new ones.
 
 ### Type Definition Patterns
 

@@ -5,9 +5,11 @@
  * @packageDocumentation
  */
 
+import type { PublicKey } from '@solana/web3.js'
+
 import { CCIPWalletInvalidError } from '../../errors/index.ts'
 import type { SolanaChain } from '../../solana/index.ts'
-import { type UnsignedSolanaTx, isWallet } from '../../solana/types.ts'
+import { type UnsignedSolanaTx, type Wallet, isWallet } from '../../solana/types.ts'
 import type { SolanaSplitMode } from '../../solana/utils.ts'
 import { type TransactionResult, Operation } from '../operation.ts'
 import { submit } from './submit.ts'
@@ -57,7 +59,19 @@ export abstract class SolanaOperation<
   }
 
   /** Validates the wallet and prepares signed execution parameters with it as payer. */
-  protected prepareWalletExecution(chain: SolanaChain, params: SolanaExecuteParams<P>) {
+  protected prepareWalletExecution(
+    chain: SolanaChain,
+    params: SolanaExecuteParams<P>,
+  ): {
+    /** The validated signing wallet. */
+    wallet: Wallet
+    /** The wallet's public key, used as payer. */
+    payer: PublicKey
+    /** Compute-unit limit for the main transaction, when the caller set one. */
+    computeUnits: number | undefined
+    /** The prepared params, with the wallet as payer. */
+    parsed: Parsed
+  } {
     refreshAccountState(chain)
     const { wallet, computeUnits, ...rest } = params
     if (!isWallet(wallet)) throw new CCIPWalletInvalidError(wallet)

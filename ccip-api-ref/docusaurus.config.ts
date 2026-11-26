@@ -5,6 +5,7 @@ import { themes as prismThemes } from 'prism-react-renderer'
 
 import cliPackageJson from '../ccip-cli/package.json'
 import sdkPackageJson from '../ccip-sdk/package.json'
+import { SDK_TYPEDOC_ENTRY_POINTS, SDK_TYPEDOC_OPTIONS } from './typedoc.shared.mjs'
 
 // Type-safe package.json imports
 interface PackageJson {
@@ -147,15 +148,9 @@ const config: Config = {
       'docusaurus-plugin-typedoc',
       {
         id: 'typedoc-sdk',
-        entryPoints: [
-          '../ccip-sdk/src/index.ts',
-          '../ccip-sdk/src/viem.ts',
-          '../ccip-sdk/src/all-chains.ts',
-          '../ccip-sdk/src/cct/evm/index.ts',
-          '../ccip-sdk/src/cct/solana/index.ts',
-          '../ccip-sdk/src/cct/canton/index.ts',
-        ],
-        tsconfig: '../ccip-sdk/tsconfig.json',
+        // shared with the CCT documentation gate (scripts/lint-docs-cct.mjs)
+        ...SDK_TYPEDOC_OPTIONS,
+        entryPoints: SDK_TYPEDOC_ENTRY_POINTS,
         out: 'docs-sdk',
         // Merge every entry point into one flat namespace so the subpath exports
         // (viem, all-chains) are documented alongside the root export
@@ -167,9 +162,6 @@ const config: Config = {
         sidebar: {
           autoConfiguration: false,
         },
-        excludePrivate: true,
-        excludeInternal: true,
-        excludeExternals: true,
         readme: 'none',
         // Preserve manual files like introduction.mdx when regenerating
         cleanOutputDir: false,
