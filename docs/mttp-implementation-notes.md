@@ -105,9 +105,12 @@ introduced each issue, adding about 1,000 lines net (mostly shared helpers and r
 
 ### Existing duplication noticed, not fixed (refactor opportunities)
 
-- **`TokenTransferFeeConfig` decoding has 3 copies in core** (the chain-level pool reads in
-  `evm/index.ts`) plus the CCT one now exported as `toTokenTransferFeeConfig`. One shared decoder in
-  core would serve all four; core cannot import CCT, so it would have to live in core.
+- **`TokenTransferFeeConfig`: the v2 pool-ABI decode exists twice at 2e7b73a0** (core
+  `evm/index.ts:2679-2687` and CCT `token-pool/contracts.ts:807-815`, now `toTokenTransferFeeConfig`),
+  plus Solana's `ChainConfigV2` decode (`solana/index.ts:2271`). What core has **three times** is the
+  fee-tier bps selection (`chain.ts:1803`, `evm/index.ts:2041`, `solana/index.ts:1566`). The PCM
+  store's 4-field `FeeConfig` (`decodeFeeConfig`) is a different struct and cannot reuse
+  `toTokenTransferFeeConfig`.
 - **Transport errors vs "not a CCIP contract".** Main's `assertAdvancedPoolHooksContract`
   (`cct/evm/advanced-pool-hooks/contracts.ts:240`) wraps *any* `typeAndVersion` failure, including a
   timeout or 429, as `CCTContractTypeInvalidError(actual: 'unknown')`, and main has a test pinning that.
@@ -127,6 +130,25 @@ introduced each issue, adding about 1,000 lines net (mostly shared helpers and r
 - The "address reports no `typeAndVersion`" probe is written out per contract family (lockbox
   probes, `assertAdvancedPoolHooksContract`); MTTP adds `readContractType` in `cct/evm/query.ts`,
   which the others could adopt (see the transport-error note above).
+
+### E3a (projection) and the increment-2 DRY audit fixes
+
+| Need | Reused / extended | New, and why |
+| --- | --- | --- |
+| PCM view structs (`LaneConnection`, `getStaticConfig`, `TokenConfig` profile) | core's private decoders in `evm/index.ts` (`getMultiTokenPoolRemotes`, `getMultiTokenPoolConfig`, `getTokenAdminRegistryFor`) moved to core `evm/multi-token-pool.ts` | `decodeLaneConnection`, `decodeRemotePools`, `decodePoolConfigManagerStaticConfig`, `decodeTokenProfileFields`, `isZeroHex`, `nullableAddress`: one decoder per struct, the address decoder passed in; core still throws on a missing remote token and keeps its family decode, CCT keeps `null` and hex fallback. Main's 125 MTTP unit + 9 live tests unchanged and green (D7) |
+| Stored-record reads | the six policy ops' and the inline op's decode bodies | moved, unchanged, into `pool-config-manager/record-reads.ts` (`POLICY_RECORD_READERS`, `INLINE_RECORD_READERS`, `readSubsetTokens`); the ops and the state loader share them |
+| Lane resolution | — | `projection.ts`: pure; mirrors the three stores at c950d9bc; property-tested against a separately written reference resolver (300 seeds) and live-agreed with the PCM views on Sepolia (16 lanes, field by field, one block) |
+| Record state at one block | E2 readers + `readPagesAtBlock`, `readInBatches`, `readLaneBatches` | `record-state.ts`; provider answers read as `_tryGetPolicyRemoteToken` does |
+| Selector → family | `parseRemoteAddress`'s guard | `laneFamilyOf`, shared by parse and decode; main's messages unchanged (D10) |
+| Exactly-one target | `validateAdvancedPoolHooksTarget` | `validateExactlyOneTarget`; both validators are one-liners; main's 200 hooks tests unchanged (D12) |
+| owner / ERC-165 probe | vendored `BurnMintMultiTokenPool` ABI | `multiTokenPoolProbe`; the two hand-written fragments are gone (D14) |
+| Pending default admin | `getTokenDefaultAdmin`'s convention (omitted when none, `newAdmin` test) | PCM state now matches it (D9) |
+| Remote pool shape, batch size, finality word, "one of", finding sort | `MultiTokenPoolRemotePool`, `LANE_BATCH_SIZE` | `InlineRemotePool` is an alias; `ANY_FINALITY_CONFIG`, `validateOneOf`, `sortFindings` (D15-D18) |
+| Stub ABIs | — | kept as an independent oracle; a test pins all 48 fragments to the vendored ABIs and the role ids to the SDK's (D20) |
+
+Deferred to the rename batch (each would add a public name): D18's shared finding *type*, D19's
+shared direction type. D8 needs no MTTP change: its three inline finality checks are main's
+token-pool ops, and the only MTTP site already uses `validateFinalityRequested`.
 
 ## Design deviations and why
 
