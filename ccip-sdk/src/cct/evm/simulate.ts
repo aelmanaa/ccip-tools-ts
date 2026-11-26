@@ -18,6 +18,7 @@ import { CCTParamsInvalidError } from '../errors.ts'
 import USDC_TOKEN_POOL_V1_6_2_ABI from './artifacts/abi/V1_6_2/usdc-token-pool.ts'
 import USDC_TOKEN_POOL_CCTP_V2_V1_6_5_ABI from './artifacts/abi/V1_6_5/usdc-token-pool-cctp-v2.ts'
 import USDC_TOKEN_POOL_V1_6_5_ABI from './artifacts/abi/V1_6_5/usdc-token-pool.ts'
+import FACTORY_TOKEN_WITH_UID_POOL_DATA_PROVIDER_V2_1_0_DEV_ABI from './artifacts/abi/V2_1_0_DEV/factory-token-with-uid-pool-data-provider.ts'
 import { REGISTRY_MODULE_OWNER_CUSTOM_INTERFACES } from './token-admin-registry/contracts.ts'
 import { TOKEN_POOL_FACTORY_INTERFACE } from './token-pool-factory/contracts.ts'
 import { validateAddress } from './validate.ts'
@@ -27,15 +28,22 @@ const OPERATION = 'simulateEVMTx'
 /**
  * Vendored CCT contracts with errors core `parseWithFragment` doesn't know
  * (`InvalidLockBoxToken`, `CanOnlySelfRegister`, `RequiredRoleNotFound`, the legacy USDC pools'
- * CCTP errors, ...). Every other vendored CCT error decodes through core; `simulate.test.ts`
- * checks each one.
+ * CCTP errors, the multi-token pool UID provider's errors, ...). Every other vendored CCT error decodes through core; `simulate.test.ts`
+ * checks each one, and that every error listed here is one core does not decode.
+ * @internal
  */
-const CCT_ERROR_INTERFACES: readonly Interface[] = [
+export const CCT_ERROR_INTERFACES: readonly Interface[] = [
   TOKEN_POOL_FACTORY_INTERFACE,
   ...Object.values(REGISTRY_MODULE_OWNER_CUSTOM_INTERFACES),
   new Interface(USDC_TOKEN_POOL_V1_6_2_ABI),
   new Interface(USDC_TOKEN_POOL_V1_6_5_ABI),
   new Interface(USDC_TOKEN_POOL_CCTP_V2_V1_6_5_ABI),
+  // Multi-token pool stack (2.1.0-dev): core `parseWithFragment` already decodes the PCM, store, pool
+  // and hook errors (`PoolConfigManager_2_1`, `pool-errors.ts`, OZ `FailedCall`, `AuthorizedCallers`);
+  // only the UID provider's errors are missing there
+  new Interface(
+    FACTORY_TOKEN_WITH_UID_POOL_DATA_PROVIDER_V2_1_0_DEV_ABI.filter((f) => f.type === 'error'),
+  ),
 ]
 
 /** Options for {@link simulateEVMTx}. */

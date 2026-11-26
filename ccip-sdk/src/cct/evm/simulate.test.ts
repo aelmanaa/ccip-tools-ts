@@ -11,11 +11,12 @@ import {
   makeError,
 } from 'ethers'
 
+import { parseWithFragment } from '../../evm/errors.ts'
 import type { EVMChain } from '../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../evm/types.ts'
 import { ChainFamily } from '../../networks.ts'
 import { CCTParamsInvalidError } from '../errors.ts'
-import { simulateEVMTx } from './simulate.ts'
+import { CCT_ERROR_INTERFACES, simulateEVMTx } from './simulate.ts'
 
 const POOL = '0x' + '11'.repeat(20)
 const SENDER = '0x' + '22'.repeat(20)
@@ -94,6 +95,13 @@ describe('simulateEVMTx', () => {
       signature: 'error RequiredRoleNotFound(address msgSender, bytes32 role, address token)',
       args: [SENDER, ROLE, POOL],
       errorArgs: { msgSender: SENDER, role: ROLE, token: POOL },
+    },
+    // multi-token pool UID provider: the one MTTP contract whose errors core does not declare
+    {
+      contract: 'FactoryTokenWithUIDPoolDataProvider 2.1.0-dev',
+      signature: 'error TokenNotFromFactory(address localToken, bytes32 uid)',
+      args: [POOL, ROLE],
+      errorArgs: { localToken: POOL, uid: ROLE },
     },
   ]
   for (const { contract, signature, args, errorArgs } of testCases) {
@@ -235,5 +243,23 @@ describe('simulateEVMTx', () => {
         }
       }
     }
+  })
+
+  // Guards the fallback list: an entry core already decodes is dead weight in every bundle.
+  it('lists contracts that add errors core parseWithFragment does not decode', () => {
+    const coreMisses = (iface: Interface) => {
+      const missing: string[] = []
+      iface.forEachError(({ name, selector }) => {
+        if (!parseWithFragment(selector)) missing.push(name)
+      })
+      return missing
+    }
+    for (const iface of CCT_ERROR_INTERFACES) assert.ok(coreMisses(iface).length > 0)
+    // the multi-token pool entry is the UID provider, and adds only errors core lacks
+    const uid = CCT_ERROR_INTERFACES.at(-1)!
+    const all: string[] = []
+    uid.forEachError(({ name }) => all.push(name))
+    assert.deepEqual(all.sort(), ['InvalidTokenFactory', 'TokenNotFromFactory'])
+    assert.deepEqual(coreMisses(uid).sort(), all)
   })
 })
