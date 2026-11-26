@@ -165,6 +165,15 @@ export {
  */
 export const ANY_FINALITY_CONFIG = toBeHex(encodeFinality('finalized'), 4)
 
+/**
+ * Whether a `typeAndVersion` type names a multi-token *pool*, not one of its auxiliary contracts
+ * (`MultiTokenPoolHooks…` shares the name stem).
+ * @internal
+ */
+export function reportsMultiTokenPool(type: string): boolean {
+  return isMultiTokenPoolType(type) && /MultiTokenPool$/.test(type)
+}
+
 /** The op map's literal; exported as {@link MULTI_TOKEN_POOL_OPERATIONS}. */
 const OPERATIONS = {
   deployConnectionPolicyStore: { contracts: ['ConnectionPolicyStore'], function: 'constructor' },

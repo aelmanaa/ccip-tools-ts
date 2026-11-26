@@ -15,6 +15,7 @@ const BIG = 1234567890123456789n
 
 const fields = {
   observedAt: 123_456_789n,
+  operation: 'applyMultiTokenPoolInlineFeeConfigUpdates',
   expected: {
     'profile.lockOrBurnFlavor': 'burn',
     'buckets.outbound': { capacity: BIG, rate: 7n, enabled: true },
@@ -71,6 +72,18 @@ describe('snapshot serialization', () => {
       () => parseMultiTokenPoolSnapshot(json),
       (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'json.hash',
     )
+  })
+
+  it('binds the building op: the same state and calldata under another op is another snapshot', () => {
+    const a = sealMultiTokenPoolSnapshot(fields)
+    const b = sealMultiTokenPoolSnapshot({
+      ...fields,
+      operation: 'applyMultiTokenPoolFeePolicyConfigUpdates',
+    })
+    assert.notEqual(a.hash, b.hash)
+    // relabelling a stored snapshot for another op is an edit
+    const relabelled = serializeMultiTokenPoolSnapshot({ ...a, operation: b.operation })
+    assert.throws(() => parseMultiTokenPoolSnapshot(relabelled), CCTParamsInvalidError)
   })
 
   it('refuses text that is not a snapshot', () => {

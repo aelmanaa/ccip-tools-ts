@@ -5,10 +5,13 @@
  */
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { isMultiTokenPoolType } from '../../../../evm/multi-token-pool.ts'
 import { EVMQuery, isMissingFunction, isNotCcipContract } from '../../query.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
-import { I_MULTI_TOKEN_POOL_INTERFACE_ID, multiTokenPoolProbe } from '../contracts.ts'
+import {
+  I_MULTI_TOKEN_POOL_INTERFACE_ID,
+  multiTokenPoolProbe,
+  reportsMultiTokenPool,
+} from '../contracts.ts'
 
 /** Parameters for reads of one multi-token pool. */
 export type MultiTokenPoolReadParams = {
@@ -42,7 +45,7 @@ export class IsMultiTokenPool extends EVMQuery<MultiTokenPoolReadParams, boolean
     try {
       const [type] = await chain.typeAndVersion(poolAddress)
       // a pool, not its hook contracts (`MultiTokenPoolHooks…`), which share the name stem
-      return isMultiTokenPoolType(type) && /MultiTokenPool$/.test(type)
+      return reportsMultiTokenPool(type)
     } catch (err) {
       // no (parseable) typeAndVersion either: an EOA or a non-CCIP contract; transport errors propagate
       if (isNotCcipContract(err)) return false

@@ -53,6 +53,8 @@ export type SimulateEVMTxOptions = {
    * (for a multisig) can be checked against the eventual signer.
    */
   from?: string
+  /** Block to simulate at; defaults to the latest block. */
+  blockTag?: number
 }
 
 /** Result of {@link simulateEVMTx}, discriminated on `success`. */
@@ -178,7 +180,13 @@ export async function simulateEVMTx(
   validateAddress(OPERATION, 'from', from)
 
   try {
-    await chain.provider.call({ ...(to != null && { to }), data, from, value })
+    await chain.provider.call({
+      ...(to != null && { to }),
+      data,
+      from,
+      value,
+      ...(opts.blockTag !== undefined && { blockTag: opts.blockTag }),
+    })
     return { success: true }
   } catch (error) {
     const revertData = getErrorData(error)

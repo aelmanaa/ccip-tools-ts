@@ -68,6 +68,8 @@ export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   registryPool: string | null
   /** Whether that pool's lane back points at this token and trusts a local serving pool (F3). */
   mapsBack: boolean
+  /** Whether the remote token has code on the remote chain (read when the registry names no pool). */
+  remoteTokenHasCode?: boolean
   /** The attestation the F14 fact came from, for a family the SDK cannot read. */
   attestation?: MultiTokenPoolRemoteAttestation
 }>
@@ -88,7 +90,7 @@ export type MultiTokenPoolGuardFacts = {
   hookCallers: ReadonlyMap<string, readonly string[]>
   /** The pools that call this PCM (the target pool and every pool sharing it). */
   servingPools: readonly string[]
-  /** Bytes of the additional pool data each token's provider adds, for tokens with one. */
+  /** Bytes of additional pool data the token's provider adds, per lane key, for lanes with one. */
   additionalPoolDataBytes: ReadonlyMap<string, number>
 }
 
@@ -100,8 +102,8 @@ export type MultiTokenPoolGuardFactRequests = {
   remotePools: { remoteChainSelector: bigint; address: string }[]
   /** Hooks whose callers to read. */
   hooks: string[]
-  /** Tokens of open lanes: the reader reads the provider data length of those with a provider. */
-  providerTokens: string[]
+  /** Open lanes: the reader reads the provider data length of those whose token has a provider. */
+  providerLanes: MultiTokenPoolLaneKey[]
 }
 
 /** The lane key the facts maps use. @internal */
@@ -159,7 +161,8 @@ function canonicalEqual(a: unknown, b: unknown): boolean {
  * The lanes a write changes: every (token, chain) either state names whose projection differs
  * before and after, with both projections.
  *
- * @remarks Exact by construction: a policy record masked by an inline record changes no lane, and a
+ * @remarks Exact by construction: a policy record masked by an inline record changes no lane, a pair
+ * with no connection before or after is not a lane, and a
  * remote pool policy reaches the lanes whose inline record trusts policy pools. A chain-0 default
  * reaches every chain of the policy's tokens. Both states need provider answers for their
  * policy-resolved lanes.
@@ -172,7 +175,12 @@ export function multiTokenPoolAffectedLanes(
   const lanes = candidateLanes([before, after])
   const b = resolveMultiTokenPoolLanes(before, lanes)
   const a = resolveMultiTokenPoolLanes(after, lanes)
-  return lanes.flatMap((_, i) => (sameLane(b[i]!, a[i]!) ? [] : [{ before: b[i]!, after: a[i]! }]))
+  return lanes.flatMap((_, i) => {
+    const [x, y] = [b[i]!, a[i]!]
+    // a lane with no connection on either side is not a lane: its pause flags alone change nothing
+    if (!x.connection.hasConnection && !y.connection.hasConnection) return []
+    return sameLane(x, y) ? [] : [{ before: x, after: y }]
+  })
 }
 
 /**
@@ -202,12 +210,14 @@ export function requiredMultiTokenPoolGuardFacts(
           remoteChainSelector: l.remoteChainSelector,
           address: p.address,
         })
-  const tokens = new Set(open.map((l) => getAddress(l.tokenAddress)))
   return {
     remoteLanes: open,
     remotePools: [...pools.values()],
     hooks: [...new Set(open.flatMap((l) => (l.verification.hook ? [l.verification.hook] : [])))],
-    providerTokens: [...tokens],
+    providerLanes: open.map(({ tokenAddress, remoteChainSelector }) => ({
+      tokenAddress,
+      remoteChainSelector,
+    })),
   }
 }
 
@@ -309,7 +319,7 @@ export function evaluateMultiTokenPoolGuards({
     const fee = lane.tokenTransferFeeConfig
     if (fee.isEnabled) {
       // F12: pool data longer than destBytesOverhead reverts the send
-      const extra = facts.additionalPoolDataBytes.get(getAddress(lane.tokenAddress)) ?? 0
+      const extra = facts.additionalPoolDataBytes.get(guardLaneKey(key)) ?? 0
       const needed =
         c.poolDataFormat === 'legacy' ? LEGACY_POOL_DATA_BYTES : longPoolDataBytes(extra)
       if (fee.destBytesOverhead < needed)
@@ -429,27 +439,33 @@ export function evaluateMultiTokenPoolGuards({
         'warning',
         `the remote long-data fact comes from an attestation, not a read: ${remote.attestation.reason}`,
       )
-    if (
-      remote.registryPool !== null &&
-      !c.remotePools.some((p) => p.address === remote.registryPool)
-    )
+    // a token paused outbound whose remote registry names no pool yet may wait (spec:1354-1355);
+    // the unpause re-check runs with no exception
+    const waiting = c.isTokenOutboundPaused && remote.registryPool === null
+    if (remote.registryPool === null) {
+      if (!waiting)
+        add(
+          'NO_REMOTE_POOL',
+          'error',
+          `the remote registry names no pool for ${c.remoteToken}${remote.remoteTokenHasCode === false ? ', which has no code on the remote chain' : ''}: a send burns here and nothing releases it there; register the remote side first, or keep the token paused outbound`,
+          'connection',
+        )
+      continue
+    }
+    if (!c.remotePools.some((p) => p.address === remote.registryPool))
       add(
         'REMOTE_LANE_MISMATCH',
         'error',
         `the remote registry names pool ${remote.registryPool} for ${c.remoteToken}, which this lane does not trust: inbound messages from it revert`,
         'remotePool',
       )
-    if (c.poolDataFormat === 'long' && !remote.readsLongData) {
-      // spec:1354-1355: a token paused outbound whose remote registry names no pool yet may wait
-      const waiting = c.isTokenOutboundPaused && remote.registryPool === null
-      if (!waiting)
-        add(
-          'POOL_DATA_FORMAT_MISMATCH',
-          'error',
-          'the lane sends long pool data but the remote pool does not read it: the destination release reverts and the burned tokens are stuck',
-          'remotePool',
-        )
-    }
+    if (c.poolDataFormat === 'long' && !remote.readsLongData)
+      add(
+        'POOL_DATA_FORMAT_MISMATCH',
+        'error',
+        `the lane sends long pool data but remote pool ${remote.registryPool} reads only legacy data: the destination release reverts and the burned tokens are stuck`,
+        'remotePool',
+      )
     if (c.poolDataFormat === 'legacy' && !remote.mapsBack)
       add(
         'REMOTE_LANE_MISMATCH',

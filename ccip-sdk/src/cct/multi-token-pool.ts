@@ -365,6 +365,11 @@ export type MultiTokenPoolTransferQuote = {
 export type MultiTokenPoolSnapshot = {
   /** Block (EVM) or slot (Solana) the state was read at. */
   observedAt: bigint
+  /**
+   * The SDK op that built it (e.g. `applyMultiTokenPoolInlineFeeConfigUpdates`). Bound into `hash`, so
+   * an op refuses a snapshot another op built, not only one with other calldata.
+   */
+  operation: string
   /** Decoded values the write keeps, merges or replaces, by dotted path. */
   expected: Record<string, unknown>
   /** keccak256 of every input the write's guards read for the affected lanes. */
@@ -441,7 +446,7 @@ export function parseMultiTokenPoolSnapshot(json: string): MultiTokenPoolSnapsho
     throw new CCTParamsInvalidError(
       OPERATION,
       'json',
-      'is not a snapshot: needs bigint observedAt, object expected, and string guardInputsHash, calldataHash and hash',
+      'is not a snapshot: needs bigint observedAt, object expected, and string operation, guardInputsHash, calldataHash and hash',
     )
   if (snapshotHash(parsed) !== parsed.hash)
     throw new CCTParamsInvalidError(
@@ -459,6 +464,7 @@ function isSnapshotShape(value: unknown): value is MultiTokenPoolSnapshot {
   const v = value as Record<string, unknown>
   return (
     typeof v.observedAt === 'bigint' &&
+    typeof v.operation === 'string' &&
     v.expected !== null &&
     typeof v.expected === 'object' &&
     !Array.isArray(v.expected) &&

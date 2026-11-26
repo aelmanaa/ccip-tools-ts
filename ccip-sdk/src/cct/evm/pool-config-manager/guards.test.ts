@@ -251,7 +251,11 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     assert.deepEqual(judge(inlineLane(T1, { bytes: 191 })).errors, ['DEST_BYTES_OVERHEAD_TOO_LOW'])
     assert.deepEqual(judge(inlineLane(T1, { bytes: 192 })).errors, [])
     // a provider's additional data lengthens long pool data, padded to 32 bytes
-    const facts = goodFacts({ additionalPoolDataBytes: new Map([[T1, 32]]) })
+    const facts = goodFacts({
+      additionalPoolDataBytes: new Map([
+        [guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 }), 32],
+      ]),
+    })
     assert.deepEqual(judge(inlineLane(T1, { bytes: 192 }), { facts }).errors, [
       'DEST_BYTES_OVERHEAD_TOO_LOW',
     ])
@@ -359,8 +363,31 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       judge([...inlineLane(T1), chainPaused], {
         facts: facts({ readsLongData: false, registryPool: null }),
       }).errors,
-      ['POOL_DATA_FORMAT_MISMATCH'],
+      ['NO_REMOTE_POOL'],
     )
+  })
+
+  it('refuses a lane whose remote registry names no pool, long or legacy (EVM-2 fund loss)', () => {
+    const facts = goodFacts({
+      remoteLanes: new Map([
+        [
+          guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 }),
+          {
+            status: 'known',
+            readsLongData: false,
+            registryPool: null,
+            mapsBack: false,
+            remoteTokenHasCode: false,
+          },
+        ],
+      ]),
+    })
+    const long = judge(inlineLane(T1), { facts })
+    assert.deepEqual(long.errors, ['NO_REMOTE_POOL'])
+    assert.match(long.findings[0]!.reason, /has no code on the remote chain/)
+    assert.deepEqual(judge(inlineLane(T1, { format: 'legacy', bytes: 32 }), { facts }).errors, [
+      'NO_REMOTE_POOL',
+    ])
   })
 
   it('refuses a lane that does not trust the remote registry pool, or a legacy lane that does not map back', () => {
