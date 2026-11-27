@@ -1,13 +1,16 @@
 /**
  * The ready-step engine of the shared planners, family-neutral (it imports no family code): step
  * construction with `inputsHash`, the ready-step rule (`MultiTokenPoolPlanOptions`), pending and
- * stale proposals, actor resolution, the plan hash and the landed-pause unpause rule (A16).
+ * stale proposals, stable chunking, actor resolution, the plan hash and the run-scoped landed-pause
+ * unpause rule (A16).
  *
  * It lives under `cct/solana` until X1 moves it next to the shared planner types (the EVM planners
  * E10-E12 take it unchanged; see `mttp/tools/x1-shared-planner-types.diff`).
  *
  * @packageDocumentation
  */
+
+import { hexlify, randomBytes } from 'ethers'
 
 import { canonicalHash } from '../../../canonical.ts'
 import type {
@@ -161,30 +164,90 @@ export function resolveActor(
 }
 
 /**
- * The unpause rule (A16, OC2): a pause is lifted only when this run's own pause step for it landed
- * (`landed`: in memory on the signed path, `landedStepIds` on the unsigned one) or is still to land
- * in this plan (the unpause then depends on it). Chain state cannot tell this run's pause from
- * another's, so anything else fails closed with a block that names the pause step.
- * @returns `'lift'` (with the pause step to depend on when it is still planned), or the block.
+ * Chunks of `items` whose composition never depends on what remains (S6 review M1): `items` (the
+ * full input, in its caller-given order) is cut into chunks of `size`, each chunk keeps only the
+ * items still to do, and empty chunks are dropped. Each chunk is keyed by the first item of its
+ * full chunk, so a chunk's step id is the same in every plan: a partial landing never re-proposes a
+ * pending chunk under a new id, and a chunk whose items all landed leaves the plan.
+ * @returns the chunks to do, and the key of every item's chunk (done or not)
+ * @internal
+ */
+export function stableChunks<T>(
+  items: readonly T[],
+  size: number,
+  keep: (item: T) => boolean,
+  keyOf: (item: T) => string,
+): { chunks: { key: string; items: T[] }[]; chunkKeyOf: Map<T, string> } {
+  const chunks: { key: string; items: T[] }[] = []
+  const chunkKeyOf = new Map<T, string>()
+  for (let i = 0; i < items.length; i += size) {
+    const full = items.slice(i, i + size)
+    const key = keyOf(full[0]!)
+    for (const item of full) chunkKeyOf.set(item, key)
+    const left = full.filter(keep)
+    if (left.length) chunks.push({ key, items: left })
+  }
+  return { chunks, chunkKeyOf }
+}
+
+/** A new run id: 16 random hex characters (a pause step id carries it, S6 review M2). @internal */
+export function newRunId(): string {
+  return hexlify(randomBytes(8)).slice(2)
+}
+
+/**
+ * The unpause rule (A16, OC2), run-scoped (S6 review M2). Every pause step id carries the run id, so
+ * `landed` (in memory on the signed path, `landedStepIds` on the unsigned one) can only name this
+ * run's pauses: a list kept from an earlier run never lifts a later pause, such as an incident pause.
+ * A pause is lifted only when:
+ * - this run has not lifted it already (its `unpauseStepId` is not in `landed`: a pause after that
+ *   is someone else's);
+ * - one of its pause steps is still planned (the unpause then depends on it), or landed in this run
+ *   and the state on chain is still the one that step set (`onChain`).
+ * Anything else fails closed with a block that names the pause step.
+ * @returns `'lift'` (with the pause steps to depend on when still planned), or the block.
  * @internal
  */
 export function unpauseDecision(input: {
-  /** The pause step id of this run for the pause in question. */
-  pauseStepId: string
-  /** Whether that pause step is still in the plan. */
-  pausePlanned: boolean
+  /** This run's pause step ids that may have set the pause (any one of them landing suffices). */
+  pauseStepIds: readonly string[]
+  /** The ones still in the plan. */
+  pausePlanned: readonly string[]
+  /** This run's unpause step id for the same pause. */
+  unpauseStepId: string
   /** This run's landed step ids. */
   landed: ReadonlySet<string>
   /** What the pause is, for the block reason. */
   what: string
+  /** Whether the pause on chain is still the one the landed step set; omitted: not checked. */
+  onChain?: { ok: true } | { ok: false; reason: string }
 }): { lift: true; dependsOn: string[] } | { lift: false; block: MultiTokenPoolPlanBlock } {
-  if (input.pausePlanned) return { lift: true, dependsOn: [input.pauseStepId] }
-  if (input.landed.has(input.pauseStepId)) return { lift: true, dependsOn: [] }
+  const steps = [input.pauseStepIds[0] ?? input.unpauseStepId]
+  if (input.landed.has(input.unpauseStepId))
+    return {
+      lift: false,
+      block: {
+        reason: `${input.what} is paused, but this run already lifted its own pause (${input.unpauseStepId} landed): the pause now is someone else's and is never lifted here`,
+        steps,
+      },
+    }
+  if (input.pausePlanned.length) return { lift: true, dependsOn: [...input.pausePlanned] }
+  if (input.pauseStepIds.some((id) => input.landed.has(id))) {
+    if (input.onChain && !input.onChain.ok)
+      return {
+        lift: false,
+        block: {
+          reason: `${input.what} is paused, but not as this run's pause step left it (${input.onChain.reason}): someone else changed it, so it is never lifted here`,
+          steps,
+        },
+      }
+    return { lift: true, dependsOn: [] }
+  }
   return {
     lift: false,
     block: {
-      reason: `${input.what} is paused, but this run did not land its pause step ${input.pauseStepId}: a pause this run did not set is never lifted. If this run landed it, pass its id in landedStepIds; otherwise lift it yourself after checking the lanes`,
-      steps: [input.pauseStepId],
+      reason: `${input.what} is paused, but this run did not land its pause step ${steps[0]}: a pause this run did not set is never lifted. If this run landed it, pass the same runId and its id in landedStepIds (both are per run: discard them once the run completes); otherwise lift it yourself after checking the lanes`,
+      steps,
     },
   }
 }

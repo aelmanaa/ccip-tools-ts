@@ -13,7 +13,14 @@ import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import type { Expansion, PlannerContext, StepSpec } from './context.ts'
 import { parseEnablement } from './enable-chain.ts'
-import { planStep, resolveActor, selectReady, stepsConflict, unpauseDecision } from './engine.ts'
+import {
+  planStep,
+  resolveActor,
+  selectReady,
+  stableChunks,
+  stepsConflict,
+  unpauseDecision,
+} from './engine.ts'
 import { memberRemoteTokensOf, parseOnboarding } from './onboard.ts'
 import { parseRemoval } from './remove-token.ts'
 import { evaluatePlan, executeFlow } from './run.ts'
@@ -104,32 +111,75 @@ describe('ready-step engine', () => {
   })
 })
 
-describe('the unpause rule (A16, OC2)', () => {
-  it("lifts only this run's own pause: planned, or landed (memory or landedStepIds)", () => {
-    const id = 'net/g/pausePoolGroupChainLanes/1'
-    assert.deepEqual(
-      unpauseDecision({ pauseStepId: id, pausePlanned: true, landed: new Set(), what: 'x' }),
-      {
-        lift: true,
-        dependsOn: [id],
-      },
-    )
-    assert.deepEqual(
-      unpauseDecision({ pauseStepId: id, pausePlanned: false, landed: new Set([id]), what: 'x' }),
-      {
-        lift: true,
-        dependsOn: [],
-      },
-    )
-    const foreign = unpauseDecision({
-      pauseStepId: id,
-      pausePlanned: false,
-      landed: new Set(),
-      what: 'x',
+describe('the unpause rule (A16, OC2), run-scoped (M2)', () => {
+  const id = 'net/g/pausePoolGroupChainLanes/1/run-r1'
+  const lift = 'net/g/unpausePoolGroupChainLanes/1/run-r1'
+  const base = { pauseStepIds: [id], unpauseStepId: lift, what: 'x' }
+  it("lifts only this run's own pause: planned, or landed and still as it set it", () => {
+    assert.deepEqual(unpauseDecision({ ...base, pausePlanned: [id], landed: new Set() }), {
+      lift: true,
+      dependsOn: [id],
     })
+    assert.deepEqual(unpauseDecision({ ...base, pausePlanned: [], landed: new Set([id]) }), {
+      lift: true,
+      dependsOn: [],
+    })
+    const moved = unpauseDecision({
+      ...base,
+      pausePlanned: [],
+      landed: new Set([id]),
+      onChain: { ok: false, reason: "the record is back in 'off'" },
+    })
+    if (moved.lift) assert.fail('a pause someone changed must not be lifted')
+    assert.match(moved.block.reason, /someone else changed it/)
+  })
+  it('a foreign pause, another run’s landed id, or a pause after this run’s own lift stays', () => {
+    const foreign = unpauseDecision({ ...base, pausePlanned: [], landed: new Set() })
     if (foreign.lift) assert.fail('a foreign pause must not be lifted')
     assert.ok(foreign.block.steps?.includes(id))
-    assert.match(foreign.block.reason, /landedStepIds/)
+    assert.match(foreign.block.reason, /runId/)
+    // a landed list kept from run r0 names r0's pause, not this run's (an incident pause later)
+    const stale = unpauseDecision({
+      ...base,
+      pausePlanned: [],
+      landed: new Set(['net/g/pausePoolGroupChainLanes/1/run-r0']),
+    })
+    assert.equal(stale.lift, false)
+    // this run lifted its pause already: a pause now is someone else's
+    const again = unpauseDecision({ ...base, pausePlanned: [], landed: new Set([id, lift]) })
+    if (again.lift) assert.fail('a pause after our lift must not be lifted')
+    assert.match(again.block.reason, /already lifted/)
+  })
+  it('stable chunks: ids keyed by the full chunk, items done left out, empty chunks dropped', () => {
+    const items = Array.from({ length: 30 }, (_, i) => `m${String(i).padStart(2, '0')}`)
+    const all = stableChunks(
+      items,
+      12,
+      () => true,
+      (x) => x,
+    )
+    assert.deepEqual(
+      all.chunks.map((c) => [c.key, c.items.length]),
+      [
+        ['m00', 12],
+        ['m12', 12],
+        ['m24', 6],
+      ],
+    )
+    const rest = stableChunks(
+      items,
+      12,
+      (x) => x >= 'm12' && x !== 'm13',
+      (x) => x,
+    )
+    assert.deepEqual(
+      rest.chunks.map((c) => [c.key, c.items.length]),
+      [
+        ['m12', 11],
+        ['m24', 6],
+      ],
+    )
+    assert.equal(rest.chunkKeyOf.get('m05'), 'm00')
   })
 })
 
@@ -142,6 +192,7 @@ function ctxOf(actor = PAYER): PlannerContext {
     payer: PAYER,
     actor,
     landed: new Set(),
+    runId: 'r1',
     squads: false,
   }
 }
@@ -328,10 +379,21 @@ describe('§4.1 runtime refusals (Solana)', () => {
     )
   })
 
-  it('onboarding: a fresh pool group id with solana.create, refused without; repeated chains refused', () => {
+  it('onboarding: solana.create needs a pool group id on the unsigned form; repeated chains refused', () => {
     const t = { tokenAddress: mint(), remoteTokens: [] }
-    const created = parseOnboarding({ tokens: [t], solana: { create: {} }, payer: PAYER })
-    assert.ok(created.parsed.poolGroupId)
+    // m2: a plan or unsigned build never draws its own id (each call would target a new group)
+    assert.throws(
+      () => parseOnboarding({ tokens: [t], solana: { create: {} }, payer: PAYER }),
+      (e: unknown) => isParam('poolGroupAddress')(e) && /fresh base58 key/.test(String(e)),
+    )
+    const id = Keypair.generate().publicKey.toBase58()
+    const created = parseOnboarding({
+      tokens: [t],
+      poolGroupId: id,
+      solana: { create: {} },
+      payer: PAYER,
+    })
+    assert.equal(created.parsed.poolGroupId, id)
     assert.throws(() => parseOnboarding({ tokens: [t], payer: PAYER }), isParam('poolGroupAddress'))
     const r = {
       remoteChainSelector: SEPOLIA,

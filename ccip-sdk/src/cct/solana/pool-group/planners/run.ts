@@ -32,6 +32,16 @@ const STATE_READ_ATTEMPTS = 5
 /** Delay between those reads, for an RPC node behind the one that confirmed the step. */
 const STATE_READ_INTERVAL_MS = 1_000
 
+/**
+ * The default `maxReadySteps` of the unsigned path: 20. Ready steps commute (pairwise free of
+ * conflicts), so every one of them can go in one proposal round; a cap of 1 makes each a round of
+ * its own, which multiplies multisig approvals by the step count. 20 is the transaction count of one
+ * Squads batch (`toPoolGroupSquadsBatch`), so a default wave fills about one batch; a wallet caller
+ * lands them in any order. Pass 1 to review one step at a time.
+ * @internal
+ */
+export const DEFAULT_MAX_READY_STEPS = 20
+
 /** The plan options the runner reads. @internal */
 export type RunOptions = {
   pendingStepHashes?: Record<string, string>
@@ -106,16 +116,22 @@ export async function evaluatePlan<Name extends string>(
   const steps = specs.map((s) => s.step)
   const selected = selectReady(steps, {
     ...(options.pendingStepHashes && { pendingStepHashes: options.pendingStepHashes }),
-    maxReadySteps: walletActor !== undefined ? Infinity : (options.maxReadySteps ?? 1),
+    maxReadySteps:
+      walletActor !== undefined ? Infinity : (options.maxReadySteps ?? DEFAULT_MAX_READY_STEPS),
     held,
   })
   const readyIds = new Set(selected.ready.map((s) => s.id))
-  const block = blocks[0]
+  const block = mergeBlocks(blocks)
+  const present = new Set(steps.map((s) => s.id))
   const plan: PoolGroupPlan<Name> = {
     steps,
     ...(block && { blockedBy: block }),
     pendingSteps: selected.pendingSteps,
     stalePendingSteps: selected.stalePendingSteps,
+    vanishedPendingSteps: Object.keys(options.pendingStepHashes ?? {}).filter(
+      (id) => !present.has(id),
+    ),
+    runId: ctx.runId,
     moreReady: selected.moreReady,
     planHash: planHashOf(expansion.observedAt, steps),
     observedAt: expansion.observedAt,
@@ -124,6 +140,26 @@ export async function evaluatePlan<Name extends string>(
     ...(expansion.poolGroupAddress && { poolGroupAddress: expansion.poolGroupAddress }),
   }
   return { plan, specs, ready: specs.filter((s) => readyIds.has(s.step.id)) }
+}
+
+/**
+ * Every block of a plan as one (S6 review m4): the reasons joined, the blocked steps merged, the
+ * first actor and remote chain kept. A removal over K lanes reports every confirmation it needs at
+ * once, not one per re-plan.
+ * @internal
+ */
+export function mergeBlocks(
+  blocks: readonly MultiTokenPoolPlanBlock[],
+): MultiTokenPoolPlanBlock | undefined {
+  if (blocks.length <= 1) return blocks[0]
+  const actor = blocks.find((b) => b.actor)?.actor
+  const remote = blocks.find((b) => b.remoteChainSelector !== undefined)?.remoteChainSelector
+  return {
+    reason: [...new Set(blocks.map((b) => b.reason))].join(' | '),
+    steps: [...new Set(blocks.flatMap((b) => b.steps ?? []))],
+    ...(actor && { actor }),
+    ...(remote !== undefined && { remoteChainSelector: remote }),
+  }
 }
 
 /** The plan getter: remaining steps, ready selection and block; builds nothing. @internal */
@@ -188,6 +224,7 @@ export async function executeFlow<Name extends string>(
   const ids: { poolGroupId?: string; poolGroupAddress?: string } = {}
   const finish = (blockedBy?: MultiTokenPoolPlanBlock): ExecutePoolGroupPlanResult<Name> => ({
     ...ids,
+    runId: ctx.runId,
     steps: executed,
     ...(blockedBy && { blockedBy }),
     findings,
@@ -222,7 +259,17 @@ export async function executeFlow<Name extends string>(
           steps: [last!.id],
         })
       const spec = ready[0]
-      if (!spec) return finish(plan.blockedBy)
+      // steps left and none ready is never "done" (S6 review m3)
+      if (!spec)
+        return finish(
+          plan.blockedBy ??
+            (plan.steps.length
+              ? {
+                  reason: `${plan.steps.length} step(s) remain and none is ready for this wallet: ${plan.steps.map((s) => s.id).join(', ')}`,
+                  steps: plan.steps.map((s) => s.id),
+                }
+              : undefined),
+        )
       const landed = await spec.run!.execute(wallet, computeUnits)
       ctx.landed.add(spec.step.id)
       findings.push(...landed.findings)

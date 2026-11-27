@@ -150,8 +150,8 @@ export type EvmRemoteReads = {
   >
 }
 
-/** Loads the EVM stack's reads on first use, so Solana-only callers never load the EVM stack. */
-async function loadEvmRemoteReads(): Promise<EvmRemoteReads> {
+/** Loads the EVM stack's reads on first use, so Solana-only callers never load the EVM stack. @internal */
+export async function loadEvmRemoteReads(): Promise<EvmRemoteReads> {
   const [{ readRegistryPool }, { GetMultiTokenPoolLane }, { readRemoteMultiTokenPoolSide }] =
     await Promise.all([
       import('../../evm/pool-config-manager/serving-pools.ts'),
@@ -563,6 +563,19 @@ async function sendLocks(
   return keys.size + (lockBudget?.extraAccounts ?? 0) + delta
 }
 
+/** Anchor's `AccountNotInitialized` (3012, 0xbc4) anywhere in a refusal's message or logs. */
+function accountNotInitialized(err: unknown): boolean {
+  const logs: unknown =
+    typeof err === 'object' && err !== null ? Reflect.get(err, 'logs') : undefined
+  const text = [
+    err instanceof Error ? err.message : String(err),
+    ...(Array.isArray(logs) ? logs.map(String) : []),
+  ].join('\n')
+  return /AccountNotInitialized|custom program error: 0xbc4\b|Error Number: 3012\b|"Custom":3012\b/.test(
+    text,
+  )
+}
+
 /** Whether the pool program reads long pool data: pool groups present (the feature probe). */
 async function programHasPoolGroups(chain: SolanaChain, program: PublicKey): Promise<boolean> {
   try {
@@ -857,11 +870,21 @@ export async function checkSolanaMultiTokenPoolLane(
       } catch (err) {
         // the resolver's or the program's refusal is an answer; transport errors propagate
         if (!isViewRefusal(err) && !notTransient(err)) throw err
-        add(
-          'ACCOUNT_LOCKS_EXCEEDED',
-          severity,
-          `the send lock budget could not be measured: the send resolution was refused (${err instanceof Error ? err.message : String(err)})`,
-        )
+        const message = err instanceof Error ? err.message : String(err)
+        // an account the send resolves does not exist yet (a lane this write creates): the budget is
+        // not measured, which is not a budget overrun (S6 review M6)
+        if (accountNotInitialized(err))
+          add(
+            'LANE_UNREADABLE',
+            severity,
+            `the send lock budget could not be measured: the send resolution reads an account that does not exist yet (AccountNotInitialized: ${message}). Create the lane paused first, then check it on its real accounts`,
+          )
+        else
+          add(
+            'ACCOUNT_LOCKS_EXCEEDED',
+            severity,
+            `the send lock budget could not be measured: the send resolution was refused (${message})`,
+          )
       }
     }
   }

@@ -1,28 +1,33 @@
 /**
- * `removeMultiTokenPoolToken` on Solana: the token leaves the pool group (design §8.3 `leave`). Its
- * lanes' outbound is paused first; each lane then waits until the remote side stopped sending and
- * the inbound messages in flight drained (`blockedBy` until then); a linked lane sending long data
- * gets its own fee raised before it is unlinked (it then serves on its own fields); a driven lane's
- * chain is dropped from the member and the lane closed in the same transaction; with no chain
- * filter the membership closes last. No delist (design addendum §4).
+ * `removeMultiTokenPoolToken` on Solana: one or more tokens leave the pool group (design §8.3
+ * `leave`), batched across tokens (`solana.tokenAddresses`): every token joins the same waves. Their
+ * lanes' outbound is paused first; each lane then waits until the remote side stopped sending (read
+ * from the remote registry's pool, or attested where the SDK cannot read it) and the inbound
+ * messages in flight drained (`blockedBy` until then); a linked lane sending long data gets its own
+ * fee raised before it is unlinked (it then serves on its own fields); a driven lane's chain is
+ * dropped from the member and the lane closed in the same transaction; with no chain filter the
+ * memberships close last. No delist (design addendum §4).
  *
  * @packageDocumentation
  */
 
 import { PublicKey } from '@solana/web3.js'
 
+import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
+  type MultiTokenPoolLane,
   type MultiTokenPoolLaneKey,
   type MultiTokenPoolPlanBlock,
   LONG_POOL_DATA_BYTES,
   longPoolDataBytes,
 } from '../../../multi-token-pool.ts'
-import { decodeRemoteAddress } from '../../../remote-address.ts'
+import { decodeRemoteAddress, laneFamilyOf } from '../../../remote-address.ts'
 import { readTokenPoolChainConfigV2 } from '../../token-pool/operations/chain-config-v2.ts'
 import { EditChainConfigV2 } from '../../token-pool/operations/edit-chain-config-v2.ts'
 import { U64_MAX, parsePublicKey, validateBigInt } from '../../validate.ts'
 import { isUnread } from '../lane.ts'
+import { readSolanaMultiTokenPoolLane } from '../multi-token-pool-lane.ts'
 import { parsePoolGroupRef } from '../operations/common.ts'
 import { GetPoolGroupChain } from '../operations/get-pool-group-chain.ts'
 import { GetPoolGroup } from '../operations/get-pool-group.ts'
@@ -42,18 +47,49 @@ import {
   stepId,
   toPlannerTx,
 } from './context.ts'
+import { stableChunks } from './engine.ts'
 import { membersAmong, opBase, opStep, poolOwnerSigner } from './flow-common.ts'
+import { MEMBERS_PER_STEP } from './onboard.ts'
 import type { GenerateRemoveMultiTokenPoolTokenParams, PoolGroupLeaveStepName } from './types.ts'
 
 const NAME = 'removeMultiTokenPoolToken'
 type Name = PoolGroupLeaveStepName
 
+/**
+ * Tokens per drop-and-close step: its `set_member_remote_tokens` and every `close_group_lanes` of
+ * those tokens are one transaction (the op packs them as one item), so the chunk stays small.
+ * @internal
+ */
+export const DROPS_PER_STEP = 3
+
 /** Parsed removal params. @internal */
 export type ParsedRemoval = {
-  mint: string
-  /** Only these chains; `undefined`: every lane, and the membership closes. */
+  /** The mints that leave, in the caller's order. */
+  mints: string[]
+  /** Only these chains; `undefined`: every lane, and the memberships close. */
   selectors?: bigint[]
+  /** Lanes whose remote stop the caller attests (unreadable remotes only). */
+  remoteStopped: Set<string>
+  /** Lanes whose inbound drain the caller attests. */
   confirmed: Set<string>
+}
+
+/** Parses a list of lane keys at `param` into `<mint>:<selector>` keys. */
+function laneKeys(param: string, value: unknown): Set<string> {
+  const out = new Set<string>()
+  if (value === undefined) return out
+  if (!Array.isArray(value)) throw new CCTParamsInvalidError(NAME, param, 'must be an array')
+  for (const [i, l] of value.entries()) {
+    const m = parsePublicKey(
+      NAME,
+      `${param}[${i}].tokenAddress`,
+      Reflect.get(Object(l), 'tokenAddress'),
+    ).toBase58()
+    const selector: unknown = Reflect.get(Object(l), 'remoteChainSelector')
+    validateBigInt(NAME, `${param}[${i}].remoteChainSelector`, selector, 1n, U64_MAX)
+    out.add(laneKeyOf({ tokenAddress: m, remoteChainSelector: BigInt(String(selector)) }))
+  }
+  return out
 }
 
 /**
@@ -66,8 +102,23 @@ export function parseRemoval(params: GenerateRemoveMultiTokenPoolTokenParams): {
   parsed: ParsedRemoval
 } {
   const ref = parsePoolGroupRef(NAME, params)
-  const mint = parsePublicKey(NAME, 'tokenAddress', params.tokenAddress).toBase58()
+  const first = parsePublicKey(NAME, 'tokenAddress', params.tokenAddress).toBase58()
   const solana = params.solana ?? {}
+  const more: unknown = solana.tokenAddresses
+  if (more !== undefined && !Array.isArray(more))
+    throw new CCTParamsInvalidError(NAME, 'solana.tokenAddresses', 'must be an array')
+  const mints = [
+    first,
+    ...(solana.tokenAddresses ?? []).map((t, i) =>
+      parsePublicKey(NAME, `solana.tokenAddresses[${i}]`, t).toBase58(),
+    ),
+  ]
+  if (new Set(mints).size !== mints.length)
+    throw new CCTParamsInvalidError(
+      NAME,
+      'solana.tokenAddresses',
+      'must name each token once (tokenAddress included)',
+    )
   let selectors: bigint[] | undefined
   if (solana.remoteChainSelectors !== undefined) {
     if (!Array.isArray(solana.remoteChainSelectors) || !solana.remoteChainSelectors.length)
@@ -87,27 +138,22 @@ export function parseRemoval(params: GenerateRemoveMultiTokenPoolTokenParams): {
         'must list each chain once',
       )
   }
-  const confirmed = new Set<string>()
-  for (const [i, l] of (solana.confirmInFlightDrained ?? []).entries()) {
-    const m = parsePublicKey(
-      NAME,
-      `solana.confirmInFlightDrained[${i}].tokenAddress`,
-      l.tokenAddress,
-    ).toBase58()
-    validateBigInt(
-      NAME,
-      `solana.confirmInFlightDrained[${i}].remoteChainSelector`,
-      l.remoteChainSelector,
-      1n,
-      U64_MAX,
-    )
-    confirmed.add(laneKeyOf({ tokenAddress: m, remoteChainSelector: l.remoteChainSelector }))
+  return {
+    ref,
+    parsed: {
+      mints,
+      ...(selectors && { selectors }),
+      remoteStopped: laneKeys(
+        'solana.confirmRemoteOutboundStopped',
+        solana.confirmRemoteOutboundStopped,
+      ),
+      confirmed: laneKeys('solana.confirmInFlightDrained', solana.confirmInFlightDrained),
+    },
   }
-  return { ref, parsed: { mint, ...(selectors && { selectors }), confirmed } }
 }
 
-/** One lane that leaves. */
-type LeavingLane = {
+/** One lane that leaves. @internal */
+export type LeavingLane = {
   key: PoolGroupLaneKey
   /** The lane's own remote pools. */
   ownPools: string[]
@@ -118,44 +164,198 @@ type LeavingLane = {
   ownInboundPaused: boolean
   ownFormat: 'legacy' | 'long'
   uid: string | null
-  remoteToken: string
-  remotePools: string[]
+  /** A linked long lane's own fee, when it must be raised before it leaves (absent: enough). */
+  raiseFee?: {
+    destGasOverhead: number
+    destBytesOverhead: number
+    finalityFeeUSDCents: number
+    fastFinalityFeeUSDCents: number
+    finalityTransferFeeBps: number
+    fastFinalityTransferFeeBps: number
+    isEnabled: true
+  }
+}
+
+/** One token that leaves, as read. @internal */
+export type LeavingToken = {
+  mint: string
+  /** Its pool owner. */
+  owner: string
+  /** Present when it is a member of the pool group: the chains it lists (in scope). */
+  member?: { chains: bigint[] }
+  lanes: LeavingLane[]
+}
+
+/** What the removal expansion reads (a plain value: the goldens fake it). @internal */
+export type RemovalInputs = {
+  slot: bigint
+  poolGroupId: string
+  tokens: LeavingToken[]
 }
 
 /**
- * Whether the remote side of a lane stopped sending toward this chain: the remote multi-token pool's
- * lane is paused or stopped outbound, or has no connection. `null` when it cannot be read.
+ * The remote stop of one lane: `stopped` from the remote registry's pool, or `unread` (with whether
+ * the caller may attest it instead).
+ * @internal
  */
-async function remoteOutboundStopped(
+export type RemoteStop =
+  | { stopped: true }
+  | { stopped: false; reason: string }
+  | { unread: string; attestable: boolean }
+
+/**
+ * Whether the remote side of a lane stopped sending toward this chain (S6 review M3): the pool the
+ * remote registry names (the one the remote Router sends through, read with `readEvmRemote`, the
+ * lane check's reader) has its lane paused or stopped outbound. A delisted token (no registry pool)
+ * is stopped; a registry pool with no lane toward this chain (`exists: false`) is not (fail
+ * closed); a pool that is not a multi-token pool, or a remote the SDK cannot read, is unread.
+ * Unread is attestable only where the SDK cannot read it: a remote family it does not read, or a
+ * `getChain` that was given and failed (M4); an EVM remote without `getChain` is not.
+ * @internal
+ */
+export async function readRemoteStop(
   ctx: PlannerContext,
-  lane: LeavingLane,
-): Promise<{ stopped: boolean } | { unread: string }> {
+  key: PoolGroupLaneKey,
+): Promise<RemoteStop> {
   const { remoteChainOf } = await import('../../../evm/pool-config-manager/guard-facts.ts')
-  const remote = await remoteChainOf(
-    { ...(ctx.getChain && { getChain: ctx.getChain }) },
-    lane.key.remoteChainSelector,
-  )
-  if ('status' in remote) return { unread: remote.reason }
-  const { EVMChain } = await import('../../../../evm/index.ts')
-  if (!(remote instanceof EVMChain)) return { unread: 'only an EVM remote side is read' }
-  const { EVMTokenManager } = await import('../../../evm/index.ts')
-  const evm = EVMTokenManager.fromChain(remote)
-  const reasons: string[] = []
-  for (const pool of lane.remotePools) {
-    try {
-      const view = await evm.getMultiTokenPoolLane({
-        poolAddress: pool,
-        tokenAddress: lane.remoteToken,
-        remoteChainSelector: ctx.chain.network.chainSelector,
-      })
-      return {
-        stopped: !view.exists || view.outboundStatus.status !== 'ok' || view.stopped.outbound,
-      }
-    } catch (err) {
-      reasons.push(`${pool}: ${err instanceof Error ? err.message : String(err)}`)
+  const selector = key.remoteChainSelector
+  const remote = await remoteChainOf({ ...(ctx.getChain && { getChain: ctx.getChain }) }, selector)
+  if ('status' in remote)
+    return {
+      unread: remote.reason,
+      attestable: !!ctx.getChain || laneFamilyOf(selector) !== ChainFamily.EVM,
     }
+  const read = await readSolanaMultiTokenPoolLane(
+    NAME,
+    ctx.chain,
+    ctx.ref.program,
+    new PublicKey(key.tokenAddress),
+    selector,
+  )
+  if (!read.lane.remotePools.length || !read.lane.remoteToken)
+    return {
+      unread: 'the lane trusts no remote pool, so the remote registry cannot be found',
+      attestable: true,
+    }
+  const { loadEvmRemoteReads, readEvmRemote } = await import('../multi-token-pool-check.ts')
+  const base = await loadEvmRemoteReads()
+  let view: MultiTokenPoolLane | undefined
+  const side = await readEvmRemote(remote, read, ctx.chain.network.chainSelector, {
+    ...base,
+    getMultiTokenPoolLane: async (r, p) => (view = await base.getMultiTokenPoolLane(r, p)),
+  })
+  if (side.status !== 'known') return { unread: side.reason, attestable: true }
+  if (side.registryPool === null) return { stopped: true }
+  if (!side.readsLongData || !view)
+    return {
+      unread: `the remote registry's pool ${side.registryPool} is not a multi-token pool, so its outbound stop is not read`,
+      attestable: true,
+    }
+  if (!view.exists)
+    return {
+      stopped: false,
+      reason: `the remote registry's pool ${side.registryPool} shows no lane toward this chain, which is not read as stopped`,
+    }
+  if (view.outboundStatus.status !== 'ok' || view.stopped.outbound) return { stopped: true }
+  return { stopped: false, reason: `the remote registry's pool ${side.registryPool} still sends` }
+}
+
+/**
+ * Reads what {@link expandRemovalFrom} needs: per token its member, lanes of this group, the chain
+ * records' pools and own fees.
+ * @internal
+ */
+export async function readRemovalInputs(
+  ctx: PlannerContext,
+  parsed: ParsedRemoval,
+): Promise<RemovalInputs> {
+  const g = ctx.ref.group
+  const refParams = {
+    poolProgramAddress: ctx.ref.program.toBase58(),
+    poolGroupAddress: g.toBase58(),
   }
-  return { unread: reasons.join('; ') || 'the lane trusts no remote pool' }
+  const slot = BigInt(await ctx.chain.connection.getSlot('confirmed'))
+  const group = await new GetPoolGroup().query(ctx.chain, refParams)
+  const members = new Map((await membersAmong(ctx, parsed.mints)).map((m) => [m.tokenAddress, m]))
+  const inScope = (s: bigint) => !parsed.selectors || parsed.selectors.includes(s)
+  const pools = await readPoolStates(
+    NAME,
+    ctx.chain,
+    ctx.ref.program,
+    parsed.mints.map((m) => new PublicKey(m)),
+  )
+  const records = new Map<bigint, string[]>()
+  const groupPoolsOf = async (selector: bigint) => {
+    if (!records.has(selector)) {
+      const record = await new GetPoolGroupChain().query(ctx.chain, {
+        ...refParams,
+        remoteChainSelector: selector,
+      })
+      records.set(
+        selector,
+        record.policy.connection.remotePools.map((p) => p.address),
+      )
+    }
+    return records.get(selector)!
+  }
+  const tokens: LeavingToken[] = []
+  for (const [i, m] of parsed.mints.entries()) {
+    const member = members.get(m)
+    const memberChains = member?.remoteTokens.flatMap((t) => t.remoteChainSelectors) ?? []
+    const chains = [...new Set([...group.remoteChainSelectors, ...memberChains])].filter(inScope)
+    const mint = new PublicKey(m)
+    const states = await readPoolGroupLaneStates(
+      ctx.chain,
+      ctx.ref.program,
+      chains.map((selector) => ({ mint, selector })),
+    )
+    const lanes: LeavingLane[] = []
+    for (const [j, s] of states.entries()) {
+      if (!s) continue
+      if (isUnread(s))
+        throw new CCTParamsInvalidError(
+          NAME,
+          i === 0 ? 'tokenAddress' : `solana.tokenAddresses[${i - 1}]`,
+          `the lane of ${m} toward ${chains[j]} cannot be read: ${s.reason}`,
+        )
+      if (s.ext?.poolGroupAddress !== g.toBase58()) continue
+      const selector = chains[j]!
+      const decode = (bytes: Uint8Array) => decodeRemoteAddress(Buffer.from(bytes), selector)
+      const lane: LeavingLane = {
+        key: { tokenAddress: m, remoteChainSelector: selector },
+        ownPools: s.chainConfig.base.remote.poolAddresses.map((p) => decode(p.address)),
+        groupPools: await groupPoolsOf(selector),
+        driven: s.ext.groupDriven,
+        ownOutboundPaused: s.ext.pausedOutbound,
+        ownInboundPaused: s.ext.pausedInbound,
+        ownFormat: s.ext.poolDataFormat,
+        uid: s.ext.uid,
+      }
+      if (!lane.driven && lane.ownFormat === 'long') {
+        const own = await readTokenPoolChainConfigV2(ctx.chain, ctx.ref.program, mint, selector)
+        const need = lane.uid !== null ? longPoolDataBytes(32) : LONG_POOL_DATA_BYTES
+        const fee = own?.tokenTransferFeeConfig
+        if (!fee?.isEnabled || fee.destBytesOverhead < need)
+          lane.raiseFee = {
+            destGasOverhead: fee?.destGasOverhead ?? 0,
+            destBytesOverhead: Math.max(need, fee?.destBytesOverhead ?? 0),
+            finalityFeeUSDCents: fee?.finalityFee ?? 0,
+            fastFinalityFeeUSDCents: fee?.fastFinalityFee ?? 0,
+            finalityTransferFeeBps: fee?.finalityBpsFee ?? 0,
+            fastFinalityTransferFeeBps: fee?.fastFinalityBpsFee ?? 0,
+            isEnabled: true,
+          }
+      }
+      lanes.push(lane)
+    }
+    tokens.push({
+      mint: m,
+      owner: pools[i]!.state.owner.toBase58(),
+      ...(member && { member: { chains: memberChains.filter(inScope) } }),
+      lanes,
+    })
+  }
+  return { slot, poolGroupId: group.poolGroupId, tokens }
 }
 
 /**
@@ -166,339 +366,348 @@ export async function expandRemoval(
   ctx: PlannerContext,
   parsed: ParsedRemoval,
 ): Promise<Expansion<Name>> {
-  const g = ctx.ref.group
-  const refParams = {
-    poolProgramAddress: ctx.ref.program.toBase58(),
-    poolGroupAddress: g.toBase58(),
-  }
-  const slot = BigInt(await ctx.chain.connection.getSlot('confirmed'))
-  const group = await new GetPoolGroup().query(ctx.chain, refParams)
-  const [member] = await membersAmong(ctx, [parsed.mint])
-  const memberChains = member?.remoteTokens.flatMap((t) => t.remoteChainSelectors) ?? []
-  const inScope = (s: bigint) => !parsed.selectors || parsed.selectors.includes(s)
-  const chains = [...new Set([...group.remoteChainSelectors, ...memberChains])].filter(inScope)
-  const mint = new PublicKey(parsed.mint)
-  const states = await readPoolGroupLaneStates(
-    ctx.chain,
-    ctx.ref.program,
-    chains.map((selector) => ({ mint, selector })),
-  )
-  const [pool] = await readPoolStates(NAME, ctx.chain, ctx.ref.program, [mint])
-  const owner = pool!.state.owner.toBase58()
-  const lanes: LeavingLane[] = []
-  for (const [i, s] of states.entries()) {
-    if (!s) continue
-    if (isUnread(s))
-      throw new CCTParamsInvalidError(
-        NAME,
-        'tokenAddress',
-        `the lane of ${parsed.mint} toward ${chains[i]} cannot be read: ${s.reason}`,
-      )
-    if (s.ext?.poolGroupAddress !== g.toBase58()) continue
-    const selector = chains[i]!
-    const record = await new GetPoolGroupChain().query(ctx.chain, {
-      ...refParams,
-      remoteChainSelector: selector,
-      tokenAddresses: [parsed.mint],
-    })
-    const decode = (bytes: Uint8Array) => decodeRemoteAddress(Buffer.from(bytes), selector)
-    const ownPools = s.chainConfig.base.remote.poolAddresses.map((p) => decode(p.address))
-    const groupPools = record.policy.connection.remotePools.map((p) => p.address)
-    lanes.push({
-      key: { tokenAddress: parsed.mint, remoteChainSelector: selector },
-      ownPools,
-      groupPools,
-      driven: s.ext.groupDriven,
-      ownOutboundPaused: s.ext.pausedOutbound,
-      ownInboundPaused: s.ext.pausedInbound,
-      ownFormat: s.ext.poolDataFormat,
-      uid: s.ext.uid,
-      remoteToken: decode(s.chainConfig.base.remote.tokenAddress.address),
-      remotePools: [...new Set([...groupPools, ...ownPools])],
-    })
-  }
-  // nothing left of the token in the group (a finished or resumed removal): an empty plan
+  return expandRemovalFrom(ctx, parsed, await readRemovalInputs(ctx, parsed))
+}
 
+/**
+ * The removal steps from what {@link readRemovalInputs} read (pure; the awaits read the remote side
+ * when they are evaluated, through `remoteStop`). Chunk ids are stable over the caller's token
+ * order (M1). Nothing left of the tokens in the group (a finished or resumed removal): an empty plan.
+ * @internal
+ */
+export function expandRemovalFrom(
+  ctx: PlannerContext,
+  parsed: ParsedRemoval,
+  inputs: RemovalInputs,
+  remoteStop: (key: PoolGroupLaneKey) => Promise<RemoteStop> = (key) => readRemoteStop(ctx, key),
+): Expansion<Name> {
+  const g = ctx.ref.group
   const specs: StepSpec<Name>[] = []
-  // ── pause outbound (a Squads proposal writes both flags: inbound keeps its own) ──
-  const toPause = lanes.filter((l) => !l.ownOutboundPaused)
-  const pauseIdOf = new Map<string, string>()
-  const groups = ctx.squads
-    ? [true, false].map((inbound) => toPause.filter((l) => l.ownInboundPaused === inbound))
-    : [toPause]
-  for (const [i, list] of groups.entries()) {
-    if (!list.length) continue
-    const id = stepId(ctx, 'setPoolGroupLanePause', parsed.mint, groups.length > 1 ? i : undefined)
-    for (const l of list) pauseIdOf.set(laneKeyOf(l.key), id)
+  const drainIdOf = new Map<string, string>()
+  const ownerOf = new Map(inputs.tokens.map((t) => [t.mint, t.owner]))
+
+  for (const t of inputs.tokens) {
+    // ── pause outbound, per mint (a Squads proposal writes both flags: inbound keeps its own) ──
+    const toPause = t.lanes.filter((l) => !l.ownOutboundPaused)
+    const pauseIdOf = new Map<string, string>()
+    const groups = ctx.squads
+      ? ([true, false] as const).map((inbound) => ({
+          part: inbound ? 'inbound-paused' : 'inbound-open',
+          list: toPause.filter((l) => l.ownInboundPaused === inbound),
+        }))
+      : [{ part: undefined, list: toPause }]
+    for (const { part, list } of groups) {
+      if (!list.length) continue
+      const id = stepId(ctx, 'setPoolGroupLanePause', t.mint, part)
+      for (const l of list) pauseIdOf.set(laneKeyOf(l.key), id)
+      specs.push(
+        opStep(
+          ctx,
+          {
+            id,
+            name: 'pauseLaneOutbound',
+            operation: 'setPoolGroupLanePause',
+            summary: `pause outbound on ${list.length} lane(s) of ${t.mint}`,
+            writeSet: list.map((l) => keys.lane(t.mint, l.key.remoteChainSelector)),
+            guardReads: [],
+            signer: poolOwnerSigner(ctx, t.owner, t.mint),
+            progress: list.length,
+          },
+          POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupLanePause,
+          {
+            ...opBase(ctx),
+            tokenAddress: t.mint,
+            remoteChainSelectors: list.map((l) => l.key.remoteChainSelector),
+            pausedOutbound: true,
+            ...(ctx.squads && { pausedInbound: list[0]!.ownInboundPaused }),
+          },
+        ),
+      )
+    }
+
+    // ── await the remote stop and the drain, per lane ──
+    for (const l of t.lanes) {
+      const k = laneKeyOf(l.key)
+      const c = l.key.remoteChainSelector
+      const remoteId = stepId(ctx, 'awaitRemoteOutboundStop', c, t.mint)
+      const drainId = stepId(ctx, 'awaitDrain', c, t.mint)
+      drainIdOf.set(k, drainId)
+      const attested = parsed.remoteStopped.has(k)
+      const drained = parsed.confirmed.has(k)
+      specs.push(
+        specOf(
+          ctx,
+          {
+            id: remoteId,
+            name: 'awaitRemoteOutboundStop',
+            operation: 'getMultiTokenPoolLane',
+            dependsOn: pauseIdOf.has(k) ? [pauseIdOf.get(k)!] : [],
+            summary: `wait until ${c} stops sending ${t.mint}'s counterpart here`,
+            inputs: { lane: [l.key.tokenAddress, c] },
+            writeSet: [],
+            guardReads: [`remote:${c}:${t.mint}`],
+            signer: { kind: 'anyone' },
+          },
+          {
+            evaluate: async (): Promise<MultiTokenPoolPlanBlock | null> => {
+              const r = await remoteStop(l.key)
+              if ('stopped' in r)
+                return r.stopped
+                  ? null
+                  : {
+                      reason: `the remote side of ${t.mint} → ${c} still sends toward this chain (${r.reason}): stop it there first (pause or stop its outbound lane), so no new message strands here`,
+                      remoteChainSelector: c,
+                    }
+              if (!r.attestable)
+                return {
+                  reason: `the remote side of ${t.mint} → ${c} is not read (${r.unread}): pass getChain, so the SDK reads its outbound stop (a readable remote is never attested)`,
+                  remoteChainSelector: c,
+                }
+              return attested
+                ? null
+                : {
+                    reason: `the remote side of ${t.mint} → ${c} cannot be read (${r.unread}): stop it there, then list the lane in solana.confirmRemoteOutboundStopped`,
+                    remoteChainSelector: c,
+                  }
+            },
+          },
+        ),
+        specOf(
+          ctx,
+          {
+            id: drainId,
+            name: 'awaitDrain',
+            operation: 'confirmInFlightDrained',
+            dependsOn: [remoteId],
+            summary: `wait until the inbound messages of ${t.mint} from ${c} drained`,
+            inputs: { lane: [l.key.tokenAddress, c] },
+            writeSet: [],
+            guardReads: [keys.lane(t.mint, c)],
+            signer: { kind: 'anyone' },
+          },
+          {
+            evaluate: () =>
+              Promise.resolve(
+                drained
+                  ? null
+                  : {
+                      reason: `inbound messages of ${t.mint} from ${c} may still be in flight: once none is (CCIP Explorer or API), list the lane in solana.confirmInFlightDrained`,
+                      remoteChainSelector: c,
+                    },
+              ),
+          },
+        ),
+      )
+    }
+  }
+
+  // ── linked lanes: own fee first when they send long data, then unlink (per chain, batched) ──
+  const leaveIdsOf = new Map<string, string[]>()
+  const leaves = (mint: string, id: string) =>
+    leaveIdsOf.set(mint, [...new Set([...(leaveIdsOf.get(mint) ?? []), id])])
+  const linked = inputs.tokens.flatMap((t) => t.lanes.filter((l) => !l.driven))
+  const feeIdOf = new Map<string, string>()
+  for (const l of linked) {
+    if (!l.raiseFee) continue
+    const m = l.key.tokenAddress
+    const c = l.key.remoteChainSelector
+    const id = stepId(ctx, 'editChainConfigV2', c, m)
+    feeIdOf.set(laneKeyOf(l.key), id)
+    const params = {
+      poolProgramAddress: ctx.ref.program.toBase58(),
+      tokenAddress: m,
+      remoteChainSelector: c,
+      tokenTransferFeeConfig: l.raiseFee,
+      authority: ownerOf.get(m)!,
+      ...(ctx.getChain && { getChain: ctx.getChain }),
+    }
+    const edit = new EditChainConfigV2()
     specs.push(
-      opStep(
+      specOf(
         ctx,
         {
           id,
-          name: 'pauseLaneOutbound',
-          operation: 'setPoolGroupLanePause',
-          summary: `pause outbound on ${list.length} lane(s) of ${parsed.mint}`,
-          writeSet: list.map((l) => keys.lane(parsed.mint, l.key.remoteChainSelector)),
+          name: 'raiseOwnFee',
+          operation: 'editChainConfigV2',
+          dependsOn: [drainIdOf.get(laneKeyOf(l.key))!],
+          summary: `raise the own fee of ${m} → ${c} to cover long pool data before it leaves the group`,
+          inputs: { ...params, getChain: undefined },
+          writeSet: [keys.lane(m, c)],
           guardReads: [],
-          signer: poolOwnerSigner(ctx, owner, parsed.mint),
-          progress: list.length,
-        },
-        POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupLanePause,
-        {
-          ...opBase(ctx),
-          tokenAddress: parsed.mint,
-          remoteChainSelectors: list.map((l) => l.key.remoteChainSelector),
-          pausedOutbound: true,
-          ...(ctx.squads && { pausedInbound: list[0]!.ownInboundPaused }),
-        },
-      ),
-    )
-  }
-
-  // ── await the remote stop and the drain, per lane ──
-  const drainIdOf = new Map<string, string>()
-  for (const l of lanes) {
-    const k = laneKeyOf(l.key)
-    const remoteId = stepId(ctx, 'awaitRemoteOutboundStop', l.key.remoteChainSelector, parsed.mint)
-    const drainId = stepId(ctx, 'awaitDrain', l.key.remoteChainSelector, parsed.mint)
-    drainIdOf.set(k, drainId)
-    const confirmed = parsed.confirmed.has(k)
-    specs.push(
-      specOf(
-        ctx,
-        {
-          id: remoteId,
-          name: 'awaitRemoteOutboundStop',
-          operation: 'getMultiTokenPoolLane',
-          dependsOn: pauseIdOf.has(k) ? [pauseIdOf.get(k)!] : [],
-          summary: `wait until ${l.key.remoteChainSelector} stops sending ${parsed.mint}'s counterpart here`,
-          inputs: { lane: [l.key.tokenAddress, l.key.remoteChainSelector] },
-          writeSet: [],
-          guardReads: [`remote:${l.key.remoteChainSelector}:${l.remoteToken}`],
-          signer: { kind: 'anyone' },
+          signer: poolOwnerSigner(ctx, ownerOf.get(m), m),
         },
         {
-          evaluate: async (): Promise<MultiTokenPoolPlanBlock | null> => {
-            const r = await remoteOutboundStopped(ctx, l)
-            if ('stopped' in r)
-              return r.stopped
-                ? null
-                : {
-                    reason: `the remote side of ${parsed.mint} → ${l.key.remoteChainSelector} still sends toward this chain: stop it there first (pause or stop its outbound lane), so no new message strands here`,
-                    remoteChainSelector: l.key.remoteChainSelector,
-                  }
-            return confirmed
-              ? null
-              : {
-                  reason: `the remote side of ${parsed.mint} → ${l.key.remoteChainSelector} cannot be read (${r.unread}): stop it there, then list the lane in solana.confirmInFlightDrained`,
-                  remoteChainSelector: l.key.remoteChainSelector,
-                }
+          run: {
+            generate: async (payer) => ({
+              transactions: [
+                toPlannerTx(
+                  await edit.generate(ctx.chain, { ...params, payer }),
+                  payer,
+                  [m],
+                  'pool-owner',
+                ),
+              ],
+              findings: [],
+            }),
+            execute: async (wallet, computeUnits) => ({
+              hashes: [
+                (
+                  await edit.execute(ctx.chain, {
+                    ...params,
+                    wallet,
+                    ...(computeUnits !== undefined && { computeUnits }),
+                  })
+                ).hash,
+              ],
+              findings: [],
+            }),
           },
         },
       ),
-      specOf(
-        ctx,
-        {
-          id: drainId,
-          name: 'awaitDrain',
-          operation: 'confirmInFlightDrained',
-          dependsOn: [remoteId],
-          summary: `wait until the inbound messages of ${parsed.mint} from ${l.key.remoteChainSelector} drained`,
-          inputs: { lane: [l.key.tokenAddress, l.key.remoteChainSelector] },
-          writeSet: [],
-          guardReads: [keys.lane(parsed.mint, l.key.remoteChainSelector)],
-          signer: { kind: 'anyone' },
-        },
-        {
-          evaluate: () =>
-            Promise.resolve(
-              confirmed
-                ? null
-                : {
-                    reason: `inbound messages of ${parsed.mint} from ${l.key.remoteChainSelector} may still be in flight: once none is (CCIP Explorer or API), list the lane in solana.confirmInFlightDrained`,
-                    remoteChainSelector: l.key.remoteChainSelector,
-                  },
-            ),
-        },
-      ),
     )
   }
-
-  // ── linked lanes: own fee first when they send long data, then unlink ──
-  const leaveIds: string[] = []
-  for (const l of lanes.filter((x) => !x.driven)) {
-    const k = laneKeyOf(l.key)
-    const after = [drainIdOf.get(k)!]
-    if (l.ownFormat === 'long') {
-      const own = await readTokenPoolChainConfigV2(
-        ctx.chain,
-        ctx.ref.program,
-        mint,
-        l.key.remoteChainSelector,
-      )
-      const need = l.uid !== null ? longPoolDataBytes(32) : LONG_POOL_DATA_BYTES
-      const fee = own?.tokenTransferFeeConfig
-      if (!fee?.isEnabled || fee.destBytesOverhead < need) {
-        const id = stepId(ctx, 'editChainConfigV2', l.key.remoteChainSelector, parsed.mint)
-        after.push(id)
-        const config = {
-          destGasOverhead: fee?.destGasOverhead ?? 0,
-          destBytesOverhead: Math.max(need, fee?.destBytesOverhead ?? 0),
-          finalityFeeUSDCents: fee?.finalityFee ?? 0,
-          fastFinalityFeeUSDCents: fee?.fastFinalityFee ?? 0,
-          finalityTransferFeeBps: fee?.finalityBpsFee ?? 0,
-          fastFinalityTransferFeeBps: fee?.fastFinalityBpsFee ?? 0,
-          isEnabled: true,
-        }
-        const params = {
-          poolProgramAddress: ctx.ref.program.toBase58(),
-          tokenAddress: parsed.mint,
-          remoteChainSelector: l.key.remoteChainSelector,
-          tokenTransferFeeConfig: config,
-          authority: owner,
-          ...(ctx.getChain && { getChain: ctx.getChain }),
-        }
-        const edit = new EditChainConfigV2()
+  for (const c of [...new Set(linked.map((l) => l.key.remoteChainSelector))]) {
+    const onChain = new Map(
+      linked.filter((l) => l.key.remoteChainSelector === c).map((l) => [l.key.tokenAddress, l]),
+    )
+    const linkedByOwner = new Map<string, string[]>()
+    for (const m of parsed.mints)
+      if (onChain.has(m))
+        linkedByOwner.set(ownerOf.get(m)!, [...(linkedByOwner.get(ownerOf.get(m)!) ?? []), m])
+    for (const [owner, list] of linkedByOwner)
+      for (const { key, items: chunk } of stableChunks(
+        list,
+        MEMBERS_PER_STEP,
+        () => true,
+        (m) => m,
+      ).chunks) {
+        const id = stepId(ctx, 'unlinkPoolGroupLanes', c, key)
+        const lanes = chunk.map((m) => onChain.get(m)!)
+        for (const m of chunk) leaves(m, id)
+        // unlinked, the lane trusts only its own pools: the group's others are dropped (A21)
+        const dropped = lanes.flatMap((l) => {
+          const pools = l.groupPools.filter((a) => !l.ownPools.includes(a))
+          return pools.length ? [{ lane: l.key, remotePools: pools }] : []
+        })
         specs.push(
-          specOf(
+          opStep(
             ctx,
             {
               id,
-              name: 'raiseOwnFee',
-              operation: 'editChainConfigV2',
-              dependsOn: [drainIdOf.get(k)!],
-              summary: `raise the own fee of ${parsed.mint} → ${l.key.remoteChainSelector} to cover long pool data before it leaves the group`,
-              inputs: { ...params, getChain: undefined },
-              writeSet: [keys.lane(parsed.mint, l.key.remoteChainSelector)],
+              name: 'unlinkPoolGroupLanes',
+              operation: 'unlinkPoolGroupLanes',
+              dependsOn: lanes.flatMap((l) => {
+                const k = laneKeyOf(l.key)
+                return [drainIdOf.get(k)!, ...(feeIdOf.has(k) ? [feeIdOf.get(k)!] : [])]
+              }),
+              summary: `unlink ${chunk.length} lane(s) toward ${c} from the pool group (they keep their own fields)`,
+              writeSet: [...chunk.map((m) => keys.lane(m, c)), keys.chain(g, c)],
               guardReads: [],
-              signer: poolOwnerSigner(ctx, owner, parsed.mint),
+              signer: poolOwnerSigner(ctx, owner),
+              progress: chunk.length,
             },
+            POOL_GROUP_LANE_OPERATIONS.unlinkPoolGroupLanes,
             {
-              run: {
-                generate: async (payer) => ({
-                  transactions: [
-                    toPlannerTx(await edit.generate(ctx.chain, { ...params, payer }), payer, [
-                      parsed.mint,
-                    ]),
-                  ],
-                  findings: [],
-                }),
-                execute: async (wallet, computeUnits) => ({
-                  hashes: [
-                    (
-                      await edit.execute(ctx.chain, {
-                        ...params,
-                        wallet,
-                        ...(computeUnits !== undefined && { computeUnits }),
-                      })
-                    ).hash,
-                  ],
-                  findings: [],
-                }),
-              },
+              ...opBase(ctx),
+              remoteChainSelector: c,
+              tokenAddresses: chunk,
+              ...(dropped.length && { confirmDropped: dropped }),
             },
           ),
         )
       }
+  }
+
+  // ── driven lanes: drop the chains and close the lanes in one transaction (tokens batched) ──
+  const dropsOf = (t: LeavingToken) => {
+    const driven = t.lanes.filter((l) => l.driven)
+    return {
+      driven,
+      chains: [
+        ...new Set([...driven.map((l) => l.key.remoteChainSelector), ...(t.member?.chains ?? [])]),
+      ],
     }
-    // unlinked, the lane trusts only its own pools: the group's others are dropped (A21)
-    const dropped = l.groupPools.filter((a) => !l.ownPools.includes(a))
-    const id = stepId(ctx, 'unlinkPoolGroupLanes', l.key.remoteChainSelector, parsed.mint)
-    leaveIds.push(id)
-    specs.push(
-      opStep(
-        ctx,
-        {
-          id,
-          name: 'unlinkPoolGroupLanes',
-          operation: 'unlinkPoolGroupLanes',
-          dependsOn: after,
-          summary: `unlink ${parsed.mint} → ${l.key.remoteChainSelector} from the pool group (it keeps its own fields)`,
-          writeSet: [
-            keys.lane(parsed.mint, l.key.remoteChainSelector),
-            keys.chain(g, l.key.remoteChainSelector),
-          ],
-          guardReads: [],
-          signer: poolOwnerSigner(ctx, owner, parsed.mint),
-        },
-        POOL_GROUP_LANE_OPERATIONS.unlinkPoolGroupLanes,
-        {
-          ...opBase(ctx),
-          remoteChainSelector: l.key.remoteChainSelector,
-          tokenAddresses: [parsed.mint],
-          ...(dropped.length && { confirmDropped: [{ lane: l.key, remotePools: dropped }] }),
-        },
-      ),
-    )
   }
+  const byOwner = new Map<string, LeavingToken[]>()
+  for (const t of inputs.tokens) byOwner.set(t.owner, [...(byOwner.get(t.owner) ?? []), t])
+  for (const [owner, list] of byOwner)
+    for (const { key, items: chunk } of stableChunks(
+      list,
+      DROPS_PER_STEP,
+      (t) => !!t.member && dropsOf(t).chains.length > 0,
+      (t) => t.mint,
+    ).chunks) {
+      const id = stepId(ctx, 'setPoolGroupMemberRemoteTokens', key)
+      const closing: MultiTokenPoolLaneKey[] = chunk.flatMap((t) =>
+        dropsOf(t).driven.map((l) => l.key),
+      )
+      const removeChains = chunk.flatMap((t) =>
+        dropsOf(t).chains.map((c) => ({ tokenAddress: t.mint, remoteChainSelector: c })),
+      )
+      for (const t of chunk) leaves(t.mint, id)
+      specs.push(
+        opStep(
+          ctx,
+          {
+            id,
+            name: 'dropChainsAndCloseLanes',
+            operation: 'setPoolGroupMemberRemoteTokens',
+            dependsOn: closing.map((l) => drainIdOf.get(laneKeyOf(l))!),
+            summary: `drop ${removeChains.length} chain(s) from ${chunk.length} member(s) and close their ${closing.length} driven lane(s)`,
+            writeSet: [
+              ...chunk.map((t) => keys.member(t.mint)),
+              ...closing.map((l) => keys.lane(l.tokenAddress, l.remoteChainSelector)),
+            ],
+            guardReads: [...new Set(removeChains.map((r) => keys.chain(g, r.remoteChainSelector)))],
+            signer: poolOwnerSigner(ctx, owner),
+            progress: removeChains.length,
+          },
+          POOL_GROUP_MEMBERSHIP_OPERATIONS.setPoolGroupMemberRemoteTokens,
+          {
+            ...opBase(ctx),
+            removeChains,
+            ...(closing.length && {
+              confirmDroppedLanes: closing,
+              closeDroppedLanes: true,
+              confirmInFlightDrained: closing,
+            }),
+          },
+        ),
+      )
+    }
 
-  // ── driven lanes: drop the chains and close the lanes in one transaction ──
-  const driven = lanes.filter((l) => l.driven)
-  const dropChains = [
-    ...new Set([...driven.map((l) => l.key.remoteChainSelector), ...memberChains.filter(inScope)]),
-  ]
-  if (member && dropChains.length) {
-    const closing: MultiTokenPoolLaneKey[] = driven.map((l) => l.key)
-    const id = stepId(ctx, 'setPoolGroupMemberRemoteTokens', parsed.mint)
-    leaveIds.push(id)
-    specs.push(
-      opStep(
-        ctx,
-        {
-          id,
-          name: 'dropChainsAndCloseLanes',
-          operation: 'setPoolGroupMemberRemoteTokens',
-          dependsOn: driven.map((l) => drainIdOf.get(laneKeyOf(l.key))!),
-          summary: `drop ${dropChains.length} chain(s) from ${parsed.mint}'s member and close its ${closing.length} driven lane(s)`,
-          writeSet: [
-            keys.member(parsed.mint),
-            ...closing.map((l) => keys.lane(l.tokenAddress, l.remoteChainSelector)),
-          ],
-          guardReads: dropChains.map((c) => keys.chain(g, c)),
-          signer: poolOwnerSigner(ctx, owner, parsed.mint),
-          progress: dropChains.length,
-        },
-        POOL_GROUP_MEMBERSHIP_OPERATIONS.setPoolGroupMemberRemoteTokens,
-        {
-          ...opBase(ctx),
-          removeChains: dropChains.map((c) => ({
-            tokenAddress: parsed.mint,
-            remoteChainSelector: c,
-          })),
-          ...(closing.length && {
-            confirmDroppedLanes: closing,
-            closeDroppedLanes: true,
-            confirmInFlightDrained: closing,
-          }),
-        },
-      ),
-    )
-  }
-
-  // ── the membership closes last (no chain filter) ──
-  if (member && !parsed.selectors)
-    specs.push(
-      opStep(
-        ctx,
-        {
-          id: stepId(ctx, 'closePoolGroupMembers', parsed.mint),
-          name: 'closePoolGroupMembers',
-          operation: 'closePoolGroupMembers',
-          dependsOn: leaveIds,
-          summary: `close ${parsed.mint}'s membership (rent to its receiver)`,
-          writeSet: [keys.member(parsed.mint), keys.registry(g)],
-          guardReads: [],
-          signer: poolOwnerSigner(ctx, owner, parsed.mint),
-        },
-        POOL_GROUP_MEMBERSHIP_OPERATIONS.closePoolGroupMembers,
-        { ...opBase(ctx), tokenAddresses: [parsed.mint] },
-      ),
-    )
+  // ── the memberships close last (no chain filter) ──
+  if (!parsed.selectors)
+    for (const [owner, list] of byOwner)
+      for (const { key, items: chunk } of stableChunks(
+        list,
+        MEMBERS_PER_STEP,
+        (t) => !!t.member,
+        (t) => t.mint,
+      ).chunks)
+        specs.push(
+          opStep(
+            ctx,
+            {
+              id: stepId(ctx, 'closePoolGroupMembers', key),
+              name: 'closePoolGroupMembers',
+              operation: 'closePoolGroupMembers',
+              dependsOn: chunk.flatMap((t) => leaveIdsOf.get(t.mint) ?? []),
+              summary: `close ${chunk.length} membership(s) (rent to their receivers)`,
+              writeSet: [...chunk.map((t) => keys.member(t.mint)), keys.registry(g)],
+              guardReads: [],
+              signer: poolOwnerSigner(ctx, owner),
+              progress: chunk.length,
+            },
+            POOL_GROUP_MEMBERSHIP_OPERATIONS.closePoolGroupMembers,
+            { ...opBase(ctx), tokenAddresses: chunk.map((t) => t.mint) },
+          ),
+        )
   return {
     specs,
     findings: [],
-    observedAt: slot,
-    poolGroupId: group.poolGroupId,
+    observedAt: inputs.slot,
+    poolGroupId: inputs.poolGroupId,
     poolGroupAddress: g.toBase58(),
   }
 }

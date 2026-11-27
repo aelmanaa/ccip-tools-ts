@@ -69,6 +69,12 @@ import {
   requireRentReceiver,
 } from './members-common.ts'
 import {
+  groupOfPausedLaneIx,
+  pausedLaneInstructions,
+  pausedLanePdas,
+  pausedLanesOf,
+} from './paused-lanes.ts'
+import {
   type ParsedGroupWrite,
   decodeOne,
   eventAccounts,
@@ -397,6 +403,7 @@ type ParsedSetRemoteTokens = ParsedGroupWrite & {
   closeDroppedLanes: boolean
   confirmInFlightDrained: PoolGroupLaneKey[]
   acknowledged: PoolGroupLaneKey[]
+  createLanesPaused: boolean
 }
 
 /** A member's remote tokens, with add/remove semantics (the token owner). */
@@ -451,6 +458,15 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
     const close: unknown = params.closeDroppedLanes
     if (close !== undefined && typeof close !== 'boolean')
       throw new CCTParamsInvalidError(this.name, 'closeDroppedLanes', 'must be a boolean')
+    const createPaused: unknown = params.createLanesPaused
+    if (createPaused !== undefined && typeof createPaused !== 'boolean')
+      throw new CCTParamsInvalidError(this.name, 'createLanesPaused', 'must be a boolean')
+    if (createPaused === true && close === true)
+      throw new CCTParamsInvalidError(
+        this.name,
+        'createLanesPaused',
+        'creates lanes and closes dropped ones: run the close as its own write',
+      )
     return {
       ...parseGroupWrite(this.name, params),
       updates,
@@ -473,12 +489,22 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
         'acknowledgeLiveAdmission',
         params.acknowledgeLiveAdmission,
       ),
+      createLanesPaused: createPaused === true,
     }
+  }
+
+  /** `set_lane_pause` names the pool group second; the other instructions name it first. */
+  protected override proposalGroup(ix: TransactionInstruction): PublicKey | undefined {
+    return groupOfPausedLaneIx(ix)
   }
 
   /**
    * `set_member_remote_tokens` with each member's merged list, then (with `closeDroppedLanes`)
-   * `close_group_lanes` per chain for the lanes the write drops, in the same transaction.
+   * `close_group_lanes` per chain for the lanes the write drops, in the same transaction. With
+   * `createLanesPaused`, each member's write goes in its own transaction with
+   * `materialize_group_lanes` and `set_lane_pause(true, true)` for every lane a running chain admits
+   * and the member lists without a lane yet: those lanes exist, paused, from the moment they become
+   * materializable, so they never go live here and need no acknowledgement (S6 review M6).
    * @throws {@link CCTParamsInvalidError} if a token is not a member of the group, `authority`
    *   does not own its pool, a remote token is another member's, a dropped live lane is not in
    *   `confirmDroppedLanes`, a lane to close is not paused outbound and confirmed drained, or
@@ -553,6 +579,8 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
     }[] = []
     const repointed: PoolGroupLaneKey[] = []
     const admitted: PoolGroupLaneKey[] = []
+    // lanes a running chain admits, listed after the write, with no lane yet: created paused here
+    const createPaused: PoolGroupLaneKey[] = []
     for (const { mint, member, before, chains } of after) {
       const lanes = new Set(member.lanePayers.map((p) => p.remoteChainSelector))
       for (const s of lanes) {
@@ -577,12 +605,10 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
       }
       for (const s of chains.keys()) {
         const r = records.get(s)
-        if (
-          !before.has(s) &&
-          !lanes.has(s) &&
-          r &&
-          admitsLive(r.record, r.data, member.memberIndex)
-        )
+        const live = !lanes.has(s) && !!r && admitsLive(r.record, r.data, member.memberIndex)
+        if (live && parsed.createLanesPaused)
+          createPaused.push({ tokenAddress: mint, remoteChainSelector: s })
+        else if (live && !before.has(s))
           admitted.push({ tokenAddress: mint, remoteChainSelector: s })
       }
     }
@@ -610,30 +636,34 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
     )
     const client = createPoolGroupProgram(chain, ref.program, parsed.payer)
     const registry = poolGroupPdas.groupRegistry(ref.program, ref.group)
-    const setIx = await client.methods
-      .setMemberRemoteTokens({
-        rentReceiver: parsed.rentReceiver ?? null,
-        members: after.map(({ mint, chains }) => ({
-          mint: new PublicKey(mint),
-          remoteTokens: memberEntriesOf(chains),
-        })),
-      })
-      .accountsStrict({
-        group: ref.group,
-        groupRegistry: registry,
-        groupOwner: null,
-        authority,
-        systemProgram: SystemProgram.programId,
-        ...eventAccounts(ref.program),
-      })
-      .remainingAccounts(
-        after.flatMap(({ member }, i) => [
-          meta(pools[i]!.address, false),
-          meta(poolGroupPdas.groupMember(ref.program, new PublicKey(member.mint)), true),
-          meta(parsed.rentReceiver ?? new PublicKey(member.rentReceiver), true),
-        ]),
-      )
-      .instruction()
+    const setIxOf = (indices: number[]) =>
+      client.methods
+        .setMemberRemoteTokens({
+          rentReceiver: parsed.rentReceiver ?? null,
+          members: indices.map((i) => ({
+            mint: new PublicKey(after[i]!.mint),
+            remoteTokens: memberEntriesOf(after[i]!.chains),
+          })),
+        })
+        .accountsStrict({
+          group: ref.group,
+          groupRegistry: registry,
+          groupOwner: null,
+          authority,
+          systemProgram: SystemProgram.programId,
+          ...eventAccounts(ref.program),
+        })
+        .remainingAccounts(
+          indices.flatMap((i) => [
+            meta(pools[i]!.address, false),
+            meta(
+              poolGroupPdas.groupMember(ref.program, new PublicKey(after[i]!.member.mint)),
+              true,
+            ),
+            meta(parsed.rentReceiver ?? new PublicKey(after[i]!.member.rentReceiver), true),
+          ]),
+        )
+        .instruction()
     const closeIxs = await closeLanesInstructions(
       chain,
       ref,
@@ -665,16 +695,35 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
           ]
         : []),
     ]
+    const signerRoles = { [authority.toBase58()]: 'pool-owner' as const }
+    // created paused: each member's write with its lanes' creation and pause, one transaction each
+    const pausedIxs = parsed.createLanesPaused
+      ? await pausedLaneInstructions(chain, ref, parsed.payer, authority, createPaused)
+      : undefined
+    const items = pausedIxs
+      ? await Promise.all(
+          after.map(async ({ mint }, i) => {
+            const own = createPaused.filter((l) => l.tokenAddress === mint)
+            return {
+              tokenAddresses: [mint],
+              instructions: [await setIxOf([i]), ...(pausedIxs.get(mint) ?? [])],
+              signerRoles,
+              ...(own.length && { createdPdas: pausedLanePdas(ref.program, own) }),
+            }
+          }),
+        )
+      : [
+          {
+            tokenAddresses: mints,
+            instructions: [await setIxOf(after.map((_, i) => i)), ...closeIxs],
+            signerRoles,
+          },
+        ]
     return {
       group: ref.group,
-      items: [
-        {
-          tokenAddresses: mints,
-          instructions: [setIx, ...closeIxs],
-          signerRoles: { [authority.toBase58()]: 'pool-owner' },
-        },
-      ],
+      items,
       judge: { failsClosedSeverity: 'error', drainConfirmed: lanesToClose },
+      ...(pausedIxs && { judgeEach: true }),
       expected: {
         [`members.remoteTokens`]: after.map(({ mint, before }) => [
           mint,
@@ -694,6 +743,7 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
         ...sealLanes('acknowledgeLiveAdmission', parsed.acknowledged),
         ...sealLanes('confirmDroppedLanes', parsed.confirmDroppedLanes),
         ...sealLanes('confirmInFlightDrained', parsed.confirmInFlightDrained),
+        ...sealLanes('createLanesPaused', createPaused),
       },
       goingLive: admitted,
       followUps: () => followUps,
@@ -711,10 +761,11 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
     const ixs = decodeOne(
       this.name,
       instructions,
-      ['setMemberRemoteTokens', 'closeGroupLanes'],
+      ['setMemberRemoteTokens', 'closeGroupLanes', 'materializeGroupLanes', 'setLanePause'],
       false,
     )
-    const set = ixs.find((d) => d.name === 'setMemberRemoteTokens')
+    const sets = ixs.filter((d) => d.name === 'setMemberRemoteTokens')
+    const set = sets[0]
     if (!set)
       throw new CCTParamsInvalidError(
         this.name,
@@ -722,15 +773,30 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
         'the proposal sets no remote tokens',
       )
     const updates: ParsedSetRemoteTokens['updates'] = new Map()
-    const members = field(set.data, 'params', 'members')
-    for (const m of Array.isArray(members) ? members : [])
-      updates.set(keyField(this.name, m, 'mint').toBase58(), {
-        upsert: new Map(),
-        remove: new Set(),
-        replace: chainsOfData(field(m, 'remoteTokens')),
-      })
+    for (const s of sets) {
+      const members = field(s.data, 'params', 'members')
+      for (const m of Array.isArray(members) ? members : [])
+        updates.set(keyField(this.name, m, 'mint').toBase58(), {
+          upsert: new Map(),
+          remove: new Set(),
+          replace: chainsOfData(field(m, 'remoteTokens')),
+        })
+    }
     const receiver = field(set.data, 'params', 'rentReceiver')
     const closes = ixs.some((d) => d.name === 'closeGroupLanes')
+    // the paused creation is re-planned from current state: the proposal must create exactly
+    // the lanes the plan does (the sealed list), each paused both ways
+    const createLanesPaused = ixs.some((d) => d.name === 'materializeGroupLanes')
+    if (createLanesPaused) {
+      const created = pausedLanesOf(ref.program, ixs).map(laneId).sort()
+      const sealedLanes = unsealLanes(sealed, 'createLanesPaused').map(laneId).sort()
+      if (created.join() !== sealedLanes.join())
+        throw new CCTParamsInvalidError(
+          this.name,
+          'transactions',
+          'the proposal creates lanes it does not pause both ways, or other lanes than it sealed',
+        )
+    }
     return {
       ...proposalBase(ref, set.ix.keys[3]!.pubkey, guardOptions),
       updates,
@@ -740,6 +806,7 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
       closeDroppedLanes: closes,
       confirmInFlightDrained: unsealLanes(sealed, 'confirmInFlightDrained'),
       acknowledged: unsealLanes(sealed, 'acknowledgeLiveAdmission'),
+      createLanesPaused,
     }
   }
 }

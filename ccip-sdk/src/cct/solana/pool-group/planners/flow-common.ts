@@ -10,7 +10,6 @@ import { PublicKey } from '@solana/web3.js'
 
 import type { ChainGetter } from '../../../../chain.ts'
 import { canonicalJson } from '../../../canonical.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
 import type {
   MultiTokenPoolLaneFinding,
   MultiTokenPoolPlanBlock,
@@ -25,6 +24,7 @@ import { GetPoolGroupMembers } from '../operations/get-pool-group-members.ts'
 import { GetPoolGroup } from '../operations/get-pool-group.ts'
 import { readPoolGroupLanes } from '../operations/lane.ts'
 import { CheckMultiTokenPoolLane } from '../operations/multi-token-pool.ts'
+import { POOL_GROUP_PAUSE_OPERATIONS } from '../operations/pauses.ts'
 import { POOL_GROUP_POLICY_OPERATIONS } from '../operations/policies.ts'
 import { readPoolStates } from '../operations/write-common.ts'
 import {
@@ -49,13 +49,12 @@ import {
   type PoolGroupOpLike,
   type StepSpec,
   bindPoolGroupOp,
-  chunked,
   keys,
   laneKeyOf,
   specOf,
   stepId,
 } from './context.ts'
-import type { PlannedStepFields } from './engine.ts'
+import { type PlannedStepFields, stableChunks } from './engine.ts'
 
 /** Lanes per materialize, assign or sync step (the op packs them into as many transactions as fit). @internal */
 export const LANES_PER_STEP = 24
@@ -181,6 +180,14 @@ export function recordAdmits(record: GetPoolGroupChainResult, mint: string): boo
 /** Whether a chain record is live: a lane mode and the driven lanes not paused. @internal */
 export const recordLive = (record: GetPoolGroupChainResult) =>
   record.laneMode !== 'off' && !record.drivenLanesPaused
+
+/**
+ * Whether a chain record runs its driven lanes now (live, and neither the group nor both chain
+ * directions paused): a lane it admits is materializable live by anyone, so the planner creates it
+ * paused in the admitting transaction (`createLanesPaused`, the ops' `admitsLive`). @internal
+ */
+export const recordRuns = (record: GetPoolGroupChainResult) =>
+  recordLive(record) && !record.groupPaused && !(record.pausedOutbound && record.pausedInbound)
 
 /** Whether a lane of this pool group exists for the pair. @internal */
 export function laneOf(
@@ -355,7 +362,8 @@ export function opStep<Name extends string, P extends { authority?: string }>(
 
 /**
  * `set_group_chain_lanes` as a step: the driven-lanes pause (leaving `'off'`, with the mode), an
- * admission on a live chain (with the acknowledged lanes), or the unpause.
+ * admission on a live chain (with the acknowledged lanes, or creating the lanes it opens paused), or
+ * the unpause.
  * @internal
  */
 export function chainLanesStep<Name extends string>(
@@ -367,22 +375,31 @@ export function chainLanesStep<Name extends string>(
     drivenLanesPaused?: boolean
     addTokens?: string[]
     acknowledgeLiveAdmission?: PoolGroupLaneKey[]
+    /** Lanes the admission opens on a running chain, created paused in its transaction. */
+    createPaused?: PoolGroupLaneKey[]
     dependsOn: string[]
     summary: string
-    idPart: string
+    id: string
   },
 ): StepSpec<Name> {
-  const roles =
-    input.drivenLanesPaused === false ? ['unpauser'] : ['policyAdmin', 'connectionAdmin', 'pauser']
+  // creating lane pauses needs the owner or pauser on top of the CONNECTION writer: the owner
+  const roles = input.createPaused?.length
+    ? []
+    : input.drivenLanesPaused === false
+      ? ['unpauser']
+      : ['policyAdmin', 'connectionAdmin', 'pauser']
   return opStep(
     ctx,
     {
-      id: stepId(ctx, input.idPart, input.selector),
+      id: input.id,
       name,
       operation: 'setPoolGroupChainLanes',
       dependsOn: input.dependsOn,
       summary: input.summary,
-      writeSet: [keys.chain(ctx.ref.group, input.selector)],
+      writeSet: [
+        keys.chain(ctx.ref.group, input.selector),
+        ...(input.createPaused ?? []).map((l) => keys.lane(l.tokenAddress, l.remoteChainSelector)),
+      ],
       guardReads: [
         ...(input.addTokens ?? []).map(keys.member),
         ...(input.acknowledgeLiveAdmission ?? []).map((l) =>
@@ -401,23 +418,90 @@ export function chainLanesStep<Name extends string>(
       ...(input.acknowledgeLiveAdmission?.length && {
         acknowledgeLiveAdmission: input.acknowledgeLiveAdmission,
       }),
+      ...(input.createPaused?.length && { createLanesPaused: true }),
     },
   )
 }
 
-/** `materialize_group_lanes` steps for `mints` on `selector` (cranks, chunked). @internal */
+/**
+ * The lift of lane pauses this run set when it created the lanes paused (`createLanesPaused`): one
+ * `set_lane_pause(false, false)` step per mint, which runs the make-live check on the lanes' real
+ * accounts. Only when `unpauseDecision` lets it.
+ * @internal
+ */
+export function laneUnpauseStep<Name extends string>(
+  ctx: PlannerContext,
+  name: Name,
+  input: {
+    mint: string
+    owner: string | undefined
+    selectors: bigint[]
+    dependsOn: string[]
+    id: string
+  },
+): StepSpec<Name> {
+  return opStep(
+    ctx,
+    {
+      id: input.id,
+      name,
+      operation: 'setPoolGroupLanePause',
+      dependsOn: input.dependsOn,
+      summary: `lift the lane pause this run set on ${input.selectors.length} lane(s) of ${input.mint}`,
+      writeSet: input.selectors.map((c) => keys.lane(input.mint, c)),
+      guardReads: input.selectors.map((c) => keys.chain(ctx.ref.group, c)),
+      signer: poolOwnerSigner(ctx, input.owner, input.mint),
+      progress: input.selectors.length,
+    },
+    POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupLanePause,
+    {
+      ...opBase(ctx),
+      tokenAddress: input.mint,
+      remoteChainSelectors: input.selectors,
+      pausedOutbound: false,
+      pausedInbound: false,
+    },
+  )
+}
+
+/**
+ * Whether a lane is still as this run's paused creation left it: driven, of this pool group, and
+ * paused both ways by its own flags (the `onChain` input of `unpauseDecision`). @internal
+ */
+export function lanePausedAsCreated(
+  lane: GetPoolGroupLaneResult | undefined,
+  group: PublicKey,
+): { ok: true } | { ok: false; reason: string } {
+  if (!lane) return { ok: false, reason: 'the lane does not exist' }
+  if (lane.poolGroupAddress !== group.toBase58())
+    return { ok: false, reason: 'the lane is not linked to this pool group' }
+  if (!lane.pausedOutbound || !lane.pausedInbound)
+    return {
+      ok: false,
+      reason: `its own pause is outbound ${lane.pausedOutbound}, inbound ${lane.pausedInbound}, not both, as this run set it`,
+    }
+  return { ok: true }
+}
+
+/**
+ * `materialize_group_lanes` steps on `selector` (cranks): `all` (the full candidate list, in a stable
+ * order) chunked with {@link stableChunks}, each chunk keeping the mints `keep` admits, its id keyed
+ * by the chunk's first candidate (M1).
+ * @internal
+ */
 export function materializeSteps<Name extends string>(
   ctx: PlannerContext,
   name: Name,
   selector: bigint,
-  mints: readonly string[],
+  all: readonly string[],
+  keep: (mint: string) => boolean,
   dependsOn: (chunk: string[]) => string[],
 ): StepSpec<Name>[] {
-  return chunked(mints, LANES_PER_STEP).map((chunk, i, all) =>
+  return stableChunks(all, LANES_PER_STEP, keep, (m) => m).chunks.map(({ key, items: chunk }) =>
     opStep(
       ctx,
       {
-        id: stepId(ctx, 'materializePoolGroupLanes', selector, all.length > 1 ? i : undefined),
+        id: stepId(ctx, 'materializePoolGroupLanes', selector, key),
         name,
         operation: 'materializePoolGroupLanes',
         dependsOn: dependsOn(chunk),
@@ -468,7 +552,9 @@ export function assignmentHolds(
 
 /**
  * `assign_lane_policies` steps: lanes of one chain grouped by their resulting class sources and pool
- * owner (one assignment per instruction), chunked. The write set holds the lane, the group chain
+ * owner (one assignment per instruction; the resulting source is the same before and after the
+ * assignment), chunked with {@link stableChunks} over every lane (`done` ones left out of their
+ * chunk), the id keyed by group and first lane (M1). The write set holds the lane, the group chain
  * record and every policy chain record it references (design addendum §3.5).
  * @internal
  */
@@ -483,25 +569,37 @@ export function assignSteps<Name extends string>(
       mint: string
       owner: string | undefined
       current: GetPoolGroupLaneResult['classSource']
+      /** Already assigned: kept in the chunking, left out of the step. */
+      done?: boolean
     }[]
     dependsOn: (mints: string[]) => string[]
   },
 ): StepSpec<Name>[] {
   const groups = new Map<
     string,
-    { source: PoolGroupClassSourceInput; owner?: string; mints: string[] }
+    { source: PoolGroupClassSourceInput; owner?: string; mints: string[]; done: Set<string> }
   >()
   for (const l of input.lanes) {
     const source = assignedSources(l.current, input.policyId, input.carried)
     const k = `${l.owner ?? ''}:${canonicalJson(source)}`
-    const g = groups.get(k) ?? { source, ...(l.owner && { owner: l.owner }), mints: [] }
+    const g = groups.get(k) ?? {
+      source,
+      ...(l.owner && { owner: l.owner }),
+      mints: [],
+      done: new Set<string>(),
+    }
     g.mints.push(l.mint)
+    if (l.done) g.done.add(l.mint)
     groups.set(k, g)
   }
   const specs: StepSpec<Name>[] = []
-  let n = 0
   for (const g of groups.values())
-    for (const chunk of chunked(g.mints, LANES_PER_STEP)) {
+    for (const { key, items: chunk } of stableChunks(
+      g.mints,
+      LANES_PER_STEP,
+      (m) => !g.done.has(m),
+      (m) => m,
+    ).chunks) {
       const policies = new Set<number>(
         Object.values(g.source).flatMap((s) => (s.kind === 'policy' ? [s.policyId] : [])),
       )
@@ -509,7 +607,7 @@ export function assignSteps<Name extends string>(
         opStep(
           ctx,
           {
-            id: stepId(ctx, 'assignPoolGroupLanePolicies', input.selector, n++),
+            id: stepId(ctx, 'assignPoolGroupLanePolicies', input.selector, key),
             name,
             operation: 'assignPoolGroupLanePolicies',
             dependsOn: input.dependsOn(chunk),
@@ -599,9 +697,4 @@ export function checkStep<Name extends string>(
       },
     },
   )
-}
-
-/** A chain record must exist and serve driven lanes for a token's listed chain. @internal */
-export function refuseChain(operation: string, param: string, reason: string): never {
-  throw new CCTParamsInvalidError(operation, param, reason)
 }

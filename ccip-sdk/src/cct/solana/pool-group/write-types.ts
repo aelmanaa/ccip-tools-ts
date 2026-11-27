@@ -121,6 +121,8 @@ export type PoolGroupRequiredSigner = {
     | 'pool-group-role'
     | 'list-admin'
     | 'nonce-authority'
+    | 'token-admin'
+    | 'lookup-table-authority'
 }
 
 /** An unsigned transaction of a pool-group op. */
@@ -1265,6 +1267,14 @@ export type SetPoolGroupMemberRemoteTokensParams = PoolGroupWriteParams & {
   confirmInFlightDrained?: PoolGroupLaneKey[]
   /** Lanes the write makes materializable on an unpaused chain; refused unless listed here. */
   acknowledgeLiveAdmission?: PoolGroupLaneKey[]
+  /**
+   * Create, in the same transaction as each member's write, every lane a running chain admits and
+   * the member lists without a lane yet, paused both ways (`materialize_group_lanes`, then
+   * `set_lane_pause`). No third party can then create such a lane unpaused, so it needs no
+   * `acknowledgeLiveAdmission`; lift its pause with `setPoolGroupLanePause` once it passes the lane
+   * check. `authority` pays the lanes' rent. Not with `closeDroppedLanes`.
+   */
+  createLanesPaused?: boolean
 }
 
 /** Result fields of `setPoolGroupMemberRemoteTokens`. */
@@ -1320,6 +1330,14 @@ export type SetPoolGroupChainLanesParams = PoolGroupWriteParams & {
   acknowledgeNonAtomicBitmapWrite?: boolean
   /** Lanes the write makes live or materializable on an unpaused chain; refused unless listed here. */
   acknowledgeLiveAdmission?: PoolGroupLaneKey[]
+  /**
+   * Create, in the same transaction, every lane the write admits on a running chain for a member
+   * that lists the chain and has no lane yet, paused both ways (`materialize_group_lanes`, then
+   * `set_lane_pause` per mint). Those lanes need no `acknowledgeLiveAdmission`; lift their pause with
+   * `setPoolGroupLanePause` once they pass the lane check. `authority` must also be the pool group
+   * owner or pauser (it sets the lane pauses) and pays the lanes' rent. Not with a split bitmap write.
+   */
+  createLanesPaused?: boolean
 }
 
 /**

@@ -5,7 +5,7 @@
  * @packageDocumentation
  */
 
-import { PublicKey } from '@solana/web3.js'
+import { Keypair, PublicKey } from '@solana/web3.js'
 
 import { CCIPWalletInvalidError } from '../../../../errors/index.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
@@ -20,6 +20,7 @@ import {
   type PlannerContext,
   parseLandedStepIds,
   parsePlannerSigner,
+  parseRunId,
 } from './context.ts'
 import { expandEnablement, parseEnablement } from './enable-chain.ts'
 import { expandOnboarding, parseOnboarding } from './onboard.ts'
@@ -52,6 +53,7 @@ type CommonParams = Pick<
   | 'landedStepIds'
   | 'getChain'
   | 'authority'
+  | 'runId'
 > & {
   solana?: { budget?: SolanaTxBudget; crankPayer?: string; lookupTablePayer?: string }
 }
@@ -83,6 +85,7 @@ function contextOf(
       ...(live?.getChain && { getChain: live.getChain }),
       ...(live?.concurrency !== undefined && { concurrency: live.concurrency }),
       landed: parseLandedStepIds(operation, params.landedStepIds),
+      runId: parseRunId(operation, params.runId),
       squads: budget?.executor === 'squads-v4',
     },
     options: {
@@ -188,7 +191,16 @@ export const SOLANA_MULTI_TOKEN_POOL_PLANNERS = {
     PoolGroupOnboardingStepName,
     GenerateOnboardMultiTokenPoolTokensParams,
     ExecuteOnboardMultiTokenPoolTokensParams
-  >(onboarding, ({ wallet: _w, computeUnits: _c, ...rest }, payer) => ({ ...rest, payer })),
+  >(onboarding, ({ wallet: _w, computeUnits: _c, ...rest }, payer) => ({
+    ...rest,
+    payer,
+    // the signed form runs the whole run in one call: it may draw the new group's id itself
+    ...(rest.solana?.create &&
+      rest.poolGroupId === undefined &&
+      rest.poolGroupAddress === undefined && {
+        poolGroupId: Keypair.generate().publicKey.toBase58(),
+      }),
+  })),
   chainEnablement: forms<
     PoolGroupChainEnablementStepName,
     GenerateEnableMultiTokenPoolChainParams,

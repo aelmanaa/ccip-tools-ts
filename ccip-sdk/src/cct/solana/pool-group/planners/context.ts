@@ -30,7 +30,7 @@ import type {
   PoolGroupUnsignedTx,
   SolanaTxBudget,
 } from '../write-types.ts'
-import { type PlannedStepFields, planStep, resolveActor } from './engine.ts'
+import { type PlannedStepFields, newRunId, planStep, resolveActor } from './engine.ts'
 
 /** The parsed context of one planner call. @internal */
 export type PlannerContext = {
@@ -53,6 +53,8 @@ export type PlannerContext = {
   concurrency?: number
   /** This run's landed step ids (`landedStepIds`, plus what the signed run landed). */
   landed: Set<string>
+  /** This run's id: every pause step id carries it, so a landed list never crosses runs (M2). */
+  runId: string
   /** Whether the transactions are built for a Squads vault (deferred execution). */
   squads: boolean
 }
@@ -122,6 +124,19 @@ export function stepId(
   ].join('/')
 }
 
+/**
+ * A step id bound to this run (`…/run-<runId>`): every step that pauses, and the unpause of that
+ * pause, so `landedStepIds` kept from another run never lifts this run's pauses or theirs.
+ * @internal
+ */
+export function runScopedId(
+  ctx: PlannerContext,
+  operation: string,
+  ...rest: (string | bigint | number | undefined)[]
+): string {
+  return stepId(ctx, operation, ...rest, `run-${ctx.runId}`)
+}
+
 /** Resource keys of the Solana key scheme (design §8.1). @internal */
 export const keys = {
   group: (g: PublicKey) => `pool-group:${g.toBase58()}`,
@@ -140,13 +155,6 @@ export const keys = {
 /** Lanes, each once, by key. @internal */
 export function laneKeyOf(l: PoolGroupLaneKey): string {
   return `${l.tokenAddress}:${l.remoteChainSelector}`
-}
-
-/** Splits `items` into chunks of at most `size`. @internal */
-export function chunked<T>(items: readonly T[], size: number): T[][] {
-  const out: T[][] = []
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
-  return out
 }
 
 /**
@@ -217,15 +225,18 @@ function computeBudgetOf(tx: UnsignedSolanaTx, discriminator: 2 | 3): number {
 
 /**
  * A transaction of a non-pool-group op (`onboardToken`'s, `editChainConfigV2`, a table extend) in the
- * planner's transaction shape: its signers from the instructions, its compute budget as placed (0 when
- * not set). It has no `outerInstructions`, so `toPoolGroupSquadsBatch` refuses it: a Squads vault
- * proposes it as a single vault transaction.
+ * planner's transaction shape: its signers from the instructions, each labelled `role` (what the
+ * step's actor signs as: `'token-admin'` for `onboardToken`'s steps, `'lookup-table-authority'` for a
+ * table extend, `'pool-owner'` for a lane edit), its compute budget as placed (0 when not set). It has
+ * no `outerInstructions`, so `toPoolGroupSquadsBatch` refuses it: a Squads vault proposes it as a
+ * single vault transaction.
  * @internal
  */
 export function toPlannerTx(
   tx: UnsignedSolanaTx,
   payer: string,
   tokenAddresses: string[],
+  role: Exclude<PoolGroupUnsignedTx['requiredSigners'][number]['role'], 'payer'>,
 ): PoolGroupUnsignedTx {
   const signers = new Set<string>()
   for (const ix of tx.instructions)
@@ -235,7 +246,7 @@ export function toPlannerTx(
     ...tx,
     requiredSigners: [
       { address: payer, role: 'payer' },
-      ...[...signers].map((address) => ({ address, role: 'pool-owner' as const })),
+      ...[...signers].map((address) => ({ address, role })),
     ],
     tokenAddresses,
     computeUnitLimit: computeBudgetOf(tx, 2),
@@ -291,6 +302,22 @@ export function parsePlannerSigner(
     ...(crankPayer && { crankPayer: crankPayer.toBase58() }),
     ...(lookupTablePayer && { lookupTablePayer: lookupTablePayer.toBase58() }),
   }
+}
+
+/**
+ * Parses `runId` (letters, digits, `_` and `-`, at most 64), else a new one: the unsigned caller
+ * passes back the `runId` the first plan returned, with `landedStepIds`.
+ * @internal
+ */
+export function parseRunId(operation: string, value: unknown): string {
+  if (value === undefined) return newRunId()
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(value))
+    throw new CCTParamsInvalidError(
+      operation,
+      'runId',
+      'must be the runId a plan of this run returned (letters, digits, _ and -, at most 64)',
+    )
+  return value
 }
 
 /** Parses `landedStepIds`: an array of strings. @internal */

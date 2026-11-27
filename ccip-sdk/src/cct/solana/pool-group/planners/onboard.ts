@@ -9,7 +9,7 @@
  * @packageDocumentation
  */
 
-import { Keypair, PublicKey } from '@solana/web3.js'
+import { PublicKey } from '@solana/web3.js'
 
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import type {
@@ -39,7 +39,7 @@ import { POOL_GROUP_LIFECYCLE_OPERATIONS } from '../operations/lifecycle.ts'
 import { parseMemberChains } from '../operations/members-common.ts'
 import { POOL_GROUP_MEMBERSHIP_OPERATIONS } from '../operations/membership.ts'
 import type {
-  PoolGroupLaneKey,
+  GetPoolGroupChainResult,
   PoolGroupMemberRemoteToken,
   PoolGroupPolicyClass,
 } from '../types.ts'
@@ -48,13 +48,13 @@ import {
   type Expansion,
   type PlannerContext,
   type StepSpec,
-  chunked,
   keys,
+  runScopedId,
   specOf,
   stepId,
   toPlannerTx,
 } from './context.ts'
-import { unpauseDecision } from './engine.ts'
+import { stableChunks, unpauseDecision } from './engine.ts'
 import {
   type LaneCheckInputs,
   type PlanState,
@@ -63,17 +63,21 @@ import {
   chainLanesStep,
   checkStep,
   groupSigner,
+  laneCheckOptions,
   laneOf,
+  lanePausedAsCreated,
+  laneUnpauseStep,
   materializeSteps,
   opBase,
   opStep,
   poolOwnerSigner,
   readPlanState,
   recordAdmits,
-  recordLive,
+  recordRuns,
   sectionHolds,
   securityCopiedFindings,
 } from './flow-common.ts'
+import { mergeBlocks } from './run.ts'
 import type {
   GenerateOnboardMultiTokenPoolTokensParams,
   PoolGroupOnboardingCreate,
@@ -86,7 +90,11 @@ type Name = PoolGroupOnboardingStepName
 /** Tokens per `joinPoolGroup` step (the op packs them, about 3 per transaction). @internal */
 export const MEMBERS_PER_STEP = 12
 
-/** `onboardToken`'s step names under the onboarding tuple. */
+/**
+ * `onboardToken`'s step names under the onboarding tuple. `applyChainUpdates`, `initChainConfigV2`
+ * and `initFastFinalityRateLimit` never occur (the planner passes `remoteChains: []`: the pool group
+ * drives the lanes); the map is total only because the name union is.
+ */
 const TOKEN_STEP_NAMES: Record<TokenOnboardingStepName, Name> = {
   deployTokenPool: 'tokenDeployPool',
   registerAdmin: 'tokenRegisterAdmin',
@@ -127,8 +135,9 @@ export type ParsedOnboarding = {
 }
 
 /**
- * Parses the onboarding params before any RPC: the group ref (a fresh id with `solana.create` and
- * none given), the tokens and their exact lane sets, the Solana options.
+ * Parses the onboarding params before any RPC: the group ref (`poolGroupId` is required with
+ * `solana.create` on the plan and unsigned forms, S6 review m2), the tokens and their exact lane
+ * sets, the Solana options.
  * @throws {@link CCTParamsInvalidError} with the dotted path of the bad field
  * @internal
  */
@@ -138,16 +147,15 @@ export function parseOnboarding(params: GenerateOnboardMultiTokenPoolTokensParam
 } {
   const solana = params.solana ?? {}
   const program = parsePoolGroupProgram(NAME, params)
-  let poolGroupId = params.poolGroupId
-  if (poolGroupId === undefined && params.poolGroupAddress === undefined) {
-    if (!solana.create)
-      throw new CCTParamsInvalidError(
-        NAME,
-        'poolGroupAddress',
-        'pass poolGroupId or poolGroupAddress, or solana.create to create the pool group',
-      )
-    poolGroupId = Keypair.generate().publicKey.toBase58()
-  }
+  const poolGroupId = params.poolGroupId
+  if (poolGroupId === undefined && params.poolGroupAddress === undefined)
+    throw new CCTParamsInvalidError(
+      NAME,
+      'poolGroupAddress',
+      solana.create
+        ? 'pass poolGroupId (any fresh base58 key) with solana.create: a plan or unsigned build that drew its own would target a new pool group on every call (the signed form draws one)'
+        : 'pass poolGroupId or poolGroupAddress, or solana.create to create the pool group',
+    )
   if (params.poolGroupAddress !== undefined && params.poolGroupId !== undefined)
     throw new CCTParamsInvalidError(
       NAME,
@@ -286,16 +294,7 @@ export function parseOnboarding(params: GenerateOnboardMultiTokenPoolTokensParam
       unpause: params.unpause === true,
       ...(create && { create }),
       ...(poolGroupId !== undefined && params.poolGroupAddress === undefined && { poolGroupId }),
-      check: {
-        ...(params.getChain && { getChain: params.getChain }),
-        ...(params.remoteAttestations && { remoteAttestations: params.remoteAttestations }),
-        ...(params.minDestGasOverhead !== undefined && {
-          minDestGasOverhead: params.minDestGasOverhead,
-        }),
-        ...(params.maxTransferFeeBps !== undefined && {
-          maxTransferFeeBps: params.maxTransferFeeBps,
-        }),
-      },
+      check: laneCheckOptions(params),
     },
   }
 }
@@ -327,22 +326,35 @@ export function memberRemoteTokensOf(
   return [...groups.values()]
 }
 
-/** Whether a member's stored remote tokens are exactly `remotes`. */
+/**
+ * Whether a member's stored remote tokens are `remotes`, except for `pending` chains the plan still
+ * lists in the transaction that creates their lanes paused (a stored one must still match).
+ */
 function memberMatches(
   stored: PoolGroupMemberRemoteToken[],
   remotes: ParsedOnboardingToken['remotes'],
+  pending: ReadonlySet<bigint>,
 ) {
   const have = parseMemberChains(NAME, 'member', stored)
   const want = parseMemberChains(NAME, 'tokens', memberRemoteTokensOf(remotes))
-  if (have.size !== want.size) return false
+  for (const s of have.keys()) if (!want.has(s)) return false
   for (const [s, w] of want) {
     const h = have.get(s)
-    if (!h || !h.token.equals(w.token) || h.decimals !== w.decimals) return false
+    if (!h) {
+      if (pending.has(s)) continue
+      return false
+    }
+    if (!h.token.equals(w.token) || h.decimals !== w.decimals) return false
   }
   return true
 }
 
-/** The `onboardToken` steps a mint still needs, or none when its 2.0 pool is registered. */
+/**
+ * The `onboardToken` steps a mint still needs, or none when its 2.0 pool is registered. A registry
+ * that names another pool which serves lanes is refused (S6 review M5): `setPool` to the group pool,
+ * which runs before the group lanes exist and are checked, would fail those transfers and inbound
+ * messages in flight.
+ */
 async function tokenOnboardingSteps(
   ctx: PlannerContext,
   token: ParsedOnboardingToken,
@@ -365,11 +377,42 @@ async function tokenOnboardingSteps(
     state.registry.accountResolution === 'WithoutExtendedLookupTable'
   )
     return []
+  const other = state.registry?.tokenPool
+  if (other && !other.equals(poolPda) && !other.equals(PublicKey.default))
+    await refuseLivePool(ctx, token, index, other)
   try {
     return planTokenOnboarding(parsedToken, state).map((s) => s.name)
   } catch (err) {
     throw underToken(err, index)
   }
+}
+
+/** Refuses a mint whose registry names `pool` while that pool serves lanes (or cannot be read). @internal */
+export async function refuseLivePool(
+  ctx: PlannerContext,
+  token: ParsedOnboardingToken,
+  index: number,
+  pool: PublicKey,
+): Promise<void> {
+  const param = `tokens[${index}].tokenAddress`
+  let remotes
+  try {
+    remotes = await ctx.chain.getTokenPoolRemotes(pool.toBase58())
+  } catch (err) {
+    throw new CCTParamsInvalidError(
+      NAME,
+      param,
+      `${token.mint}'s registry names another pool, ${pool.toBase58()}, whose lanes cannot be read (${err instanceof Error ? err.message : String(err)}): moving the token to the group pool unchecked could fail live transfers, so it is refused. Read that pool, then migrate the token off it first`,
+      { cause: err instanceof Error ? err : undefined },
+    )
+  }
+  const live = Object.entries(remotes).filter(([, r]) => r.remotePools.length)
+  if (live.length)
+    throw new CCTParamsInvalidError(
+      NAME,
+      param,
+      `${token.mint}'s registry names another pool, ${pool.toBase58()}, which serves ${live.length} lane(s) (${live.map(([n]) => n).join(', ')}): setPool to the group pool runs before the group lanes exist and pass the lane check, so those transfers, and inbound messages in flight, would fail. Migrate it first: stop and drain those lanes and remove their remote chain configs, then onboard`,
+    )
 }
 
 /** `onboardToken`'s params for a token (no remote chains: the pool group drives the lanes). */
@@ -427,7 +470,9 @@ function tokenSpecs(
                   ...(ctx.lookupTablePayer && { lookupTablePayer: ctx.lookupTablePayer }),
                 })
                 return {
-                  transactions: r.transactions.map((tx) => toPlannerTx(tx, r.payer, [token.mint])),
+                  transactions: r.transactions.map((tx) =>
+                    toPlannerTx(tx, r.payer, [token.mint], 'token-admin'),
+                  ),
                   findings: [],
                   ...(r.lookupTableAddress && {
                     created: { lookupTableAddress: r.lookupTableAddress },
@@ -462,28 +507,94 @@ function tokenSpecs(
 const createChains = (create?: PoolGroupOnboardingCreate) =>
   new Map((create?.chains ?? []).map((c) => [c.remoteChainSelector, c]))
 
+/** What the onboarding expansion reads from chain state (a plain value: the goldens fake it). @internal */
+export type OnboardingInputs = {
+  /** The pool group, records, members, lanes and pool owners. */
+  state: PlanState
+  /** Per mint, the `onboardToken` steps it still needs (absent: none). */
+  tokenSteps: Map<string, TokenOnboardingStepName[]>
+  /** The named policies: the classes each carries and the chains it has records for. */
+  policies: Map<number, { classes: PoolGroupPolicyClass[]; remoteChainSelectors: bigint[] }>
+}
+
+/** The selectors an onboarding reads: every token's chains and the chains `create` adds. */
+function onboardingSelectors(parsed: ParsedOnboarding): bigint[] {
+  return [
+    ...new Set([
+      ...parsed.tokens.flatMap((t) => t.remotes.map((r) => r.selector)),
+      ...createChains(parsed.create).keys(),
+    ]),
+  ]
+}
+
 /**
- * Expands the onboarding from one state read into its steps (pure over that state, deterministic:
- * the caller's token order is kept, so `pendingStepHashes` survive a re-run).
+ * Reads what {@link expandOnboardingFrom} needs: one state read, the token steps (with the M5
+ * registry check), the named policies.
+ * @internal
+ */
+export async function readOnboardingInputs(
+  ctx: PlannerContext,
+  parsed: ParsedOnboarding,
+): Promise<OnboardingInputs> {
+  const selectors = onboardingSelectors(parsed)
+  const state = await readPlanState(ctx, { selectors, mints: parsed.tokens.map((t) => t.mint) })
+  const tokenSteps = new Map<string, TokenOnboardingStepName[]>()
+  for (const [i, token] of parsed.tokens.entries()) {
+    const names = await tokenOnboardingSteps(ctx, token, i)
+    if (names.length) tokenSteps.set(token.mint, names)
+  }
+  const policies: OnboardingInputs['policies'] = new Map()
+  if (state.group)
+    for (const policyId of new Set(
+      parsed.tokens.flatMap((t) => (t.policy !== undefined ? [t.policy] : [])),
+    )) {
+      const policy = await new GetPoolGroupPolicy().query(ctx.chain, {
+        poolProgramAddress: ctx.ref.program.toBase58(),
+        poolGroupAddress: ctx.ref.group.toBase58(),
+        policyId,
+      })
+      policies.set(policyId, {
+        classes: policy.classes,
+        remoteChainSelectors: policy.remoteChainSelectors,
+      })
+    }
+  return { state, tokenSteps, policies }
+}
+
+/**
+ * Expands the onboarding from one state read into its steps.
  * @internal
  */
 export async function expandOnboarding(
   ctx: PlannerContext,
   parsed: ParsedOnboarding,
 ): Promise<Expansion<Name>> {
+  return expandOnboardingFrom(ctx, parsed, await readOnboardingInputs(ctx, parsed))
+}
+
+/**
+ * The onboarding steps from what {@link readOnboardingInputs} read: pure and deterministic (the
+ * caller's token order is kept and every chunk id is stable, so `pendingStepHashes` survive a
+ * re-plan after a partial landing).
+ *
+ * On a chain that is already live (its record runs its driven lanes and admits the token), a lane
+ * must never be materializable before it is paused (S6 review M6): the token joins without listing
+ * that chain, then one pool-owner-signed transaction per member lists it, creates the lane and
+ * pauses it (`admitPausedLanes`, `createLanesPaused`), the lane check runs on the real accounts, and
+ * `unpausePoolGroupLanes` lifts the lane pause (an op that runs the make-live check).
+ * @internal
+ */
+export function expandOnboardingFrom(
+  ctx: PlannerContext,
+  parsed: ParsedOnboarding,
+  { state, tokenSteps, policies }: OnboardingInputs,
+): Expansion<Name> {
   const created = createChains(parsed.create)
-  const selectors = [
-    ...new Set([
-      ...parsed.tokens.flatMap((t) => t.remotes.map((r) => r.selector)),
-      ...created.keys(),
-    ]),
-  ]
-  const mints = parsed.tokens.map((t) => t.mint)
-  const state = await readPlanState(ctx, { selectors, mints })
+  const selectors = onboardingSelectors(parsed)
   const g = ctx.ref.group
   const specs: StepSpec<Name>[] = []
   const findings: MultiTokenPoolLaneFinding[] = []
-  let blockedBy: MultiTokenPoolPlanBlock | undefined
+  const blocks: MultiTokenPoolPlanBlock[] = []
 
   // ── the pool group ──
   if (!state.group && !parsed.create)
@@ -561,9 +672,9 @@ export async function expandOnboarding(
 
   // ── per token: onboardToken's steps ──
   const lastTokenStep = new Map<string, string>()
-  for (const [i, token] of parsed.tokens.entries()) {
-    const names = await tokenOnboardingSteps(ctx, token, i)
-    if (!names.length) continue
+  for (const token of parsed.tokens) {
+    const names = tokenSteps.get(token.mint)
+    if (!names?.length) continue
     const ts = tokenSpecs(ctx, token, names, [])
     specs.push(...ts)
     lastTokenStep.set(token.mint, ts.at(-1)!.step.id)
@@ -573,13 +684,14 @@ export async function expandOnboarding(
     ...(lastTokenStep.has(mint) ? [lastTokenStep.get(mint)!] : []),
   ]
 
-  // ── the driven-lanes pause of chains create moves out of 'off' ──
+  // ── the driven-lanes pause of chains create moves out of 'off' (run-scoped id, M2) ──
+  const pauseIdOf = (selector: bigint) => runScopedId(ctx, 'pausePoolGroupChainLanes', selector)
   const pauseIds = new Map<bigint, string>()
   for (const [selector, chainInput] of created) {
     if (!chainInput.laneMode) continue
     const record = state.records.get(selector)
-    const id = stepId(ctx, 'pausePoolGroupChainLanes', selector)
     if (record && record.laneMode !== 'off') continue
+    const id = pauseIdOf(selector)
     pauseIds.set(selector, id)
     specs.push(
       chainLanesStep(ctx, 'pausePoolGroupChainLanes', {
@@ -588,7 +700,7 @@ export async function expandOnboarding(
         drivenLanesPaused: true,
         dependsOn: [...afterCreate, ...(sectionIds.get(selector) ?? [])],
         summary: `move the chain record of ${selector} out of 'off' (${chainInput.laneMode}) with its driven lanes paused`,
-        idPart: 'pausePoolGroupChainLanes',
+        id,
       }),
     )
   }
@@ -626,50 +738,69 @@ export async function expandOnboarding(
 
   // ── membership (driven) or linked lanes ──
   const laneStepOf = new Map<string, string>()
-  const joinIdOf = new Map<string, string>()
-  const live = (selector: bigint) => {
+  // a running record that admits the token and has no lane for it: created paused (M6)
+  const liveLane = (t: ParsedOnboardingToken, selector: bigint) => {
     const record = state.records.get(selector)
-    return !!record && !pauseIds.has(selector) && recordLive(record)
+    return (
+      parsed.laneKind === 'driven' &&
+      !!record &&
+      !pauseIds.has(selector) &&
+      recordRuns(record) &&
+      recordAdmits(record, t.mint) &&
+      !laneOf(state, t.mint, selector)
+    )
   }
+  const liveOf = (t: ParsedOnboardingToken) => t.remotes.filter((r) => liveLane(t, r.selector))
+  const ownerOf = (t: ParsedOnboardingToken) => state.poolOwners.get(t.mint) ?? ctx.actor
+  const byOwner = new Map<string, ParsedOnboardingToken[]>()
+  for (const t of parsed.tokens) byOwner.set(ownerOf(t), [...(byOwner.get(ownerOf(t)) ?? []), t])
+  // the paused-creation step of each token (planned or not): its id is stable and run-scoped
+  const admitIdOf = new Map<string, string>()
+  for (const tokens of byOwner.values())
+    for (const [t, key] of stableChunks(
+      tokens,
+      MEMBERS_PER_STEP,
+      () => true,
+      (x) => x.mint,
+    ).chunkKeyOf)
+      admitIdOf.set(t.mint, runScopedId(ctx, 'admitPausedLanes', key))
   if (parsed.laneKind === 'driven') {
-    const joining: { token: ParsedOnboardingToken; owner: string }[] = []
+    const joinIdOf = new Map<string, string>()
     for (const [i, token] of parsed.tokens.entries()) {
       const member = state.members.get(token.mint)
-      if (member) {
-        if (member.poolGroupAddress !== g.toBase58())
-          throw new CCTParamsInvalidError(
-            NAME,
-            `tokens[${i}].tokenAddress`,
-            `${token.mint} is a member of another pool group (${member.poolGroupAddress}): remove it there first`,
-          )
-        if (!memberMatches(member.remoteTokens, token.remotes))
-          throw new CCTParamsInvalidError(
-            NAME,
-            `tokens[${i}].remoteTokens`,
-            `${token.mint} is a member already, listing other remote tokens: change them with enableMultiTokenPoolChain's remoteTokens, or remove the token first`,
-          )
-        continue
-      }
-      joining.push({ token, owner: state.poolOwners.get(token.mint) ?? ctx.actor })
-    }
-    const byOwner = new Map<string, ParsedOnboardingToken[]>()
-    for (const j of joining) byOwner.set(j.owner, [...(byOwner.get(j.owner) ?? []), j.token])
-    const unacknowledged: PoolGroupLaneKey[] = []
-    let n = 0
-    for (const [owner, tokens] of byOwner)
-      for (const chunk of chunked(tokens, MEMBERS_PER_STEP)) {
-        const admitted = chunk.flatMap((t) =>
-          t.remotes
-            .filter((r) => live(r.selector) && recordAdmits(state.records.get(r.selector)!, t.mint))
-            .map((r) => ({ tokenAddress: t.mint, remoteChainSelector: r.selector })),
+      if (!member) continue
+      if (member.poolGroupAddress !== g.toBase58())
+        throw new CCTParamsInvalidError(
+          NAME,
+          `tokens[${i}].tokenAddress`,
+          `${token.mint} is a member of another pool group (${member.poolGroupAddress}): remove it there first`,
         )
-        const id = stepId(ctx, 'joinPoolGroup', undefined, n++)
-        if (admitted.length && !parsed.acknowledgeLiveAdmission) unacknowledged.push(...admitted)
+      // a member may lack the live chains still to be listed by its paused creation
+      const live = new Set(liveOf(token).map((r) => r.selector))
+      if (!memberMatches(member.remoteTokens, token.remotes, live))
+        throw new CCTParamsInvalidError(
+          NAME,
+          `tokens[${i}].remoteTokens`,
+          `${token.mint} is a member already, listing other remote tokens: change them with enableMultiTokenPoolChain's remoteTokens, or remove the token first`,
+        )
+    }
+    for (const [owner, tokens] of byOwner)
+      for (const { key, items: chunk } of stableChunks(
+        tokens,
+        MEMBERS_PER_STEP,
+        (t) => !state.members.has(t.mint),
+        (t) => t.mint,
+      ).chunks) {
+        const id = stepId(ctx, 'joinPoolGroup', key)
         for (const t of chunk) joinIdOf.set(t.mint, id)
-        const members: PoolGroupMemberEntry[] = chunk.map((t) => ({
-          tokenAddress: t.mint,
-          remoteTokens: memberRemoteTokensOf(t.remotes),
-        }))
+        // a live chain is listed later, in the transaction that creates its lane paused (M6)
+        const members: PoolGroupMemberEntry[] = chunk.map((t) => {
+          const live = new Set(liveOf(t).map((r) => r.selector))
+          return {
+            tokenAddress: t.mint,
+            remoteTokens: memberRemoteTokensOf(t.remotes.filter((r) => !live.has(r.selector))),
+          }
+        })
         specs.push(
           opStep(
             ctx,
@@ -687,34 +818,79 @@ export async function expandOnboarding(
               progress: chunk.length,
             },
             POOL_GROUP_MEMBERSHIP_OPERATIONS.joinPoolGroup,
+            { ...opBase(ctx), poolGroupMembers: members },
+          ),
+        )
+      }
+    // live chains: list, create and pause each lane in one transaction per member
+    const unacknowledged: string[] = []
+    for (const [owner, tokens] of byOwner)
+      for (const { items: chunk } of stableChunks(
+        tokens,
+        MEMBERS_PER_STEP,
+        (t) => liveOf(t).length > 0,
+        (t) => t.mint,
+      ).chunks) {
+        const id = admitIdOf.get(chunk[0]!.mint)!
+        const lanes = chunk.flatMap((t) =>
+          liveOf(t).map((r) => ({ tokenAddress: t.mint, remoteChainSelector: r.selector })),
+        )
+        for (const l of lanes) laneStepOf.set(keys.lane(l.tokenAddress, l.remoteChainSelector), id)
+        if (!parsed.acknowledgeLiveAdmission) unacknowledged.push(id)
+        specs.push(
+          opStep(
+            ctx,
+            {
+              id,
+              name: 'admitPausedLanes',
+              operation: 'setPoolGroupMemberRemoteTokens',
+              dependsOn: chunk.flatMap((t) => [
+                ...(joinIdOf.has(t.mint) ? [joinIdOf.get(t.mint)!] : []),
+                ...afterToken(t.mint),
+              ]),
+              summary: `list ${lanes.length} live lane(s) on ${chunk.length} member(s), creating each lane paused in the same transaction`,
+              writeSet: [
+                ...chunk.map((t) => keys.member(t.mint)),
+                ...lanes.map((l) => keys.lane(l.tokenAddress, l.remoteChainSelector)),
+              ],
+              guardReads: [...new Set(lanes.map((l) => keys.chain(g, l.remoteChainSelector)))],
+              signer: poolOwnerSigner(ctx, owner),
+              progress: lanes.length,
+            },
+            POOL_GROUP_MEMBERSHIP_OPERATIONS.setPoolGroupMemberRemoteTokens,
             {
               ...opBase(ctx),
-              poolGroupMembers: members,
-              ...(admitted.length &&
-                parsed.acknowledgeLiveAdmission && { acknowledgeLiveAdmission: admitted }),
+              upsert: chunk.map((t) => ({
+                tokenAddress: t.mint,
+                remoteTokens: memberRemoteTokensOf(liveOf(t)),
+              })),
+              createLanesPaused: true,
             },
           ),
         )
       }
     if (unacknowledged.length)
-      blockedBy = {
-        reason: `${unacknowledged.length} planned lane(s) are on a chain that is already live (${[...new Set(unacknowledged.map((l) => String(l.remoteChainSelector)))].join(', ')}): a live chain is never paused, so pass solana.acknowledgeLiveAdmission: true to admit them (each is lane-checked before it goes live)`,
-        steps: [...new Set(unacknowledged.map((l) => joinIdOf.get(l.tokenAddress)!))],
-      }
-    // materialize per chain: listed, admitted (now or by this plan), no lane yet
+      blocks.push({
+        reason: `${unacknowledged.length} step(s) admit lanes on a chain that is already live: a live chain is never paused, so each lane is created paused with its admission and lifted after the lane check; pass solana.acknowledgeLiveAdmission: true to admit them`,
+        steps: unacknowledged,
+      })
+    // materialize behind a chain pause: listed, admitted (now or by this plan), no lane yet
     for (const selector of selectors) {
-      const needs = parsed.tokens.filter(
-        (t) =>
-          t.remotes.some((r) => r.selector === selector) &&
-          !laneOf(state, t.mint, selector) &&
-          (pauseIds.has(selector) || recordAdmitsOrAll(state, selector, t.mint)),
+      if (
+        state.records.get(selector) &&
+        !pauseIds.has(selector) &&
+        recordRuns(state.records.get(selector)!)
       )
-      if (!needs.length) continue
+        continue
+      const candidates = parsed.tokens.filter((t) => t.remotes.some((r) => r.selector === selector))
       for (const spec of materializeSteps(
         ctx,
         'materializePoolGroupLanes',
         selector,
-        needs.map((t) => t.mint),
+        candidates.map((t) => t.mint),
+        (m) =>
+          !laneOf(state, m, selector) &&
+          (pauseIds.has(selector) || recordAdmitsMint(state, selector, m)),
         (chunk) => [
           ...(pauseIds.has(selector) ? [pauseIds.get(selector)!] : []),
           ...chunk.flatMap((m) => [
@@ -731,7 +907,7 @@ export async function expandOnboarding(
   } else {
     for (const selector of selectors) {
       const needs = parsed.tokens.filter((t) => t.remotes.some((r) => r.selector === selector))
-      const fresh = needs.filter((t) => {
+      for (const t of needs) {
         const lane = laneOf(state, t.mint, selector)
         if (lane && lane.poolGroupAddress !== g.toBase58())
           throw new CCTParamsInvalidError(
@@ -739,17 +915,18 @@ export async function expandOnboarding(
             'tokens',
             `${t.mint} has a lane toward ${selector} that is not linked to this pool group: link it with linkPoolGroupLanes, or remove it`,
           )
-        return !lane
-      })
-      const byOwner = new Map<string, ParsedOnboardingToken[]>()
-      for (const t of fresh) {
-        const owner = state.poolOwners.get(t.mint) ?? ctx.actor
-        byOwner.set(owner, [...(byOwner.get(owner) ?? []), t])
       }
-      let n = 0
-      for (const [owner, tokens] of byOwner)
-        for (const chunk of chunked(tokens, MEMBERS_PER_STEP)) {
-          const id = stepId(ctx, 'initPoolGroupLanes', selector, n++)
+      const linkedByOwner = new Map<string, ParsedOnboardingToken[]>()
+      for (const t of needs)
+        linkedByOwner.set(ownerOf(t), [...(linkedByOwner.get(ownerOf(t)) ?? []), t])
+      for (const [owner, tokens] of linkedByOwner)
+        for (const { key, items: chunk } of stableChunks(
+          tokens,
+          MEMBERS_PER_STEP,
+          (t) => !laneOf(state, t.mint, selector),
+          (t) => t.mint,
+        ).chunks) {
+          const id = stepId(ctx, 'initPoolGroupLanes', selector, key)
           for (const t of chunk) laneStepOf.set(keys.lane(t.mint, selector), id)
           specs.push(
             opStep(
@@ -792,15 +969,7 @@ export async function expandOnboarding(
   }
 
   // ── policies ──
-  const policyIds = [
-    ...new Set(parsed.tokens.flatMap((t) => (t.policy !== undefined ? [t.policy] : []))),
-  ]
-  for (const policyId of policyIds) {
-    const policy = await new GetPoolGroupPolicy().query(ctx.chain, {
-      poolProgramAddress: ctx.ref.program.toBase58(),
-      poolGroupAddress: g.toBase58(),
-      policyId,
-    })
+  for (const [policyId, policy] of policies) {
     const carried: PoolGroupPolicyClass[] = policy.classes
     for (const selector of selectors) {
       const tokens = parsed.tokens.filter(
@@ -813,25 +982,21 @@ export async function expandOnboarding(
           `tokens[${parsed.tokens.indexOf(tokens[0]!)}].policy`,
           `policy ${policyId} has no chain record for ${selector}: run enableMultiTokenPoolChain with policy ${policyId} first`,
         )
-      const lanes = tokens
-        .filter(
-          (t) =>
-            !assignmentHolds(
-              laneOf(state, t.mint, selector)?.classSource ?? null,
-              policyId,
-              carried,
-            ),
-        )
-        .map((t) => ({
+      const lanes = tokens.map((t) => {
+        const current = laneOf(state, t.mint, selector)?.classSource ?? null
+        return {
           mint: t.mint,
-          owner: state.poolOwners.get(t.mint) ?? ctx.actor,
-          current: laneOf(state, t.mint, selector)?.classSource ?? null,
-        }))
-      if (!lanes.length) continue
+          owner: ownerOf(t),
+          current,
+          done: assignmentHolds(current, policyId, carried),
+        }
+      })
+      const todo = lanes.filter((l) => !l.done)
+      if (!todo.length) continue
       if (carried.includes('security'))
         findings.push(
           ...securityCopiedFindings(
-            lanes.map((l) => ({ tokenAddress: l.mint, remoteChainSelector: selector })),
+            todo.map((l) => ({ tokenAddress: l.mint, remoteChainSelector: selector })),
             policyId,
           ),
         )
@@ -858,36 +1023,85 @@ export async function expandOnboarding(
   )
   const check = checkStep<Name>(ctx, 'checkLanes', allLanes, writes, parsed.check)
   specs.push(check)
-  if (parsed.unpause)
+  if (parsed.unpause) {
+    // chain pauses: from create in this plan, or from an earlier step of this run (enable)
     for (const selector of selectors) {
       const record = state.records.get(selector)
       const pausedNow =
         pauseIds.has(selector) || (record?.laneMode !== 'off' && record?.drivenLanesPaused)
       if (!pausedNow) continue
-      const pauseStepId = stepId(ctx, 'pausePoolGroupChainLanes', selector)
+      const unpauseStepId = runScopedId(ctx, 'unpausePoolGroupChainLanes', selector)
       const decision = unpauseDecision({
-        pauseStepId,
-        pausePlanned: pauseIds.has(selector),
+        pauseStepIds: [pauseIdOf(selector)],
+        pausePlanned: pauseIds.has(selector) ? [pauseIdOf(selector)] : [],
+        unpauseStepId,
         landed: ctx.landed,
         what: `the driven lanes of ${selector}`,
+        ...(record && { onChain: chainPausedAsSet(record) }),
       })
       if (!decision.lift) {
-        blockedBy ??= decision.block
+        blocks.push(decision.block)
         continue
       }
-      const admitted = allLanes.filter((l) => l.remoteChainSelector === selector)
       specs.push(
         chainLanesStep(ctx, 'unpausePoolGroupChainLanes', {
           selector,
           drivenLanesPaused: false,
-          acknowledgeLiveAdmission: admitted,
+          acknowledgeLiveAdmission: allLanes.filter((l) => l.remoteChainSelector === selector),
           dependsOn: [check.step.id, ...decision.dependsOn],
           summary: `lift the driven-lanes pause of ${selector} this run set`,
-          idPart: 'unpausePoolGroupChainLanes',
+          id: unpauseStepId,
         }),
       )
     }
+    // lane pauses this run's paused creation set (M6)
+    if (parsed.laneKind === 'driven')
+      for (const t of parsed.tokens) {
+        const admitId = admitIdOf.get(t.mint)!
+        const planned = specs.some((s) => s.step.id === admitId)
+        const selectorsToLift = t.remotes
+          .map((r) => r.selector)
+          .filter((c) => {
+            const record = state.records.get(c)
+            if (!record || pauseIds.has(c) || !recordRuns(record)) return false
+            if (liveLane(t, c)) return true
+            const lane = laneOf(state, t.mint, c)
+            return !!lane && lane.kind === 'driven' && lane.pausedOutbound && lane.pausedInbound
+          })
+        if (!selectorsToLift.length) continue
+        const unpauseStepId = runScopedId(ctx, 'unpausePoolGroupLanes', t.mint)
+        const existing = selectorsToLift.flatMap((c) => {
+          const lane = laneOf(state, t.mint, c)
+          return lane ? [lane] : []
+        })
+        const unsettled = existing
+          .map((l) => lanePausedAsCreated(l, g))
+          .find((x): x is { ok: false; reason: string } => !x.ok)
+        const decision = unpauseDecision({
+          pauseStepIds: [admitId],
+          pausePlanned: planned ? [admitId] : [],
+          unpauseStepId,
+          landed: ctx.landed,
+          what: `the lanes of ${t.mint} toward ${selectorsToLift.join(', ')}`,
+          onChain: unsettled ?? { ok: true },
+        })
+        if (!decision.lift) {
+          blocks.push(decision.block)
+          continue
+        }
+        specs.push(
+          laneUnpauseStep(ctx, 'unpausePoolGroupLanes', {
+            mint: t.mint,
+            owner: state.poolOwners.get(t.mint),
+            selectors: selectorsToLift,
+            dependsOn: [check.step.id, ...decision.dependsOn],
+            id: unpauseStepId,
+          }),
+        )
+      }
+  }
 
+  const blockedBy = mergeBlocks(blocks)
   return {
     specs,
     ...(blockedBy && { blockedBy }),
@@ -902,10 +1116,24 @@ export async function expandOnboarding(
   }
 }
 
-/** Whether the record of `selector` admits `mint` (a member or a joining token). */
-function recordAdmitsOrAll(state: PlanState, selector: bigint, mint: string): boolean {
+/** Whether the record of `selector` admits `mint` now. */
+function recordAdmitsMint(state: PlanState, selector: bigint, mint: string): boolean {
   const record = state.records.get(selector)
   return !!record && recordAdmits(record, mint)
+}
+
+/**
+ * Whether a chain record still holds the driven-lanes pause as a pause step left it: out of `'off'`
+ * with the driven lanes paused (the `onChain` input of `unpauseDecision`). The record keeps no
+ * author, so a pause re-set by someone else after this run's lift is caught by the landed unpause
+ * id instead. @internal
+ */
+export function chainPausedAsSet(
+  record: GetPoolGroupChainResult,
+): { ok: true } | { ok: false; reason: string } {
+  if (record.laneMode === 'off') return { ok: false, reason: "the record is back in 'off'" }
+  if (!record.drivenLanesPaused) return { ok: false, reason: 'its driven lanes are not paused' }
+  return { ok: true }
 }
 
 /** A `set_group_chain_policy` step (detached from the group default: the caller set the values). @internal */

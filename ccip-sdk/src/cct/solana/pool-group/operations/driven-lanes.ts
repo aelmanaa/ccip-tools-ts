@@ -65,6 +65,12 @@ import {
   requireDrained,
 } from './members-common.ts'
 import { closeLanesInstructions } from './membership.ts'
+import {
+  groupOfPausedLaneIx,
+  pausedLaneInstructions,
+  pausedLanePdas,
+  pausedLanesOf,
+} from './paused-lanes.ts'
 import { requirePauseGate } from './pauses.ts'
 import {
   type ParsedGroupWrite,
@@ -218,6 +224,14 @@ type ParsedChainLanes = ParsedGroupWrite & {
   bitmap?: { byteOffset: number; bytes: Buffer }
   acknowledgeNonAtomic: boolean
   acknowledged: PoolGroupLaneKey[]
+  createLanesPaused: boolean
+}
+
+/** An optional boolean param (`undefined` is false). */
+function parseFlag(operation: string, param: string, value: unknown): boolean {
+  if (value !== undefined && typeof value !== 'boolean')
+    throw new CCTParamsInvalidError(operation, param, 'must be a boolean')
+  return value === true
 }
 
 /** Parses a list of `u32` member indices. */
@@ -359,7 +373,13 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
         'acknowledgeLiveAdmission',
         params.acknowledgeLiveAdmission,
       ),
+      createLanesPaused: parseFlag(this.name, 'createLanesPaused', params.createLanesPaused),
     }
+  }
+
+  /** `set_lane_pause` names the pool group second; the other instructions name it first. */
+  protected override proposalGroup(ix: TransactionInstruction): PublicKey | undefined {
+    return groupOfPausedLaneIx(ix)
   }
 
   /**
@@ -367,7 +387,8 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
    * transaction is split over instructions (the earlier ones keep the record's mode and pause, the
    * last carries the final mode, pause and index changes). Lanes it makes live run the lane check
    * as the write leaves them; members it makes materializable on a running chain need
-   * `acknowledgeLiveAdmission`.
+   * `acknowledgeLiveAdmission`, unless `createLanesPaused` creates them paused in the same
+   * transaction (S6 review M6).
    * @throws {@link CCTParamsInvalidError} if `authority` lacks the gate (CONNECTION writer for lane
    *   changes; pauser or unpauser for the pause), a bound is broken, enabling from `'off'` is not
    *   paused (`GroupLanesMustStartPaused`), the chain trusts no remote pool, a split bitmap write on
@@ -455,6 +476,7 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
     if (!lanesChange && paused === before.paused)
       return { group: ref.group, items: [], judge: null, expected, extra: {} }
     let admitted: PoolGroupLaneKey[] = []
+    let createPaused: PoolGroupLaneKey[] = []
     const opens =
       runningAfter &&
       (!chainRunsDriven(record) ||
@@ -468,16 +490,26 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
         ref,
         'finding the members this write admits needs it; use an RPC that serves getProgramAccounts',
       )
-      admitted = [...all.values()]
-        .filter(
-          (m) =>
-            memberChainsOf(m).has(selector) &&
-            admits(mode, after, m.memberIndex) &&
-            (!chainRunsDriven(record) || !admits(before.mode, before.bitmap, m.memberIndex)),
-        )
-        .map((m) => ({ tokenAddress: m.mint, remoteChainSelector: selector }))
+      const opened = [...all.values()].filter(
+        (m) =>
+          memberChainsOf(m).has(selector) &&
+          admits(mode, after, m.memberIndex) &&
+          (!chainRunsDriven(record) || !admits(before.mode, before.bitmap, m.memberIndex)),
+      )
+      const key = (m: PoolGroupMemberAccount) => ({
+        tokenAddress: m.mint,
+        remoteChainSelector: selector,
+      })
+      const hasLane = (m: PoolGroupMemberAccount) =>
+        m.lanePayers.some((p) => p.remoteChainSelector === selector)
+      if (parsed.createLanesPaused) {
+        createPaused = opened.filter((m) => !hasLane(m)).map(key)
+        admitted = opened.filter(hasLane).map(key)
+      } else admitted = opened.map(key)
       requireAdmissionAcknowledged(this.name, admitted, parsed.acknowledged)
     }
+    if (createPaused.length)
+      requirePauseGate(this.name, group, authority, [false, false], [true, true], 'set_lane_pause')
     const client = createPoolGroupProgram(chain, ref.program, parsed.payer)
     const ixOf = (args: {
       mode: PoolGroupLaneMode
@@ -520,6 +552,12 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
           chain,
         )
       : []
+    if (chunks.length > 1 && createPaused.length)
+      throw new CCTParamsInvalidError(
+        this.name,
+        'createLanesPaused',
+        'the lanes are created in the transaction that admits them, which a split bitmap write is not: admit them with addTokens',
+      )
     if (
       chunks.length > 1 &&
       (runningAfter || chainRunsDriven(record)) &&
@@ -545,16 +583,28 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
     ixs.push(
       await ixOf({ mode, paused, bitmapWrite: chunks[chunks.length - 1] ?? null, remove, add }),
     )
+    // the admission and every lane it opens are one transaction: no slot to materialize unpaused
+    const pausedIxs = createPaused.length
+      ? [
+          ...(
+            await pausedLaneInstructions(chain, ref, parsed.payer, authority, createPaused)
+          ).values(),
+        ].flat()
+      : []
+    const signerRoles = { [authority.toBase58()]: signerRole(group.owner, authority) }
     return {
       group: ref.group,
-      items: ixs.map((ix) => ({
-        tokenAddresses: [],
-        instructions: [ix],
-        signerRoles: { [authority.toBase58()]: signerRole(group.owner, authority) },
+      items: ixs.map((ix, i) => ({
+        tokenAddresses:
+          i === ixs.length - 1 ? [...new Set(createPaused.map((l) => l.tokenAddress))] : [],
+        instructions: i === ixs.length - 1 ? [ix, ...pausedIxs] : [ix],
+        signerRoles,
+        ...(i === ixs.length - 1 &&
+          createPaused.length && { createdPdas: pausedLanePdas(ref.program, createPaused) }),
       })),
       judge: { failsClosedSeverity: 'error' },
       judgeEach: ixs.length > 1,
-      expected,
+      expected: { ...expected, ...sealLanes('createLanesPaused', createPaused) },
       goingLive: admitted,
       extra: {},
     }
@@ -567,8 +617,27 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
     guardOptions: PoolGroupGuardOptions,
     sealed: Readonly<Record<string, unknown>>,
   ): ParsedChainLanes {
-    const ixs = decodeOne(this.name, instructions, ['setGroupChainLanes'], false)
-    const last = ixs[ixs.length - 1]!
+    const decoded = decodeOne(
+      this.name,
+      instructions,
+      ['setGroupChainLanes', 'materializeGroupLanes', 'setLanePause'],
+      false,
+    )
+    const ixs = decoded.filter((d) => d.name === 'setGroupChainLanes')
+    const last = ixs[ixs.length - 1]
+    if (!last)
+      throw new CCTParamsInvalidError(this.name, 'transactions', 'the proposal sets no chain lanes')
+    const createLanesPaused = decoded.some((d) => d.name === 'materializeGroupLanes')
+    if (createLanesPaused) {
+      const created = pausedLanesOf(ref.program, decoded).map(laneId).sort()
+      const sealedLanes = unsealLanes(sealed, 'createLanesPaused').map(laneId).sort()
+      if (created.join() !== sealedLanes.join())
+        throw new CCTParamsInvalidError(
+          this.name,
+          'transactions',
+          'the proposal creates lanes it does not pause both ways, or other lanes than it sealed',
+        )
+    }
     const rawMode = field(last.data, 'params', 'mode')
     const mode: PoolGroupLaneMode =
       typeof rawMode === 'object' && rawMode !== null && 'allMembers' in rawMode
@@ -608,6 +677,7 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
       acknowledgeNonAtomic: true,
       // the gate runs again with what the caller acknowledged when the proposal was built
       acknowledged: unsealLanes(sealed, 'acknowledgeLiveAdmission'),
+      createLanesPaused,
     }
   }
 }

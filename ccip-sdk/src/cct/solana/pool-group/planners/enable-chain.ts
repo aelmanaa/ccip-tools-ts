@@ -34,39 +34,44 @@ import { parseMemberChains } from '../operations/members-common.ts'
 import { POOL_GROUP_MEMBERSHIP_OPERATIONS } from '../operations/membership.ts'
 import { POOL_GROUP_POLICY_OPERATIONS } from '../operations/policies.ts'
 import { POOL_GROUP_SECURITY_OPERATIONS } from '../operations/security.ts'
-import type { PoolGroupLaneKey, PoolGroupPolicyClass } from '../types.ts'
+import type { PoolGroupLaneKey, PoolGroupPolicyClass, PoolGroupSections } from '../types.ts'
 import type { PoolGroupSectionUpdate } from '../write-types.ts'
 import {
   type Expansion,
   type PlannerContext,
   type StepSpec,
-  chunked,
   keys,
+  runScopedId,
   specOf,
   stepId,
   toPlannerTx,
 } from './context.ts'
-import { unpauseDecision } from './engine.ts'
+import { stableChunks, unpauseDecision } from './engine.ts'
 import {
   type LaneCheckInputs,
+  type PlanState,
   LANES_PER_STEP,
   assignSteps,
   assignmentHolds,
   chainLanesStep,
   checkStep,
   groupSigner,
+  laneCheckOptions,
   laneOf,
+  lanePausedAsCreated,
+  laneUnpauseStep,
   materializeSteps,
   opBase,
   opStep,
   poolOwnerSigner,
   readPlanState,
   recordAdmits,
-  recordLive,
+  recordRuns,
   sectionHolds,
   securityCopiedFindings,
 } from './flow-common.ts'
-import { MEMBERS_PER_STEP, sectionStep } from './onboard.ts'
+import { MEMBERS_PER_STEP, chainPausedAsSet, sectionStep } from './onboard.ts'
+import { mergeBlocks } from './run.ts'
 import type {
   GenerateEnableMultiTokenPoolChainParams,
   PoolGroupChainEnablementStepName,
@@ -207,16 +212,7 @@ export function parseEnablement(params: GenerateEnableMultiTokenPoolChainParams)
       detach: solana.detachFromPoolGroupDefault === true,
       acknowledgeLiveAdmission: solana.acknowledgeLiveAdmission === true,
       lookupTables,
-      check: {
-        ...(params.getChain && { getChain: params.getChain }),
-        ...(params.remoteAttestations && { remoteAttestations: params.remoteAttestations }),
-        ...(params.minDestGasOverhead !== undefined && {
-          minDestGasOverhead: params.minDestGasOverhead,
-        }),
-        ...(params.maxTransferFeeBps !== undefined && {
-          maxTransferFeeBps: params.maxTransferFeeBps,
-        }),
-      },
+      check: laneCheckOptions(params),
     },
   }
 }
@@ -235,6 +231,81 @@ function memberHas(
   return have.token.equals(w.token) && have.decimals === w.decimals
 }
 
+/** Lanes per admission on a live chain: it and every lane it opens, created paused, are one transaction. @internal */
+export const LIVE_ADMISSIONS_PER_STEP = 4
+
+/** What the enablement expansion reads from chain state (a plain value: the goldens fake it). @internal */
+export type EnablementInputs = {
+  /** The pool group, the chain record, members, lanes and pool owners. */
+  state: PlanState
+  /** The mints the plan reaches: listed, or every member (sorted) with `'all-members'`. */
+  mints: string[]
+  /** With `policy`: the classes it carries, and its chain record of the chain when it has one. */
+  policy?: {
+    classes: PoolGroupPolicyClass[]
+    record?: { sections: PoolGroupSections; inheritsDefault: PoolGroupPolicyClass[] }
+  }
+  /** The given lookup tables, as read (absent: no table at that address). */
+  lookupTables: { table: string; addresses: string[]; authority?: string }[]
+}
+
+/**
+ * Reads what {@link expandEnablementFrom} needs: the members (`getProgramAccounts` with
+ * `'all-members'`), one state read, the policy and the lookup tables.
+ * @internal
+ */
+export async function readEnablementInputs(
+  ctx: PlannerContext,
+  parsed: ParsedEnablement,
+): Promise<EnablementInputs> {
+  const refParams = {
+    poolProgramAddress: ctx.ref.program.toBase58(),
+    poolGroupAddress: ctx.ref.group.toBase58(),
+  }
+  const C = parsed.selector
+  // 'all-members' reaches every member: list them (getProgramAccounts), in a stable order
+  const listed =
+    parsed.tokens === 'all-members'
+      ? (await new GetPoolGroupMembers().query(ctx.chain, refParams)).poolGroupMembers
+          .map((m) => m.tokenAddress)
+          .sort()
+      : parsed.tokens
+  const mints = [...new Set([...listed, ...parsed.remoteTokens.map((r) => r.mint)])]
+  const state = await readPlanState(ctx, { selectors: [C], mints })
+  let policy: EnablementInputs['policy']
+  if (parsed.policy !== undefined && state.group) {
+    const p = await new GetPoolGroupPolicy().query(ctx.chain, {
+      ...refParams,
+      policyId: parsed.policy,
+    })
+    const record = p.remoteChainSelectors.includes(C)
+      ? await new GetPoolGroupPolicyChainRecord().query(ctx.chain, {
+          ...refParams,
+          policyId: parsed.policy,
+          remoteChainSelector: C,
+        })
+      : undefined
+    policy = {
+      classes: p.classes,
+      ...(record && {
+        record: { sections: record.sections, inheritsDefault: record.inheritsDefault },
+      }),
+    }
+  }
+  const lookupTables: EnablementInputs['lookupTables'] = []
+  for (const table of parsed.lookupTables) {
+    const { value } = await ctx.chain.connection.getAddressLookupTable(new PublicKey(table))
+    if (!value) continue
+    const authority = value.state.authority?.toBase58()
+    lookupTables.push({
+      table,
+      addresses: value.state.addresses.map((a) => a.toBase58()),
+      ...(authority && { authority }),
+    })
+  }
+  return { state, mints, ...(policy && { policy }), lookupTables }
+}
+
 /**
  * Expands the enablement from one state read into its steps.
  * @internal
@@ -243,26 +314,32 @@ export async function expandEnablement(
   ctx: PlannerContext,
   parsed: ParsedEnablement,
 ): Promise<Expansion<Name>> {
+  return expandEnablementFrom(ctx, parsed, await readEnablementInputs(ctx, parsed))
+}
+
+/**
+ * The enablement steps from what {@link readEnablementInputs} read: pure and deterministic (stable
+ * chunk ids, M1). On a chain whose record already runs its driven lanes, nothing it opens is ever
+ * materializable unpaused (S6 review M6): each member's new listing (`addMemberRemoteTokens`) and
+ * each admission (`admitPoolGroupMembers`, at most {@link LIVE_ADMISSIONS_PER_STEP} lanes; a widening
+ * to `'all-members'` admits the listing members by subset first) creates the lanes it opens paused
+ * in its own transaction, the lane check runs on the real accounts, then `unpausePoolGroupLanes`
+ * lifts those lane pauses.
+ * @internal
+ */
+export function expandEnablementFrom(
+  ctx: PlannerContext,
+  parsed: ParsedEnablement,
+  inputs: EnablementInputs,
+): Expansion<Name> {
   const g = ctx.ref.group
   const C = parsed.selector
-  const refParams = {
-    poolProgramAddress: ctx.ref.program.toBase58(),
-    poolGroupAddress: g.toBase58(),
-  }
-  // 'all-members' reaches every member: list them (getProgramAccounts)
-  const listed =
-    parsed.tokens === 'all-members'
-      ? (await new GetPoolGroupMembers().query(ctx.chain, refParams)).poolGroupMembers.map(
-          (m) => m.tokenAddress,
-        )
-      : parsed.tokens
-  const mints = [...new Set([...listed, ...parsed.remoteTokens.map((r) => r.mint)])]
-  const state = await readPlanState(ctx, { selectors: [C], mints })
+  const { state, mints } = inputs
   if (!state.group)
     throw new CCTParamsInvalidError(NAME, 'poolGroupAddress', `no pool group at ${g.toBase58()}`)
   const specs: StepSpec<Name>[] = []
   const findings: MultiTokenPoolLaneFinding[] = []
-  let blockedBy: MultiTokenPoolPlanBlock | undefined
+  const blocks: MultiTokenPoolPlanBlock[] = []
   const record = state.records.get(C)
 
   // ── the group chain record ──
@@ -312,16 +389,11 @@ export async function expandEnablement(
 
   // ── the policy's chain record (carried classes only; SECURITY goes through rollOutPoolGroupCCVs) ──
   const policyIds: string[] = []
-  let carried: PoolGroupPolicyClass[] = []
-  if (parsed.policy !== undefined) {
-    const policy = await new GetPoolGroupPolicy().query(ctx.chain, {
-      ...refParams,
-      policyId: parsed.policy,
-    })
-    carried = policy.classes
-    const has = policy.remoteChainSelectors.includes(C)
+  const carried: PoolGroupPolicyClass[] = inputs.policy?.classes ?? []
+  if (parsed.policy !== undefined && inputs.policy) {
+    const existing = inputs.policy.record
     let initId: string | undefined
-    if (!has) {
+    if (!existing) {
       initId = stepId(ctx, 'initPoolGroupPolicyChainRecord', C, parsed.policy)
       policyIds.push(initId)
       specs.push(
@@ -342,13 +414,6 @@ export async function expandEnablement(
         ),
       )
     }
-    const existing = has
-      ? await new GetPoolGroupPolicyChainRecord().query(ctx.chain, {
-          ...refParams,
-          policyId: parsed.policy,
-          remoteChainSelector: C,
-        })
-      : undefined
     for (const section of parsed.sections) {
       if (!carried.includes(section.policyClass)) continue
       if (existing && sectionHolds(existing.sections, section)) continue
@@ -399,12 +464,8 @@ export async function expandEnablement(
       .filter((s) => s !== C)
       .map((s) => poolGroupPdas.groupChain(ctx.ref.program, g, s).toBase58()),
   )
-  for (const table of parsed.lookupTables) {
-    const { value } = await ctx.chain.connection.getAddressLookupTable(new PublicKey(table))
-    const held = value?.state.addresses.map((a) => a.toBase58()) ?? []
-    if (!value || held.includes(recordAddress.toBase58()) || !held.some((a) => others.has(a)))
-      continue
-    const authority = value.state.authority?.toBase58()
+  for (const { table, addresses: held, authority } of inputs.lookupTables) {
+    if (held.includes(recordAddress.toBase58()) || !held.some((a) => others.has(a))) continue
     if (!authority) continue
     const id = stepId(ctx, 'appendToChainRecordLookupTable', C, table)
     const tx = (payer: string) => ({
@@ -435,7 +496,10 @@ export async function expandEnablement(
         {
           run: {
             generate: (payer) =>
-              Promise.resolve({ transactions: [toPlannerTx(tx(payer), payer, [])], findings: [] }),
+              Promise.resolve({
+                transactions: [toPlannerTx(tx(payer), payer, [], 'lookup-table-authority')],
+                findings: [],
+              }),
             execute: async (wallet) => ({
               hashes: [
                 (await submit(ctx.chain, wallet, tx(wallet.publicKey.toBase58()), NAME)).hash,
@@ -454,15 +518,24 @@ export async function expandEnablement(
     parsed.tokens === 'all-members'
       ? members.has(mint)
       : parsed.tokens.includes(mint) || (!!record && recordAdmits(record, mint))
-  const listsAfter = (mint: string) =>
-    parsed.remoteTokens.some((r) => r.mint === mint) ||
+  const listsNow = (mint: string) =>
     !!members.get(mint)?.remoteTokens.some((t) => t.remoteChainSelectors.includes(C))
-  const isLive = !!record && recordLive(record)
-  const needsAck: PoolGroupLaneKey[] = []
+  const listsAfter = (mint: string) =>
+    parsed.remoteTokens.some((r) => r.mint === mint) || listsNow(mint)
+  // a record that runs its driven lanes: every lane it opens is created paused (M6)
+  const running = !!record && recordRuns(record)
+  const ownerOf = (m: string) => state.poolOwners.get(m) ?? ctx.actor
+  // per mint: the run-scoped steps that may create its lane paused (for the lift's decision)
+  const creatorsOf = new Map<string, string[]>()
+  const creator = (m: string, id: string) =>
+    creatorsOf.set(m, [...new Set([...(creatorsOf.get(m) ?? []), id])])
+  const createdPaused: PoolGroupLaneKey[] = []
+  const pausedCreators: string[] = []
 
-  // ── member remote tokens (admitted members only) ──
+  // ── member remote tokens (admitted members only); on a running record also the members it
+  // admits and that list the chain with no lane yet (a crank could create those unpaused) ──
   const upsertIdOf = new Map<string, string>()
-  const upserts = parsed.remoteTokens.filter((r, i) => {
+  parsed.remoteTokens.forEach((r, i) => {
     const member = members.get(r.mint)
     if (!member || member.poolGroupAddress !== g.toBase58())
       throw new CCTParamsInvalidError(
@@ -470,23 +543,47 @@ export async function expandEnablement(
         `remoteTokens[${i}].tokenAddress`,
         `${r.mint} is not a member of the pool group: onboard it first (onboardMultiTokenPoolTokens)`,
       )
-    return !memberHas(member.remoteTokens, C, r)
   })
-  const byOwner = new Map<string, typeof upserts>()
-  for (const r of upserts) {
-    const owner = state.poolOwners.get(r.mint) ?? ctx.actor
-    byOwner.set(owner, [...(byOwner.get(owner) ?? []), r])
+  const stored = (m: string) => {
+    const t = members.get(m)?.remoteTokens.find((x) => x.remoteChainSelectors.includes(C))
+    return t && { mint: m, token: t.token, decimals: t.decimals }
   }
-  let n = 0
-  for (const [owner, list] of byOwner)
-    for (const chunk of chunked(list, MEMBERS_PER_STEP)) {
-      const id = stepId(ctx, 'setPoolGroupMemberRemoteTokens', C, n++)
-      const ack = isLive
-        ? chunk
-            .filter((r) => recordAdmits(record, r.mint) && !laneOf(state, r.mint, C))
-            .map((r) => ({ tokenAddress: r.mint, remoteChainSelector: C }))
-        : []
-      needsAck.push(...ack)
+  const crankable = running
+    ? mints.filter(
+        (m) =>
+          recordAdmits(record, m) &&
+          listsNow(m) &&
+          !laneOf(state, m, C) &&
+          !parsed.remoteTokens.some((r) => r.mint === m),
+      )
+    : []
+  const upsertCandidates = [
+    ...parsed.remoteTokens,
+    ...crankable.flatMap((m) => {
+      const s = stored(m)
+      return s ? [s] : []
+    }),
+  ]
+  const pausedHere = (m: string) => running && recordAdmits(record, m) && !laneOf(state, m, C)
+  const byOwner = new Map<string, typeof upsertCandidates>()
+  for (const r of upsertCandidates)
+    byOwner.set(ownerOf(r.mint), [...(byOwner.get(ownerOf(r.mint)) ?? []), r])
+  for (const [owner, list] of byOwner) {
+    const { chunks, chunkKeyOf } = stableChunks(
+      list,
+      MEMBERS_PER_STEP,
+      (r) => !memberHas(members.get(r.mint)!.remoteTokens, C, r) || pausedHere(r.mint),
+      (r) => r.mint,
+    )
+    for (const [r, key] of chunkKeyOf)
+      creator(r.mint, runScopedId(ctx, 'setPoolGroupMemberRemoteTokens', C, key))
+    for (const { key, items: chunk } of chunks) {
+      const id = runScopedId(ctx, 'setPoolGroupMemberRemoteTokens', C, key)
+      const paused = chunk
+        .filter((r) => pausedHere(r.mint))
+        .map((r) => ({ tokenAddress: r.mint, remoteChainSelector: C }))
+      createdPaused.push(...paused)
+      if (paused.length) pausedCreators.push(id)
       for (const r of chunk) upsertIdOf.set(r.mint, id)
       specs.push(
         opStep(
@@ -496,8 +593,11 @@ export async function expandEnablement(
             name: 'addMemberRemoteTokens',
             operation: 'setPoolGroupMemberRemoteTokens',
             dependsOn: afterAdd,
-            summary: `list ${C} on ${chunk.length} member(s)`,
-            writeSet: chunk.map((r) => keys.member(r.mint)),
+            summary: `list ${C} on ${chunk.length} member(s)${paused.length ? `, creating ${paused.length} lane(s) paused in the same transaction` : ''}`,
+            writeSet: [
+              ...chunk.map((r) => keys.member(r.mint)),
+              ...paused.map((l) => keys.lane(l.tokenAddress, C)),
+            ],
             guardReads: [keys.chain(g, C)],
             signer: poolOwnerSigner(ctx, owner),
             progress: chunk.length,
@@ -509,13 +609,15 @@ export async function expandEnablement(
               tokenAddress: r.mint,
               remoteTokens: [{ remoteChainSelectors: [C], token: r.token, decimals: r.decimals }],
             })),
-            ...(ack.length && parsed.acknowledgeLiveAdmission && { acknowledgeLiveAdmission: ack }),
+            ...(running && { createLanesPaused: true }),
           },
         ),
       )
     }
+  }
 
-  // ── admission: from 'off' behind the driven-lanes pause; on a live record with the acknowledgement ──
+  // ── admission: from 'off' behind the driven-lanes pause; on a running record each admission
+  // creates the lanes it opens paused, in its own transaction ──
   const listTokens = parsed.tokens === 'all-members' ? [] : parsed.tokens
   listTokens.forEach((m, i) => {
     if (!members.has(m))
@@ -526,8 +628,8 @@ export async function expandEnablement(
       )
   })
   const laneMode = parsed.tokens === 'all-members' ? 'all-members' : 'subset'
-  const pauseId = stepId(ctx, 'pausePoolGroupChainLanes', C)
-  let admitId: string | undefined
+  const pauseId = runScopedId(ctx, 'pausePoolGroupChainLanes', C)
+  const admitIds: string[] = []
   const pausing = !record || record.laneMode === 'off'
   if (pausing) {
     specs.push(
@@ -538,71 +640,110 @@ export async function expandEnablement(
         ...(listTokens.length && { addTokens: listTokens }),
         dependsOn: [...afterAdd, ...sectionIds],
         summary: `move the chain record of ${C} out of 'off' (${laneMode}) with its driven lanes paused`,
-        idPart: 'pausePoolGroupChainLanes',
+        id: pauseId,
       }),
     )
   } else {
-    const missing = listTokens.filter((m) => !recordAdmits(record, m))
     const widen = laneMode === 'all-members' && record.laneMode !== 'all-members'
-    if (missing.length || widen) {
-      const newly = mints.filter(
-        (m) =>
-          !recordAdmits(record, m) && admittedAfter(m) && listsAfter(m) && !laneOf(state, m, C),
-      )
-      const ack = isLive ? newly.map((m) => ({ tokenAddress: m, remoteChainSelector: C })) : []
-      needsAck.push(...ack)
-      admitId = stepId(ctx, 'admitPoolGroupMembers', C)
+    // the members it adds: named ones missing from the subset; widening adds every member by subset first
+    const candidates = widen ? mints : listTokens
+    const opensLane = (m: string) => listsAfter(m) && !laneOf(state, m, C)
+    const { chunks, chunkKeyOf } = stableChunks(
+      candidates,
+      running ? LIVE_ADMISSIONS_PER_STEP : MEMBERS_PER_STEP,
+      // widening a running record: only the members whose lanes it would open go by subset first
+      (m) => !recordAdmits(record, m) && (!widen || (running && opensLane(m))),
+      (m) => m,
+    )
+    if (running)
+      for (const [m, key] of chunkKeyOf)
+        creator(m, runScopedId(ctx, 'admitPoolGroupMembers', C, key))
+    const upserts = [...new Set(upsertIdOf.values())]
+    for (const { key, items: chunk } of chunks) {
+      const id = runScopedId(ctx, 'admitPoolGroupMembers', C, key)
+      const opened = running
+        ? chunk.filter(opensLane).map((m) => ({ tokenAddress: m, remoteChainSelector: C }))
+        : []
+      createdPaused.push(...opened)
+      if (opened.length) pausedCreators.push(id)
+      admitIds.push(id)
       specs.push(
         chainLanesStep(ctx, 'admitPoolGroupMembers', {
           selector: C,
-          ...(widen && { laneMode: 'all-members' }),
-          ...(missing.length && { addTokens: missing }),
-          ...(ack.length && parsed.acknowledgeLiveAdmission && { acknowledgeLiveAdmission: ack }),
-          dependsOn: [...sectionIds, ...[...upsertIdOf.values()]],
-          summary: `admit ${widen ? 'every member' : `${missing.length} member(s)`} on ${C}`,
-          idPart: 'admitPoolGroupMembers',
+          addTokens: chunk,
+          ...(opened.length && { createPaused: opened }),
+          // listings land first, so the admission creates their lanes paused with itself
+          dependsOn: [...sectionIds, ...upserts],
+          summary: `admit ${chunk.length} member(s) on ${C}${opened.length ? `, creating ${opened.length} lane(s) paused in the same transaction` : ''}`,
+          id,
+        }),
+      )
+    }
+    if (widen) {
+      const id = runScopedId(ctx, 'admitPoolGroupMembers', C, 'all-members')
+      const subsetFirst = [...admitIds]
+      admitIds.push(id)
+      specs.push(
+        chainLanesStep(ctx, 'admitPoolGroupMembers', {
+          selector: C,
+          laneMode: 'all-members',
+          // after the subset admissions it opens no lane of a listing member (else its op refuses)
+          dependsOn: [...sectionIds, ...upserts, ...subsetFirst],
+          summary: `admit every member on ${C}`,
+          id,
         }),
       )
     }
   }
-  if (needsAck.length && !parsed.acknowledgeLiveAdmission)
-    blockedBy = {
-      reason: `${needsAck.length} lane(s) would be admitted on ${C}, which is already live: a live chain is never paused, so pass solana.acknowledgeLiveAdmission: true (each lane is lane-checked before it goes live)`,
-      steps: specs
-        .filter(
-          (s) => s.step.name === 'admitPoolGroupMembers' || s.step.name === 'addMemberRemoteTokens',
-        )
-        .map((s) => s.step.id),
-    }
+  if (createdPaused.length && !parsed.acknowledgeLiveAdmission)
+    blocks.push({
+      reason: `${createdPaused.length} lane(s) would be admitted on ${C}, which is already live: a live chain is never paused, so each lane is created paused with its admission and lifted after the lane check; pass solana.acknowledgeLiveAdmission: true to admit them`,
+      steps: pausedCreators,
+    })
 
-  // ── materialize what is admitted and listed, then assign and sync ──
+  // ── materialize what is admitted and listed behind the chain pause, then assign and sync ──
   const target = mints.filter((m) => admittedAfter(m) && listsAfter(m))
   const laneStepOf = new Map<string, string>()
-  const toCreate = target.filter((m) => !laneOf(state, m, C))
-  for (const spec of materializeSteps(ctx, 'materializePoolGroupLanes', C, toCreate, (chunk) => [
-    ...(pausing ? [pauseId] : []),
-    ...(admitId ? [admitId] : []),
-    ...chunk.flatMap((m) => (upsertIdOf.has(m) ? [upsertIdOf.get(m)!] : [])),
-  ])) {
-    specs.push(spec)
-    for (const m of toCreate)
-      if (spec.step.writeSet.includes(keys.lane(m, C))) laneStepOf.set(m, spec.step.id)
+  for (const l of createdPaused) {
+    const id =
+      [...admitIds, ...upsertIdOf.values()].find((x) =>
+        creatorsOf.get(l.tokenAddress)?.includes(x),
+      ) ?? upsertIdOf.get(l.tokenAddress)
+    if (id) laneStepOf.set(l.tokenAddress, id)
   }
+  if (!running)
+    for (const spec of materializeSteps(
+      ctx,
+      'materializePoolGroupLanes',
+      C,
+      target,
+      (m) => !laneOf(state, m, C),
+      (chunk) => [
+        ...(pausing ? [pauseId] : []),
+        ...admitIds,
+        ...chunk.flatMap((m) => (upsertIdOf.has(m) ? [upsertIdOf.get(m)!] : [])),
+      ],
+    )) {
+      specs.push(spec)
+      for (const m of target)
+        if (spec.step.writeSet.includes(keys.lane(m, C))) laneStepOf.set(m, spec.step.id)
+    }
   const assignIds: string[] = []
   if (parsed.policy !== undefined) {
-    const lanes = target
-      .filter(
-        (m) => !assignmentHolds(laneOf(state, m, C)?.classSource ?? null, parsed.policy!, carried),
-      )
-      .map((m) => ({
+    const lanes = target.map((m) => {
+      const current = laneOf(state, m, C)?.classSource ?? null
+      return {
         mint: m,
-        owner: state.poolOwners.get(m) ?? ctx.actor,
-        current: laneOf(state, m, C)?.classSource ?? null,
-      }))
-    if (lanes.length && carried.includes('security'))
+        owner: ownerOf(m),
+        current,
+        done: assignmentHolds(current, parsed.policy!, carried),
+      }
+    })
+    const todo = lanes.filter((l) => !l.done)
+    if (todo.length && carried.includes('security'))
       findings.push(
         ...securityCopiedFindings(
-          lanes.map((l) => ({ tokenAddress: l.mint, remoteChainSelector: C })),
+          todo.map((l) => ({ tokenAddress: l.mint, remoteChainSelector: C })),
           parsed.policy,
         ),
       )
@@ -620,16 +761,20 @@ export async function expandEnablement(
       assignIds.push(spec.step.id)
     }
   }
-  const unsynced = target.filter((m) => {
-    const lane = laneOf(state, m, C)
-    return lane?.ccvCopy && !lane.ccvCopy.synced
-  })
-  for (const [i, chunk] of chunked(unsynced, LANES_PER_STEP).entries())
+  for (const { key, items: chunk } of stableChunks(
+    target,
+    LANES_PER_STEP,
+    (m) => {
+      const lane = laneOf(state, m, C)
+      return !!lane?.ccvCopy && !lane.ccvCopy.synced
+    },
+    (m) => m,
+  ).chunks)
     specs.push(
       opStep(
         ctx,
         {
-          id: stepId(ctx, 'syncPoolGroupCCVs', C, i),
+          id: stepId(ctx, 'syncPoolGroupCCVs', C, key),
           name: 'syncPoolGroupCCVs',
           operation: 'syncPoolGroupCCVs',
           dependsOn: assignIds,
@@ -645,20 +790,23 @@ export async function expandEnablement(
       ),
     )
 
-  // ── check, then lift this run's pause ──
+  // ── check, then lift this run's pauses ──
   const lanes = target.map((m) => ({ tokenAddress: m, remoteChainSelector: C }))
   const writes = specs.filter((s) => s.run).map((s) => s.step.id)
   const check = checkStep<Name>(ctx, 'checkLanes', lanes, writes, parsed.check)
   specs.push(check)
-  const pausedNow = pausing || record.drivenLanesPaused
-  if (parsed.unpause && pausedNow) {
+  const planned = new Set(specs.map((s) => s.step.id))
+  if (parsed.unpause && (pausing || record.drivenLanesPaused)) {
+    const unpauseStepId = runScopedId(ctx, 'unpausePoolGroupChainLanes', C)
     const decision = unpauseDecision({
-      pauseStepId: pauseId,
-      pausePlanned: pausing,
+      pauseStepIds: [pauseId],
+      pausePlanned: pausing ? [pauseId] : [],
+      unpauseStepId,
       landed: ctx.landed,
       what: `the driven lanes of ${C}`,
+      ...(record && !pausing && { onChain: chainPausedAsSet(record) }),
     })
-    if (!decision.lift) blockedBy ??= decision.block
+    if (!decision.lift) blocks.push(decision.block)
     else
       specs.push(
         chainLanesStep(ctx, 'unpausePoolGroupChainLanes', {
@@ -667,10 +815,45 @@ export async function expandEnablement(
           acknowledgeLiveAdmission: lanes,
           dependsOn: [check.step.id, ...decision.dependsOn],
           summary: `lift the driven-lanes pause of ${C} this run set`,
-          idPart: 'unpausePoolGroupChainLanes',
+          id: unpauseStepId,
         }),
       )
   }
+  // lane pauses this run's paused creations set (M6)
+  if (parsed.unpause && running)
+    for (const m of target) {
+      const lane = laneOf(state, m, C)
+      const creates = createdPaused.some((l) => l.tokenAddress === m)
+      if (
+        !creates &&
+        !(lane && lane.kind === 'driven' && lane.pausedOutbound && lane.pausedInbound)
+      )
+        continue
+      const candidates = creatorsOf.get(m) ?? []
+      const unpauseStepId = runScopedId(ctx, 'unpausePoolGroupLanes', m)
+      const decision = unpauseDecision({
+        pauseStepIds: candidates,
+        pausePlanned: candidates.filter((id) => planned.has(id)),
+        unpauseStepId,
+        landed: ctx.landed,
+        what: `the lane of ${m} toward ${C}`,
+        onChain: lane ? lanePausedAsCreated(lane, g) : { ok: true },
+      })
+      if (!decision.lift) {
+        blocks.push(decision.block)
+        continue
+      }
+      specs.push(
+        laneUnpauseStep(ctx, 'unpausePoolGroupLanes', {
+          mint: m,
+          owner: state.poolOwners.get(m),
+          selectors: [C],
+          dependsOn: [check.step.id, ...decision.dependsOn],
+          id: unpauseStepId,
+        }),
+      )
+    }
+  const blockedBy = mergeBlocks(blocks)
   return {
     specs,
     ...(blockedBy && { blockedBy }),

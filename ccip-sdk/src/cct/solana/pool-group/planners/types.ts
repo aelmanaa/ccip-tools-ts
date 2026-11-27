@@ -33,7 +33,10 @@ import type {
 /**
  * Onboarding steps of N tokens into a pool group, in order. The `token*` steps are `onboardToken`'s,
  * expanded per mint (a chain per mint); `pausePoolGroupChainLanes` runs only for a chain record this
- * plan moves out of `'off'` (`solana.create` chains with a `laneMode`).
+ * plan moves out of `'off'` (`solana.create` chains with a `laneMode`). On a chain that is already
+ * live, a token joins without listing it, then `admitPausedLanes` lists it, creates the lane and
+ * pauses it in one owner-signed transaction (no one can create the lane unpaused in between), and
+ * `unpausePoolGroupLanes` lifts that lane pause after the lane check.
  */
 export const POOL_GROUP_ONBOARDING_STEPS = [
   'createPoolGroup',
@@ -50,9 +53,11 @@ export const POOL_GROUP_ONBOARDING_STEPS = [
   'joinPoolGroup',
   'initPoolGroupLanes',
   'materializePoolGroupLanes',
+  'admitPausedLanes',
   'assignPoolGroupLanePolicies',
   'checkLanes',
   'unpausePoolGroupChainLanes',
+  'unpausePoolGroupLanes',
 ] as const
 /** One onboarding step name. */
 export type PoolGroupOnboardingStepName = (typeof POOL_GROUP_ONBOARDING_STEPS)[number]
@@ -60,7 +65,9 @@ export type PoolGroupOnboardingStepName = (typeof POOL_GROUP_ONBOARDING_STEPS)[n
 /**
  * Remote chain enablement steps, in order. `pausePoolGroupChainLanes` runs only on a chain record in
  * `'off'`: it moves the record into its lane mode with the driven lanes paused (the program requires
- * the flag there); a live chain is never paused.
+ * the flag there); a live chain is never paused. On a live chain, `addMemberRemoteTokens` and
+ * `admitPoolGroupMembers` create each lane they open, paused, in their own transaction, and
+ * `unpausePoolGroupLanes` lifts those lane pauses after the lane check.
  */
 export const POOL_GROUP_CHAIN_ENABLEMENT_STEPS = [
   'addPoolGroupChain',
@@ -76,6 +83,7 @@ export const POOL_GROUP_CHAIN_ENABLEMENT_STEPS = [
   'syncPoolGroupCCVs',
   'checkLanes',
   'unpausePoolGroupChainLanes',
+  'unpausePoolGroupLanes',
 ] as const
 /** One chain enablement step name. */
 export type PoolGroupChainEnablementStepName = (typeof POOL_GROUP_CHAIN_ENABLEMENT_STEPS)[number]
@@ -111,6 +119,16 @@ export type PoolGroupPlan<Name extends string> = MultiTokenPoolPlan<Name> &
   PoolGroupRunIds & {
     /** Warnings the plan found (for example SECURITY copied at once by a policy assignment). */
     findings: MultiTokenPoolLaneFinding[]
+    /**
+     * This run's id: pass it back on every later call of the run (with `landedStepIds`), across
+     * flows (enable, then onboard). Every pause step id carries it.
+     */
+    runId: string
+    /**
+     * Ids in `pendingStepHashes` that are no longer in the plan: they landed (or the state no longer
+     * needs them). Drop them from the pending set, and add the executed ones to `landedStepIds`.
+     */
+    vanishedPendingSteps: string[]
   }
 
 /** One built ready step of an unsigned planner call. */
@@ -149,6 +167,8 @@ export type PoolGroupExecutedPlanStep<Name extends string> = MultiTokenPoolPlanS
 
 /** Signed planner result on Solana. */
 export type ExecutePoolGroupPlanResult<Name extends string> = PoolGroupRunIds & {
+  /** This run's id (pass it, with the landed step ids, to a later unsigned call of the same run). */
+  runId: string
   /** The steps this run landed, in order. */
   steps: PoolGroupExecutedPlanStep<Name>[]
   /** Why the run stopped before the plan was empty, if it did. */
@@ -160,6 +180,18 @@ export type ExecutePoolGroupPlanResult<Name extends string> = PoolGroupRunIds & 
 }
 
 // ─── Flat params (public) ────────────────────────────────────────────────────────────────────
+
+/**
+ * Run options of the Solana planners. X1 moves `runId` into the shared `MultiTokenPoolPlanOptions`.
+ */
+export type SolanaMultiTokenPoolPlannerRunOptions = {
+  /**
+   * The run this call belongs to: the `runId` a plan of this run returned. Omitted: a new run. Pause
+   * step ids carry it, so `landedStepIds` only lifts pauses this run set; pass both on every call of
+   * one run (also from enable to onboard), and discard both once the run completes.
+   */
+  runId?: string
+}
 
 /** Solana execution options of the shared planners. */
 export type SolanaMultiTokenPoolPlannerExecutionOptions = {
@@ -260,8 +292,12 @@ export type SolanaMultiTokenPoolOnboardingToken = {
 
 /** Parameters of `onboardMultiTokenPoolTokens` (Solana pool group). */
 export type SolanaOnboardMultiTokenPoolTokensParams = MultiTokenPoolPlanOptions &
+  SolanaMultiTokenPoolPlannerRunOptions &
   PoolGroupProgramRef & {
-    /** The pool group; optional with `solana.create`, which generates one and returns it. */
+    /**
+     * The pool group. With `solana.create`, required on the plan and unsigned forms (any fresh
+     * base58 key, passed on every call of the run); the signed form draws one and returns it.
+     */
     poolGroupId?: string
     /** The `Group` PDA, instead of the id. */
     poolGroupAddress?: string
@@ -323,6 +359,7 @@ export type SolanaMultiTokenPoolRemoteChainConfig = {
 
 /** Parameters of `enableMultiTokenPoolChain` (Solana pool group). */
 export type SolanaEnableMultiTokenPoolChainParams = MultiTokenPoolPlanOptions &
+  SolanaMultiTokenPoolPlannerRunOptions &
   PoolGroupRef & {
     /**
      * Omitted: the values go to the pool group chain record only. Given (a policy id): also to the
@@ -376,8 +413,9 @@ export type ExecuteEnableMultiTokenPoolChainParams = SolanaEnableMultiTokenPoolC
 
 /** Parameters of `removeMultiTokenPoolToken` (Solana: the token leaves the pool group). Destructive. */
 export type SolanaRemoveMultiTokenPoolTokenParams = MultiTokenPoolPlanOptions &
+  SolanaMultiTokenPoolPlannerRunOptions &
   PoolGroupRef & {
-    /** The mint that leaves. */
+    /** The mint that leaves (with `solana.tokenAddresses`, the first of them). */
     tokenAddress: string
     /** Lowest acceptable `destGasOverhead` of the lane check; defaults to 200,000. */
     minDestGasOverhead?: number
@@ -385,12 +423,24 @@ export type SolanaRemoveMultiTokenPoolTokenParams = MultiTokenPoolPlanOptions &
     maxTransferFeeBps?: number
     /** Solana execution options and flow fields. */
     solana?: SolanaMultiTokenPoolPlannerExecutionOptions & {
+      /**
+       * More mints that leave in the same plan, batched with `tokenAddress`: their pauses, drops,
+       * closes and member closes share the plan's waves (one approval round per wave, not per token).
+       */
+      tokenAddresses?: string[]
       /** Only these chains' lanes leave; omitted, every lane leaves and the membership closes. */
       remoteChainSelectors?: bigint[]
       /**
-       * Lanes whose inbound in-flight messages the caller confirms drained (and whose remote side the
-       * caller confirms stopped when `getChain` cannot read it). Until each lane is listed, the plan
-       * returns `blockedBy` at `awaitDrain`: closing strands inbound messages still in flight.
+       * Lanes whose remote side the caller confirms stopped sending toward this chain. Accepted only
+       * where the SDK cannot read it: a remote family it does not read, or a `getChain` that was given
+       * and could not serve the chain. An EVM remote side without `getChain` gives `blockedBy` (pass
+       * `getChain`); a readable one is read, never attested.
+       */
+      confirmRemoteOutboundStopped?: MultiTokenPoolLaneKey[]
+      /**
+       * Lanes whose inbound in-flight messages the caller confirms drained. It attests the drain only,
+       * never the remote stop: until each lane is listed, the plan returns `blockedBy` at
+       * `awaitDrain`, because closing strands inbound messages still in flight.
        */
       confirmInFlightDrained?: MultiTokenPoolLaneKey[]
     }
@@ -470,7 +520,9 @@ export type SolanaMultiTokenPoolPlannerBindings = {
     target: PoolGroupRef
     policyField: object
     extension: SolanaPlannerExecution & {
+      tokenAddresses?: string[]
       remoteChainSelectors?: bigint[]
+      confirmRemoteOutboundStopped?: MultiTokenPoolLaneKey[]
       confirmInFlightDrained?: MultiTokenPoolLaneKey[]
     }
     tokenExtension: object
