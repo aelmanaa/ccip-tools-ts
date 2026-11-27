@@ -11,7 +11,9 @@ import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
+  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
 import { parseRateLimitConfig, toAbiRateLimitConfig } from '../../token-pool/rate-limit.ts'
 import {
@@ -74,7 +76,7 @@ export class ApplyMultiTokenPoolInlineRateLimitBucketUpdates extends PoolConfigM
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', 'RATE_LIMIT_ROLE']
+    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', TOKEN_POLICY_ROLES.rateLimit]
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -102,7 +104,7 @@ export class ApplyMultiTokenPoolInlineRateLimitBucketUpdates extends PoolConfigM
         )
     })
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
-      'applyInlineRateLimitBucketUpdates',
+      multiTokenPoolFunctionOf(this.name),
       [
         updates.map((u) => ({
           localToken: getAddress(u.tokenAddress),

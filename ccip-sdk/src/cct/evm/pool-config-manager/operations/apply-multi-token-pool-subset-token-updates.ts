@@ -12,7 +12,9 @@ import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
+  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateAddress, validateArray, validateUint64 } from '../../validate.ts'
 import { encodePolicyName } from '../contracts.ts'
@@ -78,7 +80,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'POLICY_ROLE', 'CONNECTION_ROLE']
+    return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES.connection]
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -150,7 +152,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
         getAddress(e.tokenAddress),
       ])
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
-      'applySubsetTokenUpdates',
+      multiTokenPoolFunctionOf(this.name),
       [args(params.remove, 'remove'), args(params.add, 'add')],
     )
     // the values the write replaces: each touched membership as it was

@@ -33,8 +33,6 @@ export class ApplyMultiTokenPoolFeePolicyConfigUpdates extends PolicyRecordWrite
 > {
   readonly name = 'applyMultiTokenPoolFeePolicyConfigUpdates'
   protected readonly recordType = 'fee'
-  protected readonly functionName = 'applyFeePolicyConfigUpdates'
-  protected readonly typeRole = 'FEE_ROLE'
   protected readonly allowDefault = true
 
   protected parseRecord(

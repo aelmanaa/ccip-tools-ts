@@ -34,8 +34,6 @@ export class ApplyMultiTokenPoolDestOverheadPolicyConfigUpdates extends PolicyRe
 > {
   readonly name = 'applyMultiTokenPoolDestOverheadPolicyConfigUpdates'
   protected readonly recordType = 'destOverhead'
-  protected readonly functionName = 'applyDestOverheadPolicyConfigUpdates'
-  protected readonly typeRole = 'DEST_OVERHEAD_ROLE'
   protected readonly allowDefault = true
 
   protected parseRecord(

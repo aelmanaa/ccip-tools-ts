@@ -9,7 +9,9 @@ import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
+  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
 import { parseRateLimitConfig, toAbiRateLimitConfig } from '../../token-pool/rate-limit.ts'
 import {
@@ -72,7 +74,7 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'POLICY_ROLE', 'RATE_LIMIT_ROLE']
+    return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES.rateLimit]
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -102,7 +104,7 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
         )
     })
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
-      'applyRateLimitPolicyBucketUpdates',
+      multiTokenPoolFunctionOf(this.name),
       [
         updates.map((u) => ({
           policyName: encodePolicyName(this.name, 'policyName', u.policyName),

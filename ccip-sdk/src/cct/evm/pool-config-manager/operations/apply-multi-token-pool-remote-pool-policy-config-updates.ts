@@ -38,8 +38,6 @@ export class ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates extends PolicyReco
 > {
   readonly name = 'applyMultiTokenPoolRemotePoolPolicyConfigUpdates'
   protected readonly recordType = 'remotePool'
-  protected readonly functionName = 'applyRemotePoolPolicyConfigUpdates'
-  protected readonly typeRole = 'REMOTE_POOL_ROLE'
   protected readonly allowDefault = false
 
   protected parseRecord(

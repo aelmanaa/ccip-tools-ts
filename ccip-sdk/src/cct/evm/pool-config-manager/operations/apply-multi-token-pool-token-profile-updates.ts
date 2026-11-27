@@ -23,6 +23,7 @@ import {
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
   isSupportedMultiTokenPoolType,
+  multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
 import { isNotCcipContract } from '../../query.ts'
 import { validateAllowedFinality } from '../../token-pool/operations/set-allowed-finality-config.ts'
@@ -458,7 +459,7 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
     await this.#checkProviders(chain, changes, serving, blockTag)
 
     const iface = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version)
-    const data = iface.encodeFunctionData('applyTokenProfileUpdates', [
+    const data = iface.encodeFunctionData(multiTokenPoolFunctionOf(this.name), [
       remove,
       changes.map(({ next }) => [
         next.tokenAddress,

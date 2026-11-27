@@ -43,8 +43,6 @@ export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends InlineReco
 > {
   readonly name = 'applyMultiTokenPoolInlineRemotePoolConfigUpdates'
   protected readonly recordType = 'remotePool'
-  protected readonly functionName = 'applyInlineRemotePoolConfigUpdates'
-  protected readonly typeRole = 'REMOTE_POOL_ROLE'
 
   protected parseRecord(
     _params: ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams,

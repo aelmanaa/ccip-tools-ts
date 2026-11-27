@@ -39,8 +39,6 @@ export class ApplyMultiTokenPoolInlineConnectionConfigUpdates extends InlineReco
 > {
   readonly name = 'applyMultiTokenPoolInlineConnectionConfigUpdates'
   protected readonly recordType = 'connection'
-  protected readonly functionName = 'applyInlineConnectionConfigUpdates'
-  protected readonly typeRole = 'CONNECTION_ROLE'
 
   protected parseRecord(
     _params: ApplyMultiTokenPoolInlineConnectionConfigUpdatesParams,

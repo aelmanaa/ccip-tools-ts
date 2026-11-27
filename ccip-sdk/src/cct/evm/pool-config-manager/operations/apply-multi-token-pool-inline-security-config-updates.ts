@@ -34,8 +34,6 @@ export class ApplyMultiTokenPoolInlineSecurityConfigUpdates extends InlineRecord
 > {
   readonly name = 'applyMultiTokenPoolInlineSecurityConfigUpdates'
   protected readonly recordType = 'security'
-  protected readonly functionName = 'applyInlineSecurityConfigUpdates'
-  protected readonly typeRole = 'SECURITY_ROLE'
 
   protected parseRecord(
     _params: ApplyMultiTokenPoolInlineSecurityConfigUpdatesParams,

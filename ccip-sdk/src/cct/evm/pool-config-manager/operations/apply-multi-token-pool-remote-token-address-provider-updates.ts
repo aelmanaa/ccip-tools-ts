@@ -14,7 +14,9 @@ import { laneFamilyOf } from '../../../remote-address.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
+  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
 import { isNotCcipContract } from '../../query.ts'
 import { assertUnique, validateAddress, validateArray } from '../../validate.ts'
@@ -82,7 +84,7 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'POLICY_ROLE', 'CONNECTION_ROLE']
+    return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES.connection]
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -133,7 +135,7 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
         )
     }
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
-      'applyRemoteTokenAddressProviderUpdates',
+      multiTokenPoolFunctionOf(this.name),
       [
         updates.map((u, i) => [
           encodePolicyName(this.name, `updates[${i}].policyName`, u.policyName),

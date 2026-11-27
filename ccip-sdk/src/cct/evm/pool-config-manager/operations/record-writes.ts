@@ -13,9 +13,12 @@ import type { EVMChain } from '../../../../evm/index.ts'
 import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
+  type MultiTokenPoolSingleFunctionOperation,
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
+  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateArray, validateUint64 } from '../../validate.ts'
 import {
@@ -266,10 +269,8 @@ export abstract class PolicyRecordWriteOperation<
 > extends PoolConfigManagerWriteOperation<P> {
   /** The record type the policies are of. */
   protected abstract readonly recordType: LaneRecordType
-  /** The PCM function. */
-  protected abstract readonly functionName: string
-  /** The type's own role (with `CONFIG_ROLE` and `POLICY_ROLE`, `_checkPolicyRoles`). */
-  protected abstract readonly typeRole: PoolConfigManagerRole
+  /** The op; its PCM function comes from the op map. */
+  abstract override readonly name: MultiTokenPoolSingleFunctionOperation
   /** Whether the type has a default record (chain `0n`). */
   protected abstract readonly allowDefault: boolean
 
@@ -300,7 +301,7 @@ export abstract class PolicyRecordWriteOperation<
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'POLICY_ROLE', this.typeRole]
+    return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES[this.recordType]]
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -327,7 +328,7 @@ export abstract class PolicyRecordWriteOperation<
       this.encodeRecord(r, word(r.policyName, `recordsToSet[${i}].policyName`)),
     )
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
-      this.functionName,
+      multiTokenPoolFunctionOf(this.name),
       [remove, policies, set],
     )
     // the values the write replaces: each touched record as stored (absent: `null`)
@@ -367,10 +368,8 @@ export abstract class InlineRecordWriteOperation<
 > extends PoolConfigManagerWriteOperation<P> {
   /** The record type. */
   protected abstract readonly recordType: LaneRecordType
-  /** The PCM function. */
-  protected abstract readonly functionName: string
-  /** The type's own role (with `CONFIG_ROLE` and `TOKEN_MANAGER_ROLE`, `_checkTokenRoles`). */
-  protected abstract readonly typeRole: PoolConfigManagerRole
+  /** The op; its PCM function comes from the op map. */
+  abstract override readonly name: MultiTokenPoolSingleFunctionOperation
 
   /** Validates one record to set before any RPC, and returns it canonical (what `encodeRecord` gets). */
   protected abstract parseRecord(params: P, record: R, at: string): R
@@ -394,7 +393,7 @@ export abstract class InlineRecordWriteOperation<
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', this.typeRole]
+    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', TOKEN_POLICY_ROLES[this.recordType]]
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -410,7 +409,7 @@ export abstract class InlineRecordWriteOperation<
     checkInlineRecordWrite(this.name, state, this.recordType, params)
     await this.checkState(chain, params, ctx)
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
-      this.functionName,
+      multiTokenPoolFunctionOf(this.name),
       [
         (params.remove ?? []).map(toAbiLaneKey),
         (params.set ?? []).map((r) => this.encodeRecord(r)),

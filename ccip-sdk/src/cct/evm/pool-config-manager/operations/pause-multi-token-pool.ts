@@ -10,9 +10,11 @@ import { getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import {
+  type MultiTokenPoolSingleFunctionOperation,
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
   poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
 import {
@@ -75,6 +77,8 @@ abstract class PauseWriteOperation<
   P extends PauseParams,
 > extends PoolConfigManagerWriteOperation<P> {
   /** What is paused. */
+  /** The op; its PCM function comes from the op map. */
+  abstract override readonly name: MultiTokenPoolSingleFunctionOperation
   protected abstract readonly scope: 'global' | 'tokens' | 'chains'
   /** `true` to pause, `false` to unpause. */
   protected abstract readonly pauses: boolean
@@ -116,7 +120,7 @@ abstract class PauseWriteOperation<
     { address, version, blockTag, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
     const iface = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version)
-    const fn = `${this.pauses ? 'pause' : 'unpause'}${this.scope === 'global' ? 'Globally' : this.scope === 'tokens' ? 'Tokens' : 'Chains'}`
+    const fn = multiTokenPoolFunctionOf(this.name)
     const direction = PAUSE_DIRECTIONS.indexOf(params.direction ?? 'both')
     const data =
       this.scope === 'global'
