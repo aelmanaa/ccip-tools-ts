@@ -16,15 +16,18 @@ import { canonicalJson } from '../../canonical.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import {
   type MultiTokenPoolLaneFinding,
+  type MultiTokenPoolRateLimits,
   type MultiTokenPoolRemoteAttestation,
   type MultiTokenPoolRemoteFact,
   DEFAULT_MAX_TRANSFER_FEE_BPS,
   DEFAULT_MIN_DEST_GAS_OVERHEAD,
   HOOK_DEST_GAS_OVERHEAD,
   LEGACY_POOL_DATA_BYTES,
+  isStop,
   longPoolDataBytes,
   sortFindings,
 } from '../../multi-token-pool.ts'
+import type { RateLimitConfig } from '../../rate-limit.ts'
 import { parseUniqueRemoteAddresses } from '../../remote-address.ts'
 import {
   assertUnique,
@@ -515,16 +518,17 @@ export function evaluateMultiTokenPoolGuards({
         'warning',
         `the remote long-data fact comes from an attestation, not a read: ${remote.attestation.reason}`,
       )
-    // a token paused outbound whose remote registry names no pool yet may wait (the MTTP spec's
-    // onboarding exception);
-    // the unpause re-check runs with no exception
-    const waiting = c.isTokenOutboundPaused && remote.registryPool === null
+    // a token paused or stopped outbound whose remote registry names no pool yet may wait (the MTTP
+    // spec's onboarding exception, as on Solana): nothing is sent, so nothing burns; the unpause or
+    // lift re-check runs with no exception
+    const waiting =
+      (c.isTokenOutboundPaused || stopsOutbound(lane.rateLimits)) && remote.registryPool === null
     if (remote.registryPool === null) {
       if (!waiting)
         add(
           'NO_REMOTE_POOL',
           'error',
-          `the remote registry names no pool for ${c.remoteToken}${remote.remoteTokenHasCode === false ? ', which has no code on the remote chain' : ''}: a send burns here and nothing releases it there; register the remote side first, or keep the token paused outbound`,
+          `the remote registry names no pool for ${c.remoteToken}${remote.remoteTokenHasCode === false ? ', which has no code on the remote chain' : ''}: a send burns here and nothing releases it there; register the remote side first, or keep the token paused or stopped outbound`,
           'connection',
         )
       continue
@@ -880,4 +884,38 @@ export function multiTokenPoolPcmLaneCheck(
       }),
     ),
   )
+}
+
+/**
+ * Whether a lane's rate limits hold every outbound send: the outbound bucket is a stop, and so is
+ * the fast-finality outbound bucket when it is enabled (a disabled one sends nothing faster).
+ * @internal
+ */
+export function stopsOutbound(rateLimits: MultiTokenPoolRateLimits | null): boolean {
+  if (!rateLimits) return false
+  const stop = (r: RateLimitConfig) =>
+    isStop({ isEnabled: r.enabled, capacity: r.capacity ?? 0n, rate: r.rate ?? 0n })
+  const fast = rateLimits.fastFinalityOutbound
+  return stop(rateLimits.outbound) && (!fast.enabled || stop(fast))
+}
+
+/**
+ * Whether a write loosens a lane's rate limits: any bucket disabled from enabled, or given more
+ * capacity or rate (lifting a stop included). A lane gaining its record counts; enabling a disabled
+ * bucket, lowering a limit, or stopping does not.
+ * @internal
+ */
+export function loosensRateLimits(
+  before: MultiTokenPoolRateLimits | null,
+  after: MultiTokenPoolRateLimits | null,
+): boolean {
+  if (!after) return false
+  if (!before) return true
+  return (Object.keys(after) as (keyof MultiTokenPoolRateLimits)[]).some((bucket) => {
+    const b = before[bucket]
+    const a = after[bucket]
+    if (!a.enabled) return b.enabled
+    if (!b.enabled) return false
+    return a.capacity > b.capacity || a.rate > b.rate
+  })
 }

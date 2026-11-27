@@ -149,14 +149,6 @@ export abstract class PoolConfigManagerWriteOperation<
     return false
   }
 
-  /**
-   * Whether the lane rules judge this write. `false` only for a pause, the emergency action: it is
-   * still gated, simulated and sealed. Defaults to `true`.
-   */
-  protected judgesLanes(_params: Parsed): boolean {
-    return true
-  }
-
   /** Context every refusal of this op carries (e.g. a merged op's kind). */
   protected errorContext(_params: Parsed): Record<string, unknown> | undefined {
     return undefined
@@ -202,7 +194,6 @@ export abstract class PoolConfigManagerWriteOperation<
       ...(expected && { expected }),
       ...(context && { errorContext: context }),
       ...(this.makesLive(params) && { makesLive: true }),
-      ...(!this.judgesLanes(params) && { judgeLanes: false }),
       ...(params.expectedSnapshot && { expectedSnapshot: params.expectedSnapshot }),
       ...(params.getChain && { getChain: params.getChain }),
       ...(params.remoteAttestations && { remoteAttestations: params.remoteAttestations }),

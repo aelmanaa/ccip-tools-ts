@@ -344,9 +344,14 @@ const DISABLED_FEE: TokenTransferFeeConfig = {
 export const policyKey = (name: PolicyName, param: string) =>
   encodePolicyName(OPERATION, param, name).toLowerCase()
 /** A lane's canonical key (`checksummed token:chain`). @internal */
+/** A lane's key: `<checksummed token>:<chain>`. @internal */
 export const laneKey = (token: string, chain: bigint) => `${getAddress(token)}:${chain}`
-const recordKey = (policy: PolicyName, chain: bigint, param: string) =>
+/** A policy record's key: `<policy word>:<chain>`. @internal */
+export const recordKey = (policy: PolicyName, chain: bigint, param = 'policyName') =>
   `${policyKey(policy, param)}:${chain}`
+/** A connection subset entry's key: `<policy word>:<chain>:<token>`. @internal */
+export const subsetKey = (policy: PolicyName, chain: bigint, token: string, param = 'policyName') =>
+  `${recordKey(policy, chain, param)}:${getAddress(token)}`
 const answerKey = (provider: string, token: string, chain: bigint) =>
   `${getAddress(provider)}:${laneKey(token, chain)}`
 

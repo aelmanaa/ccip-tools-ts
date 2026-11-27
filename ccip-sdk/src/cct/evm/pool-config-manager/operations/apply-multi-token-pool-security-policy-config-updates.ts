@@ -34,8 +34,6 @@ export class ApplyMultiTokenPoolSecurityPolicyConfigUpdates extends PolicyRecord
 > {
   readonly name = 'applyMultiTokenPoolSecurityPolicyConfigUpdates'
   protected readonly recordType = 'security'
-  protected readonly functionName = 'applySecurityPolicyConfigUpdates'
-  protected readonly typeRole = 'SECURITY_ROLE'
   protected readonly allowDefault = true
 
   protected parseRecord(

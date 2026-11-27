@@ -33,8 +33,6 @@ export class ApplyMultiTokenPoolInlineFeeConfigUpdates extends InlineRecordWrite
 > {
   readonly name = 'applyMultiTokenPoolInlineFeeConfigUpdates'
   protected readonly recordType = 'fee'
-  protected readonly functionName = 'applyInlineFeeConfigUpdates'
-  protected readonly typeRole = 'FEE_ROLE'
 
   protected parseRecord(
     _params: ApplyMultiTokenPoolInlineFeeConfigUpdatesParams,

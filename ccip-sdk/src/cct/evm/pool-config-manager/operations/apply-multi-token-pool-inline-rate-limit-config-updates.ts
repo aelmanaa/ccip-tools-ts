@@ -34,8 +34,6 @@ export class ApplyMultiTokenPoolInlineRateLimitConfigUpdates extends InlineRecor
 > {
   readonly name = 'applyMultiTokenPoolInlineRateLimitConfigUpdates'
   protected readonly recordType = 'rateLimit'
-  protected readonly functionName = 'applyInlineRateLimitConfigUpdates'
-  protected readonly typeRole = 'RATE_LIMIT_ROLE'
 
   protected parseRecord(
     _params: ApplyMultiTokenPoolInlineRateLimitConfigUpdatesParams,

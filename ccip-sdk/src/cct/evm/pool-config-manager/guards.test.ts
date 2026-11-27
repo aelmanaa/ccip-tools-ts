@@ -10,7 +10,10 @@ import { ZeroAddress, getAddress } from 'ethers'
 import type { LaneRecordType } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import type { CCTParamsInvalidError } from '../../errors.ts'
+import type { MultiTokenPoolRateLimits } from '../../multi-token-pool.ts'
+import type { RateLimitConfig } from '../../rate-limit.ts'
 import { attestedRemoteFacts } from './guard-facts.ts'
+import { laneJudgingOf } from './guard-run.ts'
 import {
   type MultiTokenPoolGuardFacts,
   type MultiTokenPoolGuardOptions,
@@ -18,11 +21,13 @@ import {
   evaluateMultiTokenPoolGuards,
   guardLaneKey,
   guardPoolKey,
+  loosensRateLimits,
   multiTokenPoolAffectedLanes,
   multiTokenPoolChainLanes,
   multiTokenPoolDroppedPools,
   multiTokenPoolLaneTransitions,
   multiTokenPoolPcmLaneCheck,
+  stopsOutbound,
   validateMultiTokenPoolGuardOptions,
 } from './guards.ts'
 import {
@@ -371,6 +376,96 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       }).errors,
       ['NO_REMOTE_POOL'],
     )
+  })
+
+  it('tells a loosening rate limit write from one that only tightens or stops (bucket writes judge only loosened lanes)', () => {
+    const limits = (o: Partial<MultiTokenPoolRateLimits> = {}): MultiTokenPoolRateLimits => ({
+      outbound: on(true),
+      inbound: on(true),
+      fastFinalityOutbound: on(false),
+      fastFinalityInbound: on(false),
+      ...o,
+    })
+    const stop = { enabled: true, capacity: 0n, rate: 0n } as const
+    const more = { enabled: true, capacity: 200n, rate: 1n } as const
+    // tightening, stopping, enabling a disabled bucket, no change
+    for (const after of [
+      limits({ outbound: stop }),
+      limits({ fastFinalityOutbound: on(true) }),
+      limits(),
+    ])
+      assert.equal(loosensRateLimits(limits(), after), false)
+    // lifting a stop, more capacity, disabling, a new record
+    assert.equal(loosensRateLimits(limits({ outbound: stop }), limits()), true)
+    assert.equal(loosensRateLimits(limits(), limits({ inbound: more })), true)
+    assert.equal(loosensRateLimits(limits(), limits({ outbound: on(false) })), true)
+    assert.equal(loosensRateLimits(null, limits()), true)
+    assert.equal(loosensRateLimits(limits(), null), false)
+    // the scope is read from the calldata's function
+    assert.equal(laneJudgingOf('pauseTokens'), 'none')
+    assert.equal(laneJudgingOf('unpauseTokens'), 'all')
+    assert.equal(laneJudgingOf('applyRateLimitPolicyBucketUpdates'), 'loosened')
+    assert.equal(laneJudgingOf('applyInlineRateLimitBucketUpdates'), 'loosened')
+    assert.equal(laneJudgingOf('applyInlineRateLimitConfigUpdates'), 'all')
+  })
+
+  it('waives a missing remote pool while the lane is stopped outbound, as a token pause does', () => {
+    const facts = goodFacts({
+      remoteLanes: new Map([
+        [
+          guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 }),
+          knownRemote({ registryPool: null }),
+        ],
+      ]),
+    })
+    const stop = { enabled: true, capacity: 0n, rate: 0n } as const
+    const limits = (outbound: RateLimitConfig, fastFinalityOutbound: RateLimitConfig) =>
+      ({
+        kind: 'setInline',
+        type: 'rateLimit',
+        record: {
+          tokenAddress: T1,
+          remoteChainSelector: C1,
+          rateLimits: {
+            outbound,
+            inbound: on(true),
+            fastFinalityOutbound,
+            fastFinalityInbound: on(false),
+          },
+        },
+      }) as MultiTokenPoolRecordChange
+    // outbound stopped, no fast-finality bucket: nothing is sent, the lane may wait
+    assert.deepEqual(judge([...inlineLane(T1), limits(stop, on(false))], { facts }).errors, [])
+    // a fast-finality outbound bucket still open sends: refused
+    assert.deepEqual(judge([...inlineLane(T1), limits(stop, on(true))], { facts }).errors, [
+      'NO_REMOTE_POOL',
+    ])
+    assert.deepEqual(judge([...inlineLane(T1), limits(stop, stop)], { facts }).errors, [])
+    // an inbound stop does not hold sends
+    assert.deepEqual(
+      judge(
+        [
+          ...inlineLane(T1),
+          {
+            kind: 'setInline',
+            type: 'rateLimit',
+            record: {
+              tokenAddress: T1,
+              remoteChainSelector: C1,
+              rateLimits: {
+                outbound: on(true),
+                inbound: stop,
+                fastFinalityOutbound: on(false),
+                fastFinalityInbound: on(false),
+              },
+            },
+          },
+        ],
+        { facts },
+      ).errors,
+      ['NO_REMOTE_POOL'],
+    )
+    assert.equal(stopsOutbound(null), false)
   })
 
   it('refuses a lane whose remote registry names no pool, long or legacy (EVM-2 fund loss)', () => {

@@ -9,7 +9,9 @@ import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
+  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
 import { parseRateLimitConfig, toAbiRateLimitConfig } from '../../token-pool/rate-limit.ts'
 import {
@@ -20,7 +22,7 @@ import {
   validateUint64,
 } from '../../validate.ts'
 import { encodePolicyName } from '../contracts.ts'
-import { MESSAGE_DIRECTIONS, policyKey, rateLimitBucketOf } from '../projection.ts'
+import { MESSAGE_DIRECTIONS, policyKey, rateLimitBucketOf, recordKey } from '../projection.ts'
 import type { RateLimitPolicyBucketUpdate } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -39,10 +41,11 @@ export type ApplyMultiTokenPoolRateLimitPolicyBucketUpdatesParams = PoolConfigMa
 
 /**
  * Writes single buckets of existing rate limit policy records, keeping the other buckets. A bucket enabled with no
- * capacity and no rate stops its direction (see `stopMultiTokenPoolLanes`); the lane guard runs on
- * every lane the buckets change.
+ * capacity and no rate stops its direction (see `stopMultiTokenPoolLanes`); the lane rules judge only
+ * the lanes a bucket loosens (a stop lifted, a bucket disabled, more capacity or rate): a write that
+ * only tightens or stops is never refused by a lane rule, so a broken lane can always be clamped.
  * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the record does not
- *   exist, `sender` lacks the gate, or a lane guard refuses; `context.recordType` is `'rateLimit'`
+ *   exist, `sender` lacks the gate, or a lane guard refuses a loosened lane; `context.recordType` is `'rateLimit'`
  */
 export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigManagerWriteOperation<ApplyMultiTokenPoolRateLimitPolicyBucketUpdatesParams> {
   readonly name = 'applyMultiTokenPoolRateLimitPolicyBucketUpdates'
@@ -65,14 +68,14 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
       'updates',
       updates,
       (u) =>
-        `${policyKey(u.policyName, 'policyName')}:${u.remoteChainSelector}:${u.direction}:${String(u.fastFinality)}`,
+        `${recordKey(u.policyName, u.remoteChainSelector)}:${u.direction}:${String(u.fastFinality)}`,
       'bucket',
     )
     return { ...params, updates }
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'POLICY_ROLE', 'RATE_LIMIT_ROLE']
+    return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES.rateLimit]
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -102,7 +105,7 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
         )
     })
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
-      'applyRateLimitPolicyBucketUpdates',
+      multiTokenPoolFunctionOf(this.name),
       [
         updates.map((u) => ({
           policyName: encodePolicyName(this.name, 'policyName', u.policyName),
@@ -120,7 +123,7 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
     // the values the write replaces: each bucket as stored
     const expected = Object.fromEntries(
       updates.map((u) => [
-        `policies.rateLimit.${policyKey(u.policyName, 'policyName')}:${u.remoteChainSelector}.${rateLimitBucketOf(u.direction, u.fastFinality)}`,
+        `policies.rateLimit.${recordKey(u.policyName, u.remoteChainSelector)}.${rateLimitBucketOf(u.direction, u.fastFinality)}`,
         recordOf(u)!.rateLimits[rateLimitBucketOf(u.direction, u.fastFinality)],
       ]),
     )

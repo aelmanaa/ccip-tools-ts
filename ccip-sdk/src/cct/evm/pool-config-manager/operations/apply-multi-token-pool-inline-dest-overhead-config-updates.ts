@@ -34,8 +34,6 @@ export class ApplyMultiTokenPoolInlineDestOverheadConfigUpdates extends InlineRe
 > {
   readonly name = 'applyMultiTokenPoolInlineDestOverheadConfigUpdates'
   protected readonly recordType = 'destOverhead'
-  protected readonly functionName = 'applyInlineDestOverheadConfigUpdates'
-  protected readonly typeRole = 'DEST_OVERHEAD_ROLE'
 
   protected parseRecord(
     _params: ApplyMultiTokenPoolInlineDestOverheadConfigUpdatesParams,

@@ -12,11 +12,13 @@ import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
+  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateAddress, validateArray, validateUint64 } from '../../validate.ts'
 import { encodePolicyName } from '../contracts.ts'
-import { policyKey } from '../projection.ts'
+import { policyKey, recordKey, subsetKey } from '../projection.ts'
 import type { PolicyRecordKey } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -78,7 +80,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'POLICY_ROLE', 'CONNECTION_ROLE']
+    return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES.connection]
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -110,9 +112,8 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
         )
     })
     const removed = new Set(
-      (params.remove ?? []).map(
-        (e) =>
-          `${policyKey(e.policyName, 'policyName')}:${e.remoteChainSelector}:${getAddress(e.tokenAddress)}`,
+      (params.remove ?? []).map((e) =>
+        subsetKey(e.policyName, e.remoteChainSelector, e.tokenAddress),
       ),
     )
     ;(params.add ?? []).forEach((e, i) => {
@@ -134,7 +135,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
           `${token} is not assigned connection policy ${e.policyName} (TokenNotInPolicy): assign it with applyMultiTokenPoolTokenPolicyUpdates({ recordType: 'connection', ... }) first`,
           { context },
         )
-      const key = `${policyKey(e.policyName, 'policyName')}:${e.remoteChainSelector}:${token}`
+      const key = subsetKey(e.policyName, e.remoteChainSelector, token)
       if (isMember(e) && !removed.has(key))
         throw new CCTParamsInvalidError(
           this.name,
@@ -150,13 +151,13 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
         getAddress(e.tokenAddress),
       ])
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
-      'applySubsetTokenUpdates',
+      multiTokenPoolFunctionOf(this.name),
       [args(params.remove, 'remove'), args(params.add, 'add')],
     )
     // the values the write replaces: each touched membership as it was
     const expected = Object.fromEntries(
       [...(params.remove ?? []), ...(params.add ?? [])].map((e) => [
-        `subsets.${policyKey(e.policyName, 'policyName')}:${e.remoteChainSelector}.${getAddress(e.tokenAddress)}`,
+        `subsets.${recordKey(e.policyName, e.remoteChainSelector)}.${getAddress(e.tokenAddress)}`,
         isMember(e),
       ]),
     )

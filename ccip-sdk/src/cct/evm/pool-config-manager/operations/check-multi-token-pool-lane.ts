@@ -27,6 +27,8 @@ import { validateArray, validateOneOf } from '../../validate.ts'
 import { decodeTokenProfile, resolvePoolConfigManagerTarget } from '../contracts.ts'
 import { readMultiTokenPoolGuardFacts } from '../guard-facts.ts'
 import {
+  type MultiTokenPoolGuardFactFailure,
+  type MultiTokenPoolRemoteLaneFacts,
   TRANSFER_DIRECTIONS,
   evaluateMultiTokenPoolGuards,
   guardLaneKey,
@@ -167,10 +169,7 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
             : `a local fact could not be read: ${f.reason}`,
         )
       const read = facts.remoteLanes.get(guardLaneKey(key))
-      remote =
-        evaluated.factFailures.find((f) => f.scope === 'remote')?.status ??
-        read?.status ??
-        'unknown'
+      remote = laneCheckRemote(evaluated.factFailures, read)
       // a remote burst the local inbound cannot absorb waits here until the bucket refills; the
       // remote limit is in remote token units, so compare in local units
       if (read?.status === 'known' && read.remoteOutboundUnknownReason !== undefined)
@@ -253,4 +252,21 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
     const sorted = sortFindings(findings)
     return { lane, findings: sorted, remote, ok: !sorted.some((f) => f.severity === 'error') }
   }
+}
+
+/**
+ * The lane check's remote fact: a remote failure's status, else the read's. A remote registry that
+ * names no pool for the token is `'missing'`, even while a token-scope pause or stop waives it (so
+ * `ok` can be `true` with `'missing'`); nothing read is `'unknown'`.
+ * @internal
+ */
+export function laneCheckRemote(
+  factFailures: readonly Pick<MultiTokenPoolGuardFactFailure, 'scope' | 'status'>[],
+  read: MultiTokenPoolRemoteLaneFacts | undefined,
+): MultiTokenPoolFact {
+  const failed = factFailures.find((f) => f.scope === 'remote')
+  if (failed) return failed.status
+  if (!read) return 'unknown'
+  if (read.status === 'known' && read.registryPool === null) return 'missing'
+  return read.status
 }

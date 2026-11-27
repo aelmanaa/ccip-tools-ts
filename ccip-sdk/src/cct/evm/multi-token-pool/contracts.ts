@@ -372,6 +372,16 @@ export const MULTI_TOKEN_POOL_OPERATIONS: {
   readonly [Op in keyof typeof OPERATIONS]: (typeof OPERATIONS)[Op] & MultiTokenPoolOperationTarget
 } = OPERATIONS
 
+/** An MTTP op that calls one function (not a merged op). @internal */
+export type MultiTokenPoolSingleFunctionOperation = {
+  [Op in keyof typeof OPERATIONS]: (typeof OPERATIONS)[Op] extends { function: string } ? Op : never
+}[keyof typeof OPERATIONS]
+
+/** The function an op calls, from the op map (its one source of truth). @internal */
+export function multiTokenPoolFunctionOf(op: MultiTokenPoolSingleFunctionOperation): string {
+  return OPERATIONS[op].function
+}
+
 /**
  * The contract(s) and function(s) one MTTP op calls; see {@link MULTI_TOKEN_POOL_OPERATIONS}. A
  * merged op (one op over several record types or store kinds) names one function per kind.

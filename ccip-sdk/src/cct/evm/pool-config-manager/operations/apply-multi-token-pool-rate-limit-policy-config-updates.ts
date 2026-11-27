@@ -39,8 +39,6 @@ export class ApplyMultiTokenPoolRateLimitPolicyConfigUpdates extends PolicyRecor
 > {
   readonly name = 'applyMultiTokenPoolRateLimitPolicyConfigUpdates'
   protected readonly recordType = 'rateLimit'
-  protected readonly functionName = 'applyRateLimitPolicyConfigUpdates'
-  protected readonly typeRole = 'RATE_LIMIT_ROLE'
   protected readonly allowDefault = true
 
   protected parseRecord(

@@ -10,6 +10,7 @@ import type { Abi } from 'abitype'
 import { type Interface, type InterfaceAbi, Contract, isError } from 'ethers'
 import type { TypedContract } from 'ethers-abitype'
 
+import type { Chain } from '../../chain.ts'
 import { CCIPTypeVersionInvalidError } from '../../errors/index.ts'
 import { getErrorData } from '../../evm/errors.ts'
 import type { EVMChain } from '../../evm/index.ts'
@@ -71,6 +72,24 @@ export function isRevertWith(err: unknown, iface: Interface, errorName: string):
  */
 export function isNotCcipContract(err: unknown): boolean {
   return isMissingFunction(err) || err instanceof CCIPTypeVersionInvalidError
+}
+
+/**
+ * The contract type an address reports, or `null` when it is not a CCIP contract (no code, no
+ * `typeAndVersion`, or an unparseable one: e.g. a custom pool). Transport errors propagate. Works on
+ * any family's chain (the Solana lane check reads EVM remote pools with it).
+ * @internal
+ */
+export async function readContractTypeOrNull(
+  chain: Pick<Chain, 'typeAndVersion'>,
+  address: string,
+): Promise<string | null> {
+  try {
+    return (await chain.typeAndVersion(address))[0]
+  } catch (err) {
+    if (isNotCcipContract(err)) return null
+    throw err
+  }
 }
 
 /**

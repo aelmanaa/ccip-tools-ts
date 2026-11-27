@@ -29,7 +29,7 @@ import {
   resolveMultiTokenPool,
   uidProviderContract,
 } from '../multi-token-pool/contracts.ts'
-import { isMissingFunction, isNotCcipContract } from '../query.ts'
+import { isMissingFunction, isNotCcipContract, readContractTypeOrNull } from '../query.ts'
 import { toAbiLaneKey } from './contracts.ts'
 import {
   type MultiTokenPoolGuardFactRequests,
@@ -404,17 +404,8 @@ async function readRemoteLane(
     }
   if (laneFamilyOf(lane.remoteChainSelector) === ChainFamily.Solana)
     return readSolanaRemoteLane(input, lane, localSelector, servingPools, remote)
-  // the remote registry is found from the first trusted pool; an address that does not answer as a
-  // CCIP pool leaves the remote side unlocated: fail closed, with the fix
-  const registry = await remote.getTokenAdminRegistryFor(trusted[0]!).catch((err: unknown) => {
-    if (isNotCcipContract(err) || err instanceof CCIPContractNotRouterError) return undefined
-    throw err
-  })
-  if (registry === undefined)
-    return {
-      status: 'missing',
-      reason: `the lane's first trusted remote pool ${trusted[0]} does not answer as a CCIP pool on the remote chain, so the remote registry cannot be found from it: trust the remote token's pool`,
-    }
+  const registry = await locateRemoteRegistry(remote, trusted[0]!)
+  if (typeof registry !== 'string') return registry
   const registryPool = await readRegistryPool(remote, registry, remoteToken)
   if (registryPool === null)
     return {
@@ -565,6 +556,28 @@ async function remoteTokenHasCode(remote: Chain, token: string): Promise<boolean
   return (await remote.provider.getCode(token)) !== '0x'
 }
 
+/**
+ * The remote registry, found from a lane's first trusted pool. An address that does not answer as a
+ * CCIP pool leaves the remote side unlocated: a `'missing'` fact naming the fix (fail closed).
+ * Transport errors propagate. Shared with the Solana lane check.
+ * @internal
+ */
+export async function locateRemoteRegistry(
+  remote: Pick<Chain, 'getTokenAdminRegistryFor'>,
+  firstTrustedPool: string,
+): Promise<string | { status: 'missing'; reason: string }> {
+  const registry = await remote.getTokenAdminRegistryFor(firstTrustedPool).catch((err: unknown) => {
+    if (isNotCcipContract(err) || err instanceof CCIPContractNotRouterError) return undefined
+    throw err
+  })
+  return (
+    registry ?? {
+      status: 'missing',
+      reason: `the lane's first trusted remote pool ${firstTrustedPool} does not answer as a CCIP pool on the remote chain, so the remote registry cannot be found from it: trust the remote token's pool`,
+    }
+  )
+}
+
 async function readRemotePool(
   input: ReadMultiTokenPoolGuardFactsInput,
   remoteChainSelector: bigint,
@@ -580,11 +593,8 @@ async function readRemotePool(
       poolAddress: address,
     })
   }
-  const [type] = await remote.typeAndVersion(address).catch((err: unknown) => {
-    // a pool that reports no (or an unparseable) typeAndVersion is not a multi-token pool
-    if (isNotCcipContract(err)) return ['']
-    throw err
-  })
+  // a pool that reports no (or an unparseable) typeAndVersion is not a multi-token pool
+  const type = (await readContractTypeOrNull(remote, address)) ?? ''
   return { status: 'known', isMultiTokenPool: reportsMultiTokenPool(type) }
 }
 

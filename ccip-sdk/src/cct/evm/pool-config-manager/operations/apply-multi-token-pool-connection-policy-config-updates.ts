@@ -44,8 +44,6 @@ export class ApplyMultiTokenPoolConnectionPolicyConfigUpdates extends PolicyReco
 > {
   readonly name = 'applyMultiTokenPoolConnectionPolicyConfigUpdates'
   protected readonly recordType = 'connection'
-  protected readonly functionName = 'applyConnectionPolicyConfigUpdates'
-  protected readonly typeRole = 'CONNECTION_ROLE'
   protected readonly allowDefault = false
 
   protected parseRecord(
