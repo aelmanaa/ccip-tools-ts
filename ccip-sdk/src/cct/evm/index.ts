@@ -98,10 +98,20 @@ import {
 import type { PoolConfigManagerTarget } from './pool-config-manager/contracts.ts'
 import {
   type ApplyMultiTokenPoolConnectionPolicyConfigUpdatesParams,
+  type ApplyMultiTokenPoolDestOverheadPolicyConfigUpdatesParams,
+  type ApplyMultiTokenPoolFeePolicyConfigUpdatesParams,
   type ApplyMultiTokenPoolInlineConnectionConfigUpdatesParams,
+  type ApplyMultiTokenPoolInlineDestOverheadConfigUpdatesParams,
+  type ApplyMultiTokenPoolInlineFeeConfigUpdatesParams,
+  type ApplyMultiTokenPoolInlineRateLimitBucketUpdatesParams,
+  type ApplyMultiTokenPoolInlineRateLimitConfigUpdatesParams,
   type ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams,
+  type ApplyMultiTokenPoolInlineSecurityConfigUpdatesParams,
+  type ApplyMultiTokenPoolRateLimitPolicyBucketUpdatesParams,
+  type ApplyMultiTokenPoolRateLimitPolicyConfigUpdatesParams,
   type ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams,
   type ApplyMultiTokenPoolRemoteTokenAddressProviderUpdatesParams,
+  type ApplyMultiTokenPoolSecurityPolicyConfigUpdatesParams,
   type ApplyMultiTokenPoolSubsetTokenUpdatesParams,
   type ApplyMultiTokenPoolTokenPolicyUpdatesParams,
   type ApplyMultiTokenPoolTokenProfileUpdatesParams,
@@ -138,12 +148,30 @@ import {
   type GetMultiTokenPoolTokenProfilesParams,
   type GetMultiTokenPoolTokenProfilesResult,
   type GetPoolConfigManagerStateResult,
+  type LiftMultiTokenPoolLaneStopsParams,
   type MultiTokenPoolTokenConfig,
+  type PauseMultiTokenPoolChainsParams,
+  type PauseMultiTokenPoolGloballyParams,
+  type PauseMultiTokenPoolTokensParams,
+  type StopMultiTokenPoolLanesParams,
+  type UnpauseMultiTokenPoolChainsParams,
+  type UnpauseMultiTokenPoolGloballyParams,
+  type UnpauseMultiTokenPoolTokensParams,
   ApplyMultiTokenPoolConnectionPolicyConfigUpdates,
+  ApplyMultiTokenPoolDestOverheadPolicyConfigUpdates,
+  ApplyMultiTokenPoolFeePolicyConfigUpdates,
   ApplyMultiTokenPoolInlineConnectionConfigUpdates,
+  ApplyMultiTokenPoolInlineDestOverheadConfigUpdates,
+  ApplyMultiTokenPoolInlineFeeConfigUpdates,
+  ApplyMultiTokenPoolInlineRateLimitBucketUpdates,
+  ApplyMultiTokenPoolInlineRateLimitConfigUpdates,
   ApplyMultiTokenPoolInlineRemotePoolConfigUpdates,
+  ApplyMultiTokenPoolInlineSecurityConfigUpdates,
+  ApplyMultiTokenPoolRateLimitPolicyBucketUpdates,
+  ApplyMultiTokenPoolRateLimitPolicyConfigUpdates,
   ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates,
   ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates,
+  ApplyMultiTokenPoolSecurityPolicyConfigUpdates,
   ApplyMultiTokenPoolSubsetTokenUpdates,
   ApplyMultiTokenPoolTokenPolicyUpdates,
   ApplyMultiTokenPoolTokenProfileUpdates,
@@ -172,6 +200,14 @@ import {
   GetMultiTokenPoolTokenConfigs,
   GetMultiTokenPoolTokenProfiles,
   GetPoolConfigManagerState,
+  LiftMultiTokenPoolLaneStops,
+  PauseMultiTokenPoolChains,
+  PauseMultiTokenPoolGlobally,
+  PauseMultiTokenPoolTokens,
+  StopMultiTokenPoolLanes,
+  UnpauseMultiTokenPoolChains,
+  UnpauseMultiTokenPoolGlobally,
+  UnpauseMultiTokenPoolTokens,
 } from './pool-config-manager/operations/index.ts'
 import type {
   MultiTokenPoolTransactionResult,
@@ -518,6 +554,34 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
     new ApplyMultiTokenPoolInlineRemotePoolConfigUpdates()
   readonly #applyMultiTokenPoolRemotePoolPolicyConfigUpdates =
     new ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates()
+  readonly #applyMultiTokenPoolInlineRateLimitConfigUpdates =
+    new ApplyMultiTokenPoolInlineRateLimitConfigUpdates()
+  readonly #applyMultiTokenPoolRateLimitPolicyConfigUpdates =
+    new ApplyMultiTokenPoolRateLimitPolicyConfigUpdates()
+  readonly #applyMultiTokenPoolInlineRateLimitBucketUpdates =
+    new ApplyMultiTokenPoolInlineRateLimitBucketUpdates()
+  readonly #applyMultiTokenPoolRateLimitPolicyBucketUpdates =
+    new ApplyMultiTokenPoolRateLimitPolicyBucketUpdates()
+  readonly #applyMultiTokenPoolInlineFeeConfigUpdates =
+    new ApplyMultiTokenPoolInlineFeeConfigUpdates()
+  readonly #applyMultiTokenPoolFeePolicyConfigUpdates =
+    new ApplyMultiTokenPoolFeePolicyConfigUpdates()
+  readonly #applyMultiTokenPoolInlineDestOverheadConfigUpdates =
+    new ApplyMultiTokenPoolInlineDestOverheadConfigUpdates()
+  readonly #applyMultiTokenPoolDestOverheadPolicyConfigUpdates =
+    new ApplyMultiTokenPoolDestOverheadPolicyConfigUpdates()
+  readonly #applyMultiTokenPoolInlineSecurityConfigUpdates =
+    new ApplyMultiTokenPoolInlineSecurityConfigUpdates()
+  readonly #applyMultiTokenPoolSecurityPolicyConfigUpdates =
+    new ApplyMultiTokenPoolSecurityPolicyConfigUpdates()
+  readonly #pauseMultiTokenPoolGlobally = new PauseMultiTokenPoolGlobally()
+  readonly #unpauseMultiTokenPoolGlobally = new UnpauseMultiTokenPoolGlobally()
+  readonly #pauseMultiTokenPoolTokens = new PauseMultiTokenPoolTokens()
+  readonly #unpauseMultiTokenPoolTokens = new UnpauseMultiTokenPoolTokens()
+  readonly #pauseMultiTokenPoolChains = new PauseMultiTokenPoolChains()
+  readonly #unpauseMultiTokenPoolChains = new UnpauseMultiTokenPoolChains()
+  readonly #stopMultiTokenPoolLanes = new StopMultiTokenPoolLanes()
+  readonly #liftMultiTokenPoolLaneStops = new LiftMultiTokenPoolLaneStops()
   readonly #getMultiTokenPoolHooksState = new GetMultiTokenPoolHooksState()
   readonly #getMultiTokenPoolProvider = new GetMultiTokenPoolProvider()
   readonly #getMultiTokenPoolPolicyNames = new GetMultiTokenPoolPolicyNames()
@@ -5911,6 +5975,1566 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
     opts: EVMExecuteParams<ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams>,
   ): Promise<MultiTokenPoolTransactionResult> {
     return this.#applyMultiTokenPoolRemotePoolPolicyConfigUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyInlineRateLimitConfigUpdates` transaction, which sets and removes inline rate limit records: a lane's four buckets.
+   *
+   * @remarks
+   * Removals run first; a removed lane falls back to its rate limit policy. A set replaces the
+   * whole record, all four buckets; for one bucket use
+   * {@link generateUnsignedApplyMultiTokenPoolInlineRateLimitBucketUpdates}.
+   * A rate limit write is judged only on the lanes it loosens (a stop lifted, a bucket disabled,
+   * more capacity or rate, a lane left with no limit): a write that only tightens or stops a lane is
+   * never refused by a lane rule, so a broken lane can always be clamped.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolInlineRateLimitConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   set: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, rateLimits: { outbound: { enabled: true, capacity: 1000n * 10n ** 18n, rate: 10n ** 18n }, inbound: { enabled: true, capacity: 1000n * 10n ** 18n, rate: 10n ** 18n }, fastFinalityOutbound: { enabled: false }, fastFinalityInbound: { enabled: false } } }],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolInlineRateLimitConfigUpdates(
+    opts: ApplyMultiTokenPoolInlineRateLimitConfigUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolInlineRateLimitConfigUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyInlineRateLimitConfigUpdates` with `opts.wallet`, which sets and removes inline rate limit records: a lane's four buckets. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedApplyMultiTokenPoolInlineRateLimitConfigUpdates} for multisig or offline signing.
+   *
+   * @remarks
+   * Removals run first; a removed lane falls back to its rate limit policy. A set replaces the
+   * whole record, all four buckets; for one bucket use
+   * {@link generateUnsignedApplyMultiTokenPoolInlineRateLimitBucketUpdates}.
+   * A rate limit write is judged only on the lanes it loosens (a stop lifted, a bucket disabled,
+   * more capacity or rate, a lane left with no limit): a write that only tightens or stops a lane is
+   * never refused by a lane rule, so a broken lane can always be clamped.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolInlineRateLimitConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   set: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, rateLimits: { outbound: { enabled: true, capacity: 1000n * 10n ** 18n, rate: 10n ** 18n }, inbound: { enabled: true, capacity: 1000n * 10n ** 18n, rate: 10n ** 18n }, fastFinalityOutbound: { enabled: false }, fastFinalityInbound: { enabled: false } } }],
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolInlineRateLimitConfigUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolInlineRateLimitConfigUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolInlineRateLimitConfigUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyRateLimitPolicyConfigUpdates` transaction, which sets and removes rate limit policy records, and removes whole rate limit policies.
+   *
+   * @remarks
+   * Records are removed, then policies, then records set, as on chain. A policy's first record fixes its decimals, and every token assigned to it must share them
+   * (`InvalidRateLimitPolicyDecimals`).
+   * A rate limit write is judged only on the lanes it loosens (a stop lifted, a bucket disabled,
+   * more capacity or rate, a lane left with no limit): a write that only tightens or stops a lane is
+   * never refused by a lane rule, so a broken lane can always be clamped.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `POLICY_ROLE` or `RATE_LIMIT_ROLE` (`_checkPolicyRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolRateLimitPolicyConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, localDecimals: 18, rateLimits: { outbound: { enabled: true, capacity: 1000n * 10n ** 18n, rate: 10n ** 18n }, inbound: { enabled: true, capacity: 1000n * 10n ** 18n, rate: 10n ** 18n }, fastFinalityOutbound: { enabled: false }, fastFinalityInbound: { enabled: false } } }],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolRateLimitPolicyConfigUpdates(
+    opts: ApplyMultiTokenPoolRateLimitPolicyConfigUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolRateLimitPolicyConfigUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyRateLimitPolicyConfigUpdates` with `opts.wallet`, which sets and removes rate limit policy records, and removes whole rate limit policies. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedApplyMultiTokenPoolRateLimitPolicyConfigUpdates} for multisig or offline signing.
+   *
+   * @remarks
+   * Records are removed, then policies, then records set, as on chain. A policy's first record fixes its decimals, and every token assigned to it must share them
+   * (`InvalidRateLimitPolicyDecimals`).
+   * A rate limit write is judged only on the lanes it loosens (a stop lifted, a bucket disabled,
+   * more capacity or rate, a lane left with no limit): a write that only tightens or stops a lane is
+   * never refused by a lane rule, so a broken lane can always be clamped.
+   *
+   * Gate: `CONFIG_ROLE`, `POLICY_ROLE` or `RATE_LIMIT_ROLE` (`_checkPolicyRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolRateLimitPolicyConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, localDecimals: 18, rateLimits: { outbound: { enabled: true, capacity: 1000n * 10n ** 18n, rate: 10n ** 18n }, inbound: { enabled: true, capacity: 1000n * 10n ** 18n, rate: 10n ** 18n }, fastFinalityOutbound: { enabled: false }, fastFinalityInbound: { enabled: false } } }],
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolRateLimitPolicyConfigUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolRateLimitPolicyConfigUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolRateLimitPolicyConfigUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyInlineRateLimitBucketUpdates` transaction, which writes single buckets of existing inline rate limit records, keeping the others.
+   *
+   * @remarks
+   * The record must exist (set it whole with
+   * {@link generateUnsignedApplyMultiTokenPoolInlineRateLimitConfigUpdates} first). A bucket enabled
+   * with no capacity and no rate stops its direction; to stop and lift lanes with a restorable
+   * snapshot, use {@link generateUnsignedStopMultiTokenPoolLanes}.
+   * A rate limit write is judged only on the lanes it loosens (a stop lifted, a bucket disabled,
+   * more capacity or rate, a lane left with no limit): a write that only tightens or stops a lane is
+   * never refused by a lane rule, so a broken lane can always be clamped.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolInlineRateLimitBucketUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   updates: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, direction: 'outbound', fastFinality: false, config: { enabled: true, capacity: 500n * 10n ** 18n, rate: 10n ** 17n } }],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolInlineRateLimitBucketUpdates(
+    opts: ApplyMultiTokenPoolInlineRateLimitBucketUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolInlineRateLimitBucketUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyInlineRateLimitBucketUpdates` with `opts.wallet`, which writes single buckets of existing inline rate limit records, keeping the others. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedApplyMultiTokenPoolInlineRateLimitBucketUpdates} for multisig or offline signing.
+   *
+   * @remarks
+   * The record must exist (set it whole with
+   * {@link generateUnsignedApplyMultiTokenPoolInlineRateLimitConfigUpdates} first). A bucket enabled
+   * with no capacity and no rate stops its direction; to stop and lift lanes with a restorable
+   * snapshot, use {@link generateUnsignedStopMultiTokenPoolLanes}.
+   * A rate limit write is judged only on the lanes it loosens (a stop lifted, a bucket disabled,
+   * more capacity or rate, a lane left with no limit): a write that only tightens or stops a lane is
+   * never refused by a lane rule, so a broken lane can always be clamped.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolInlineRateLimitBucketUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   updates: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, direction: 'outbound', fastFinality: false, config: { enabled: true, capacity: 500n * 10n ** 18n, rate: 10n ** 17n } }],
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolInlineRateLimitBucketUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolInlineRateLimitBucketUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolInlineRateLimitBucketUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyRateLimitPolicyBucketUpdates` transaction, which writes single buckets of existing rate limit policy records, keeping the others.
+   *
+   * @remarks
+   * The record must exist. Every token on the policy follows the new bucket.
+   * A rate limit write is judged only on the lanes it loosens (a stop lifted, a bucket disabled,
+   * more capacity or rate, a lane left with no limit): a write that only tightens or stops a lane is
+   * never refused by a lane rule, so a broken lane can always be clamped.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `POLICY_ROLE` or `RATE_LIMIT_ROLE` (`_checkPolicyRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolRateLimitPolicyBucketUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   updates: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, direction: 'inbound', fastFinality: false, config: { enabled: true, capacity: 500n * 10n ** 18n, rate: 10n ** 17n } }],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolRateLimitPolicyBucketUpdates(
+    opts: ApplyMultiTokenPoolRateLimitPolicyBucketUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolRateLimitPolicyBucketUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyRateLimitPolicyBucketUpdates` with `opts.wallet`, which writes single buckets of existing rate limit policy records, keeping the others. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedApplyMultiTokenPoolRateLimitPolicyBucketUpdates} for multisig or offline signing.
+   *
+   * @remarks
+   * The record must exist. Every token on the policy follows the new bucket.
+   * A rate limit write is judged only on the lanes it loosens (a stop lifted, a bucket disabled,
+   * more capacity or rate, a lane left with no limit): a write that only tightens or stops a lane is
+   * never refused by a lane rule, so a broken lane can always be clamped.
+   *
+   * Gate: `CONFIG_ROLE`, `POLICY_ROLE` or `RATE_LIMIT_ROLE` (`_checkPolicyRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolRateLimitPolicyBucketUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   updates: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, direction: 'inbound', fastFinality: false, config: { enabled: true, capacity: 500n * 10n ** 18n, rate: 10n ** 17n } }],
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolRateLimitPolicyBucketUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolRateLimitPolicyBucketUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolRateLimitPolicyBucketUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyInlineFeeConfigUpdates` transaction, which sets and removes inline fee records: a lane's flat fees and transfer fee bps.
+   *
+   * @remarks
+   * Removals run first; a removed lane falls back to its fee policy. The lane guard caps the
+   * transfer fee (`maxTransferFeeBps`, default 1000 bps).
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `FEE_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolInlineFeeConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   set: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, feeConfig: { finalityFeeUSDCents: 50, fastFinalityFeeUSDCents: 100, finalityTransferFeeBps: 10, fastFinalityTransferFeeBps: 20 } }],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolInlineFeeConfigUpdates(
+    opts: ApplyMultiTokenPoolInlineFeeConfigUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolInlineFeeConfigUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyInlineFeeConfigUpdates` with `opts.wallet`, which sets and removes inline fee records: a lane's flat fees and transfer fee bps. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedApplyMultiTokenPoolInlineFeeConfigUpdates} for multisig or offline signing.
+   *
+   * @remarks
+   * Removals run first; a removed lane falls back to its fee policy. The lane guard caps the
+   * transfer fee (`maxTransferFeeBps`, default 1000 bps).
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `FEE_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolInlineFeeConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   set: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, feeConfig: { finalityFeeUSDCents: 50, fastFinalityFeeUSDCents: 100, finalityTransferFeeBps: 10, fastFinalityTransferFeeBps: 20 } }],
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolInlineFeeConfigUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolInlineFeeConfigUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolInlineFeeConfigUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyFeePolicyConfigUpdates` transaction, which sets and removes fee policy records, and removes whole fee policies.
+   *
+   * @remarks
+   * Records are removed, then policies, then records set, as on chain. The lane guard caps the transfer fee each lane resolves (`maxTransferFeeBps`).
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `POLICY_ROLE` or `FEE_ROLE` (`_checkPolicyRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolFeePolicyConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, feeConfig: { finalityFeeUSDCents: 50, fastFinalityFeeUSDCents: 100, finalityTransferFeeBps: 10, fastFinalityTransferFeeBps: 20 } }],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolFeePolicyConfigUpdates(
+    opts: ApplyMultiTokenPoolFeePolicyConfigUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolFeePolicyConfigUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyFeePolicyConfigUpdates` with `opts.wallet`, which sets and removes fee policy records, and removes whole fee policies. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedApplyMultiTokenPoolFeePolicyConfigUpdates} for multisig or offline signing.
+   *
+   * @remarks
+   * Records are removed, then policies, then records set, as on chain. The lane guard caps the transfer fee each lane resolves (`maxTransferFeeBps`).
+   *
+   * Gate: `CONFIG_ROLE`, `POLICY_ROLE` or `FEE_ROLE` (`_checkPolicyRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolFeePolicyConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, feeConfig: { finalityFeeUSDCents: 50, fastFinalityFeeUSDCents: 100, finalityTransferFeeBps: 10, fastFinalityTransferFeeBps: 20 } }],
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolFeePolicyConfigUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolFeePolicyConfigUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolFeePolicyConfigUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyInlineDestOverheadConfigUpdates` transaction, which sets and removes inline destination overhead records: a lane's gas and bytes overhead.
+   *
+   * @remarks
+   * Removals run first; a removed lane falls back to its overhead policy. The lane guard refuses
+   * gas below `minDestGasOverhead` (raised when a hook resolves) and bytes below the pool data the
+   * lane sends.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `DEST_OVERHEAD_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolInlineDestOverheadConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   set: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, destOverheadConfig: { destGasOverhead: 120_000, destBytesOverhead: 192 } }],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolInlineDestOverheadConfigUpdates(
+    opts: ApplyMultiTokenPoolInlineDestOverheadConfigUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolInlineDestOverheadConfigUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyInlineDestOverheadConfigUpdates` with `opts.wallet`, which sets and removes inline destination overhead records: a lane's gas and bytes overhead. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedApplyMultiTokenPoolInlineDestOverheadConfigUpdates} for multisig or offline signing.
+   *
+   * @remarks
+   * Removals run first; a removed lane falls back to its overhead policy. The lane guard refuses
+   * gas below `minDestGasOverhead` (raised when a hook resolves) and bytes below the pool data the
+   * lane sends.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `DEST_OVERHEAD_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolInlineDestOverheadConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   set: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, destOverheadConfig: { destGasOverhead: 120_000, destBytesOverhead: 192 } }],
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolInlineDestOverheadConfigUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolInlineDestOverheadConfigUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolInlineDestOverheadConfigUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyDestOverheadPolicyConfigUpdates` transaction, which sets and removes destination overhead policy records, and removes whole overhead policies.
+   *
+   * @remarks
+   * Records are removed, then policies, then records set, as on chain. The lane guard refuses gas and bytes too low for the lanes the policy serves.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `POLICY_ROLE` or `DEST_OVERHEAD_ROLE` (`_checkPolicyRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolDestOverheadPolicyConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, destOverheadConfig: { destGasOverhead: 120_000, destBytesOverhead: 192 } }],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolDestOverheadPolicyConfigUpdates(
+    opts: ApplyMultiTokenPoolDestOverheadPolicyConfigUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolDestOverheadPolicyConfigUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyDestOverheadPolicyConfigUpdates` with `opts.wallet`, which sets and removes destination overhead policy records, and removes whole overhead policies. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedApplyMultiTokenPoolDestOverheadPolicyConfigUpdates} for multisig or offline signing.
+   *
+   * @remarks
+   * Records are removed, then policies, then records set, as on chain. The lane guard refuses gas and bytes too low for the lanes the policy serves.
+   *
+   * Gate: `CONFIG_ROLE`, `POLICY_ROLE` or `DEST_OVERHEAD_ROLE` (`_checkPolicyRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolDestOverheadPolicyConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, destOverheadConfig: { destGasOverhead: 120_000, destBytesOverhead: 192 } }],
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolDestOverheadPolicyConfigUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolDestOverheadPolicyConfigUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolDestOverheadPolicyConfigUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyInlineSecurityConfigUpdates` transaction, which sets and removes inline security records: a lane's CCVs and hook.
+   *
+   * @remarks
+   * Removals run first; a removed lane falls back to its security policy. A CCV list without
+   * `address(0)` drops the default CCVs, refused unless `allowDroppingDefaultCCVs`; a hook must
+   * authorize every serving pool.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `SECURITY_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolInlineSecurityConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   set: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, securityConfig: { outboundCCVs: ['0x0000000000000000000000000000000000000000'], inboundCCVs: ['0x0000000000000000000000000000000000000000'], hook: null } }],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolInlineSecurityConfigUpdates(
+    opts: ApplyMultiTokenPoolInlineSecurityConfigUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolInlineSecurityConfigUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyInlineSecurityConfigUpdates` with `opts.wallet`, which sets and removes inline security records: a lane's CCVs and hook. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedApplyMultiTokenPoolInlineSecurityConfigUpdates} for multisig or offline signing.
+   *
+   * @remarks
+   * Removals run first; a removed lane falls back to its security policy. A CCV list without
+   * `address(0)` drops the default CCVs, refused unless `allowDroppingDefaultCCVs`; a hook must
+   * authorize every serving pool.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `SECURITY_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolInlineSecurityConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   set: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, securityConfig: { outboundCCVs: ['0x0000000000000000000000000000000000000000'], inboundCCVs: ['0x0000000000000000000000000000000000000000'], hook: null } }],
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolInlineSecurityConfigUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolInlineSecurityConfigUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolInlineSecurityConfigUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applySecurityPolicyConfigUpdates` transaction, which sets and removes security policy records, and removes whole security policies.
+   *
+   * @remarks
+   * Records are removed, then policies, then records set, as on chain. A CCV list without `address(0)` drops the default CCVs, refused unless
+   * `allowDroppingDefaultCCVs`.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `POLICY_ROLE` or `SECURITY_ROLE` (`_checkPolicyRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolSecurityPolicyConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, securityConfig: { outboundCCVs: ['0x0000000000000000000000000000000000000000'], inboundCCVs: ['0x0000000000000000000000000000000000000000'], hook: null } }],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolSecurityPolicyConfigUpdates(
+    opts: ApplyMultiTokenPoolSecurityPolicyConfigUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolSecurityPolicyConfigUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applySecurityPolicyConfigUpdates` with `opts.wallet`, which sets and removes security policy records, and removes whole security policies. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedApplyMultiTokenPoolSecurityPolicyConfigUpdates} for multisig or offline signing.
+   *
+   * @remarks
+   * Records are removed, then policies, then records set, as on chain. A CCV list without `address(0)` drops the default CCVs, refused unless
+   * `allowDroppingDefaultCCVs`.
+   *
+   * Gate: `CONFIG_ROLE`, `POLICY_ROLE` or `SECURITY_ROLE` (`_checkPolicyRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolSecurityPolicyConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, securityConfig: { outboundCCVs: ['0x0000000000000000000000000000000000000000'], inboundCCVs: ['0x0000000000000000000000000000000000000000'], hook: null } }],
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolSecurityPolicyConfigUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolSecurityPolicyConfigUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolSecurityPolicyConfigUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `pauseGlobally` transaction, which pauses every lane of the PoolConfigManager.
+   *
+   * @remarks
+   * A pause is the emergency action: it is gated, simulated and sealed, but never judged
+   * by a lane rule and reads no remote fact.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `PAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` holds none
+   * of the gate's roles, or the write reverts when simulated; `context.param` names the field
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedPauseMultiTokenPoolGlobally({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   sender: '0xSafe...',
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedPauseMultiTokenPoolGlobally(
+    opts: PauseMultiTokenPoolGloballyParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#pauseMultiTokenPoolGlobally.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `pauseGlobally` with `opts.wallet`, which pauses every lane of the PoolConfigManager. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedPauseMultiTokenPoolGlobally} for multisig or offline signing.
+   *
+   * @remarks
+   * A pause is the emergency action: it is gated, simulated and sealed, but never judged
+   * by a lane rule and reads no remote fact.
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `PAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` holds none
+   * of the gate's roles, or the write reverts when simulated; `context.param` names the field
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.pauseMultiTokenPoolGlobally({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   wallet,
+   * })
+   * ```
+   */
+  pauseMultiTokenPoolGlobally(
+    opts: EVMExecuteParams<PauseMultiTokenPoolGloballyParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#pauseMultiTokenPoolGlobally.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `unpauseGlobally` transaction, which lifts the global pause.
+   *
+   * @remarks
+   * An unpause makes lanes live again: each one it reopens is judged by the lane rules, with no
+   * attestations (pass `getChain` for the remote sides).
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `UNPAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedUnpauseMultiTokenPoolGlobally({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedUnpauseMultiTokenPoolGlobally(
+    opts: UnpauseMultiTokenPoolGloballyParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#unpauseMultiTokenPoolGlobally.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `unpauseGlobally` with `opts.wallet`, which lifts the global pause. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedUnpauseMultiTokenPoolGlobally} for multisig or offline signing.
+   *
+   * @remarks
+   * An unpause makes lanes live again: each one it reopens is judged by the lane rules, with no
+   * attestations (pass `getChain` for the remote sides).
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `UNPAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.unpauseMultiTokenPoolGlobally({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  unpauseMultiTokenPoolGlobally(
+    opts: EVMExecuteParams<UnpauseMultiTokenPoolGloballyParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#unpauseMultiTokenPoolGlobally.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `pauseTokens` transaction, which pauses tokens, in one direction or both.
+   *
+   * @remarks
+   * A pause is the emergency action: it is gated, simulated and sealed, but never judged
+   * by a lane rule and reads no remote fact. It works before a token is registered.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `PAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` holds none
+   * of the gate's roles, or the write reverts when simulated; `context.param` names the field
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedPauseMultiTokenPoolTokens({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   tokenAddresses: ['0xToken...'], direction: 'outbound',
+   *   sender: '0xSafe...',
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedPauseMultiTokenPoolTokens(
+    opts: PauseMultiTokenPoolTokensParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#pauseMultiTokenPoolTokens.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `pauseTokens` with `opts.wallet`, which pauses tokens, in one direction or both. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedPauseMultiTokenPoolTokens} for multisig or offline signing.
+   *
+   * @remarks
+   * A pause is the emergency action: it is gated, simulated and sealed, but never judged
+   * by a lane rule and reads no remote fact. It works before a token is registered.
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `PAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` holds none
+   * of the gate's roles, or the write reverts when simulated; `context.param` names the field
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.pauseMultiTokenPoolTokens({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   tokenAddresses: ['0xToken...'], direction: 'outbound',
+   *   wallet,
+   * })
+   * ```
+   */
+  pauseMultiTokenPoolTokens(
+    opts: EVMExecuteParams<PauseMultiTokenPoolTokensParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#pauseMultiTokenPoolTokens.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `unpauseTokens` transaction, which lifts token pauses, in one direction or both.
+   *
+   * @remarks
+   * An unpause makes lanes live again: each one it reopens is judged by the lane rules, with no
+   * attestations (pass `getChain` for the remote sides).
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `UNPAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedUnpauseMultiTokenPoolTokens({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   tokenAddresses: ['0xToken...'], direction: 'outbound',
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedUnpauseMultiTokenPoolTokens(
+    opts: UnpauseMultiTokenPoolTokensParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#unpauseMultiTokenPoolTokens.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `unpauseTokens` with `opts.wallet`, which lifts token pauses, in one direction or both. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedUnpauseMultiTokenPoolTokens} for multisig or offline signing.
+   *
+   * @remarks
+   * An unpause makes lanes live again: each one it reopens is judged by the lane rules, with no
+   * attestations (pass `getChain` for the remote sides).
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `UNPAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.unpauseMultiTokenPoolTokens({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   tokenAddresses: ['0xToken...'], direction: 'outbound',
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  unpauseMultiTokenPoolTokens(
+    opts: EVMExecuteParams<UnpauseMultiTokenPoolTokensParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#unpauseMultiTokenPoolTokens.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `pauseChains` transaction, which pauses remote chains for every token, in one direction or both.
+   *
+   * @remarks
+   * A pause is the emergency action: it is gated, simulated and sealed, but never judged
+   * by a lane rule and reads no remote fact.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `PAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` holds none
+   * of the gate's roles, or the write reverts when simulated; `context.param` names the field
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedPauseMultiTokenPoolChains({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   remoteChainSelectors: [16015286601757825753n], direction: 'both',
+   *   sender: '0xSafe...',
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedPauseMultiTokenPoolChains(
+    opts: PauseMultiTokenPoolChainsParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#pauseMultiTokenPoolChains.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `pauseChains` with `opts.wallet`, which pauses remote chains for every token, in one direction or both. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedPauseMultiTokenPoolChains} for multisig or offline signing.
+   *
+   * @remarks
+   * A pause is the emergency action: it is gated, simulated and sealed, but never judged
+   * by a lane rule and reads no remote fact.
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `PAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` holds none
+   * of the gate's roles, or the write reverts when simulated; `context.param` names the field
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.pauseMultiTokenPoolChains({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   remoteChainSelectors: [16015286601757825753n], direction: 'both',
+   *   wallet,
+   * })
+   * ```
+   */
+  pauseMultiTokenPoolChains(
+    opts: EVMExecuteParams<PauseMultiTokenPoolChainsParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#pauseMultiTokenPoolChains.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `unpauseChains` transaction, which lifts chain pauses, in one direction or both.
+   *
+   * @remarks
+   * An unpause makes lanes live again: each one it reopens is judged by the lane rules, with no
+   * attestations (pass `getChain` for the remote sides).
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `UNPAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedUnpauseMultiTokenPoolChains({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   remoteChainSelectors: [16015286601757825753n], direction: 'both',
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedUnpauseMultiTokenPoolChains(
+    opts: UnpauseMultiTokenPoolChainsParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#unpauseMultiTokenPoolChains.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `unpauseChains` with `opts.wallet`, which lifts chain pauses, in one direction or both. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedUnpauseMultiTokenPoolChains} for multisig or offline signing.
+   *
+   * @remarks
+   * An unpause makes lanes live again: each one it reopens is judged by the lane rules, with no
+   * attestations (pass `getChain` for the remote sides).
+   *
+   * Gate: `DEFAULT_ADMIN_ROLE` or `UNPAUSER_ROLE`.
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.unpauseMultiTokenPoolChains({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   remoteChainSelectors: [16015286601757825753n], direction: 'both',
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  unpauseMultiTokenPoolChains(
+    opts: EVMExecuteParams<UnpauseMultiTokenPoolChainsParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#unpauseMultiTokenPoolChains.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyInlineRateLimitConfigUpdates` transaction, which stops single lanes: writes an inline rate limit record whose buckets for the direction are
+   * stopped (enabled, no capacity, no rate).
+   *
+   * @remarks
+   * The EVM contracts have no lane pause. The other buckets are copied from the lane's resolved
+   * values, so only the stopped direction changes; the lane leaves its rate limit policy until
+   * {@link generateUnsignedLiftMultiTokenPoolLaneStops}. The returned `snapshot` records the record
+   * it replaced (or that there was none) and the buckets it copied: keep it to `restore` the lane.
+   * A stop only tightens, so it is never refused by a lane rule and reads no remote fact.
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedStopMultiTokenPoolLanes({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   lanes: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n }], direction: 'outbound',
+   *   sender: '0xSafe...',
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedStopMultiTokenPoolLanes(
+    opts: StopMultiTokenPoolLanesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#stopMultiTokenPoolLanes.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyInlineRateLimitConfigUpdates` with `opts.wallet`, which stops single lanes: writes an inline rate limit record whose buckets for the direction are
+   * stopped (enabled, no capacity, no rate). `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedStopMultiTokenPoolLanes} for multisig or offline signing.
+   *
+   * @remarks
+   * The EVM contracts have no lane pause. The other buckets are copied from the lane's resolved
+   * values, so only the stopped direction changes; the lane leaves its rate limit policy until
+   * {@link generateUnsignedLiftMultiTokenPoolLaneStops}. The returned `snapshot` records the record
+   * it replaced (or that there was none) and the buckets it copied: keep it to `restore` the lane.
+   * A stop only tightens, so it is never refused by a lane rule and reads no remote fact.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.stopMultiTokenPoolLanes({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   lanes: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n }], direction: 'outbound',
+   *   wallet,
+   * })
+   * ```
+   */
+  stopMultiTokenPoolLanes(
+    opts: EVMExecuteParams<StopMultiTokenPoolLanesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#stopMultiTokenPoolLanes.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyInlineRateLimitConfigUpdates` transaction, which lifts lane stops: removes the inline record a stop created, or restores the buckets it
+   * replaced.
+   *
+   * @remarks
+   * With `restore` (the stop's snapshot) the exact buckets come back, refused if the stopped record
+   * changed since. Without it the lift restores from chain state: the inline record is removed when
+   * the token has a rate limit policy, else `rateLimits` is required. Each lane the lift makes live
+   * is judged, with no attestations (pass `getChain` for the remote sides).
+   *
+   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
+   * write simulated from it; without it each store call is simulated from the PoolConfigManager
+   * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedLiftMultiTokenPoolLaneStops({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   lanes: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n }], direction: 'outbound', restore: stop.snapshot,
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
+   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * ```
+   */
+  generateUnsignedLiftMultiTokenPoolLaneStops(
+    opts: LiftMultiTokenPoolLaneStopsParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#liftMultiTokenPoolLaneStops.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyInlineRateLimitConfigUpdates` with `opts.wallet`, which lifts lane stops: removes the inline record a stop created, or restores the buckets it
+   * replaced. `sender` defaults to the
+   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
+   * before sending. Use {@link generateUnsignedLiftMultiTokenPoolLaneStops} for multisig or offline signing.
+   *
+   * @remarks
+   * With `restore` (the stop's snapshot) the exact buckets come back, refused if the stopped record
+   * changed since. Without it the lift restores from chain state: the inline record is removed when
+   * the token has a rate limit policy, else `rateLimits` is required. Each lane the lift makes live
+   * is judged, with no attestations (pass `getChain` for the remote sides).
+   *
+   * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
+   * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
+   * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
+   * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.liftMultiTokenPoolLaneStops({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   lanes: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n }], direction: 'outbound', restore: stop.snapshot,
+   *   wallet,
+   *   getChain,
+   * })
+   * ```
+   */
+  liftMultiTokenPoolLaneStops(
+    opts: EVMExecuteParams<LiftMultiTokenPoolLaneStopsParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#liftMultiTokenPoolLaneStops.execute(this.chain, opts)
   }
 
   /**

@@ -77,9 +77,9 @@ type PauseParams = PoolConfigManagerWriteParams &
 abstract class PauseWriteOperation<
   P extends PauseParams,
 > extends PoolConfigManagerWriteOperation<P> {
-  /** What is paused. */
   /** The op; its PCM function comes from the op map. */
   abstract override readonly name: MultiTokenPoolSingleFunctionOperation
+  /** What is paused. */
   protected abstract readonly scope: 'global' | 'tokens' | 'chains'
   /** `true` to pause, `false` to unpause. */
   protected abstract readonly pauses: boolean
