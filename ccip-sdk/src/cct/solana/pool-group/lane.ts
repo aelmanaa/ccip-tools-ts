@@ -16,6 +16,8 @@ import type { Buffer } from 'buffer'
 import { BN } from '@coral-xyz/anchor'
 import { type AccountInfo, type Connection, PublicKey, SYSVAR_CLOCK_PUBKEY } from '@solana/web3.js'
 
+const SYSVAR_PROGRAM_ID = new PublicKey('Sysvar1111111111111111111111111111111111111')
+
 import type { RateLimiterState } from '../../../chain.ts'
 import {
   type TokenPoolChainConfig,
@@ -52,6 +54,17 @@ export const missing = (reason: string): Unread => ({ status: 'missing', reason 
 /** Whether `v` is an {@link Unread}. @internal */
 export const isUnread = (v: unknown): v is Unread =>
   typeof v === 'object' && v !== null && 'status' in v && 'reason' in v
+
+/**
+ * The cluster's unix time from the Clock sysvar account (slot, epoch_start_timestamp, epoch,
+ * leader_schedule_epoch, then unix_timestamp at offset 32).
+ * @internal
+ */
+export function clockUnixTimestamp(clock: AccountInfo<Buffer> | null | undefined): bigint | Unread {
+  if (!clock?.owner.equals(SYSVAR_PROGRAM_ID) || clock.data.length < 40)
+    return unknown('the cluster clock cannot be read')
+  return clock.data.readBigInt64LE(32)
+}
 
 /** Runs a decoder, turning a decode failure into an `'unknown'` reason. @internal */
 export function tryDecode<T>(what: string, decode: () => T): T | Unread {
@@ -130,20 +143,21 @@ function decodeChainConfig(data: Buffer, address: PublicKey): TokenPoolChainConf
 }
 
 /**
- * Reads the lane of `program` for (`mint`, `selector`).
+ * Decodes a lane's `ChainConfig` and `ChainConfigV2` (already read) into its base state, before
+ * the group records: the marker, the tail and their agreement.
  *
  * @returns The lane, `null` when it has no `ChainConfig`, or why it cannot be read.
  * @internal
  */
-export async function readPoolGroupLaneState(
-  connection: Connection,
+export function decodePoolGroupLaneBase(
   program: PublicKey,
   mint: PublicKey,
   selector: bigint,
-): Promise<PoolGroupLaneState | null | Unread> {
+  cc: AccountInfo<Buffer> | null | undefined,
+  v2: AccountInfo<Buffer> | null | undefined,
+): PoolGroupLaneState | null | Unread {
   const ccAddress = deriveTokenPoolChainConfigPda(program, selector, mint)
   const v2Address = deriveTokenPoolChainConfigV2Pda(program, selector, mint)
-  const [cc, v2] = await connection.getMultipleAccountsInfo([ccAddress, v2Address])
   if (!cc) return null
   for (const [acc, addr] of [
     [cc, ccAddress],
@@ -185,8 +199,24 @@ export async function readPoolGroupLaneState(
     ext,
     named: new Map(),
   }
-  if (!ext?.poolGroupAddress) return state
+  return state
+}
 
+/** The group records a linked lane reads: its group chain record and named records by slot. */
+type LaneRecordKeys = {
+  group: PublicKey
+  gcpAddress: PublicKey
+  entries: { slot: number; policy: PublicKey; address: PublicKey }[]
+}
+
+/**
+ * The accounts a lane's transfers read beyond its own: its group chain record and the named
+ * records its class sources use. `null` for a lane not linked to a group.
+ * @internal
+ */
+export function poolGroupLaneRecordKeys(state: PoolGroupLaneState): LaneRecordKeys | null | Unread {
+  const { ext, program, selector } = state
+  if (!ext?.poolGroupAddress) return null
   const group = new PublicKey(ext.poolGroupAddress)
   const gcpAddress = poolGroupPdas.groupChain(program, group, selector)
   const slots = new Map<number, PublicKey>()
@@ -203,15 +233,27 @@ export async function readPoolGroupLaneState(
     policy,
     address: poolGroupPdas.policyChain(program, policy, selector),
   }))
-  const [clock, gcpInfo, ...namedInfos] = await connection.getMultipleAccountsInfo([
-    SYSVAR_CLOCK_PUBKEY,
-    gcpAddress,
-    ...entries.map((e) => e.address),
-  ])
-  // Clock: slot, epoch_start_timestamp, epoch, leader_schedule_epoch, then unix_timestamp
-  if (!clock || clock.data.length < 40) return unknown('the cluster clock cannot be read')
-  state.now = clock.data.readBigInt64LE(32)
+  return { group, gcpAddress, entries }
+}
 
+/**
+ * Attaches a linked lane's group records (read with the cluster clock) to its base state, checking
+ * each record's owner, PDA, group, chain and version.
+ * @param accounts - The accounts read, by base58 address; must hold every key of
+ *   {@link poolGroupLaneRecordKeys}.
+ * @internal
+ */
+export function attachPoolGroupLaneRecords(
+  state: PoolGroupLaneState,
+  keys: LaneRecordKeys,
+  accounts: ReadonlyMap<string, AccountInfo<Buffer> | null>,
+  now: bigint,
+): PoolGroupLaneState | Unread {
+  const { program, selector } = state
+  const { group, gcpAddress, entries } = keys
+  state.now = now
+  const gcpInfo = accounts.get(gcpAddress.toBase58())
+  const namedInfos = entries.map((e) => accounts.get(e.address.toBase58()))
   const gcpAccount = owned(gcpInfo, gcpAddress, program, 'group chain record')
   if (isUnread(gcpAccount)) return gcpAccount
   const record = tryDecode(`the group chain record ${gcpAddress.toBase58()}`, () =>
@@ -242,6 +284,42 @@ export async function readPoolGroupLaneState(
     state.named.set(slot, { address, policy, record: named })
   }
   return state
+}
+
+/**
+ * Reads the lane of `program` for (`mint`, `selector`): its `ChainConfig` and `ChainConfigV2`, then,
+ * on a linked lane, its group records with the cluster clock.
+ *
+ * @returns The lane, `null` when it has no `ChainConfig`, or why it cannot be read.
+ * @internal
+ */
+export async function readPoolGroupLaneState(
+  connection: Connection,
+  program: PublicKey,
+  mint: PublicKey,
+  selector: bigint,
+): Promise<PoolGroupLaneState | null | Unread> {
+  const [cc, v2] = await connection.getMultipleAccountsInfo([
+    deriveTokenPoolChainConfigPda(program, selector, mint),
+    deriveTokenPoolChainConfigV2Pda(program, selector, mint),
+  ])
+  const state = decodePoolGroupLaneBase(program, mint, selector, cc, v2)
+  if (state === null || isUnread(state)) return state
+  const keys = poolGroupLaneRecordKeys(state)
+  if (keys === null || isUnread(keys)) return keys ?? state
+  const addresses = [keys.gcpAddress, ...keys.entries.map((e) => e.address)]
+  const [clock, ...infos] = await connection.getMultipleAccountsInfo([
+    SYSVAR_CLOCK_PUBKEY,
+    ...addresses,
+  ])
+  const now = clockUnixTimestamp(clock)
+  if (isUnread(now)) return now
+  return attachPoolGroupLaneRecords(
+    state,
+    keys,
+    new Map(addresses.map((a, i) => [a.toBase58(), infos[i] ?? null])),
+    now,
+  )
 }
 
 const CLASS_BIT: Record<PoolGroupClass, number> = {

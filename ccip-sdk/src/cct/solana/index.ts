@@ -3119,11 +3119,15 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    *
    * @remarks Results are keyed by remote network name. Omit `remoteChainSelector` to scan all
    * configured remotes; provide it to query one. Rate-limit amounts use the local mint's smallest
-   * unit.
+   * unit. On a pool-groups program, a lane whose `ChainConfig` carries a marker also returns
+   * `poolGroup` (`'linked'` or `'driven'`, and the group its tail names), from the accounts the read
+   * already fetched.
    *
    * @throws {@link CCTParamsInvalidError} If the token or pool program address or remote selector is invalid.
    * @throws {@link CCIPTokenPoolStateNotFoundError} If the pool state account does not exist.
    * @throws {@link CCIPTokenPoolChainConfigNotFoundError} If the selected remote-chain config does not exist.
+   * @throws {@link CCTDataDecodeError} If a lane's marker and its `ChainConfigV2` tail disagree, or the
+   *   tail does not decode.
    *
    * @example
    * ```ts
@@ -3256,6 +3260,8 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * @remarks Unknown (an RPC failure, a missing simulation payer) is an error, never "absent".
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCTOperationUnsupportedError} if a probe answers neither present nor absent, or the program has
+   *   no upgradeable program data
    * @example
    * ```ts
    * const result = await cct.getPoolGroupFeatures({})
@@ -3268,9 +3274,12 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   /**
    * Decodes a pool group, including the default policy, CCV epoch counter and pending notice that
    * `observe_group` omits.
-   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @remarks Read-only: needs no wallet and builds no transaction. Values are those in force at the
+   * cluster clock, as `observe_group` reports them: a lowered CCV notice whose time has come is
+   * `minCCVActivationDelay`, and the default SECURITY's activated pending set is its `current`.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCTOperationUnsupportedError} if a feature probe answers neither present nor absent
    * @example
    * ```ts
    * const result = await cct.getPoolGroup({ poolGroupId })
@@ -3283,8 +3292,12 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   /**
    * Decodes a pool group chain record with lane mode, `drivenLanesPaused`, and the subset as live
    * mints plus raw and stale indices.
-   * @remarks Read-only: needs no wallet and builds no transaction.
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @remarks Read-only: needs no wallet and builds no transaction. With any subset bit set and no
+   * `tokenAddresses`, the subset is joined with every member through `getProgramAccounts`; pass
+   * `tokenAddresses` on an RPC that refuses it. SECURITY is reported as in force at the cluster
+   * clock.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), or the RPC refuses
+   *   `getProgramAccounts` (pass `tokenAddresses`)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
    * @example
    * ```ts
@@ -3327,7 +3340,7 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
 
   /**
    * Lists the pool group members and registry (`getProgramAccounts`, memcmp on the pool group at
-   * offset 10).
+   * offset 10), or the given `tokenAddresses` by their member PDAs.
    * @remarks Read-only: needs no wallet and builds no transaction.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
@@ -3345,6 +3358,8 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * @remarks Naive IDL decoders see a linked lane as standard.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCTOperationUnsupportedError} if the program refuses the `observe_lane_group` simulation of a
+   *   linked or driven lane
    * @example
    * ```ts
    * const result = await cct.getPoolGroupLane({ tokenAddress: mint, remoteChainSelector })
@@ -3356,11 +3371,15 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
 
   /**
    * Lists every linked and driven lane of a pool group, optionally for one chain.
-   * @remarks Used by the sync and cleanup ops when no mints are given.
+   * @remarks Used by the sync and cleanup ops when no mints are given. One `getProgramAccounts` over
+   * every version-2 `ChainConfigV2` of the program, then the lanes' accounts and their group records
+   * in a few paged reads, and one bucket simulation per lane (four at a time). A tail whose
+   * `ChainConfig` is gone is no lane and is left out.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
-   * @throws {@link CCTParamsInvalidError} also when the RPC refuses `getProgramAccounts`; pass
-   * mints explicitly to the op instead
+   * @throws {@link CCTParamsInvalidError} also when the RPC refuses `getProgramAccounts` (use an RPC
+   *   that serves it, or read each lane with `getPoolGroupLane`)
+   * @throws {@link CCTOperationUnsupportedError} if the program refuses a lane's bucket simulation
    * @example
    * ```ts
    * const result = await cct.getPoolGroupLanes({ poolGroupId, remoteChainSelector })
@@ -3387,7 +3406,9 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   /**
    * Lists a hook list's entries.
    * @remarks Blocklist entries store only a hash; addresses come from `ListUpdated` events since
-   * `fromSlot`.
+   * `fromSlot`. Cost: one `getTransaction` per transaction touching the list (four at a time,
+   * newest first, stopping once every entry has an address), none for an empty list. `complete` is
+   * false when an entry has no address, or the listing is shorter than the list's `entryCount`.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
    * @example
@@ -3439,6 +3460,7 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * finality ignored); `synced` and `failsClosedAt` tell whether transfers enforce the same set.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCTOperationUnsupportedError} if the program refuses the simulation
    * @example
    * ```ts
    * const result = await cct.getPoolGroupRequiredCCVs({ tokenAddress: mint, remoteChainSelector, amount: 1_000n, direction: 'outbound', finality: 'finalized' })

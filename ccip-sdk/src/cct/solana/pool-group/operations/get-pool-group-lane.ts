@@ -1,13 +1,15 @@
-import { Buffer } from 'buffer'
-
 import { BorshAccountsCoder } from '@coral-xyz/anchor'
 import type { PublicKey } from '@solana/web3.js'
-import bs58 from 'bs58'
 
 import type { SolanaChain } from '../../../../solana/index.ts'
+import { toLeArray } from '../../../../utils.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { SolanaQuery } from '../../query.ts'
-import { parsePublicKey } from '../../validate.ts'
+import {
+  parseOptionalPublicKey,
+  parsePublicKey,
+  resolveExistingPoolProgram,
+} from '../../validate.ts'
 import { decodePoolGroupChainConfigV2 } from '../accounts.ts'
 import type {
   GetPoolGroupLaneParams,
@@ -18,14 +20,13 @@ import {
   type ParsedPoolGroupRef,
   listProgramAccounts,
   memcmp,
-  parsePoolGroupProgram,
   parsePoolGroupRef,
   readPoolGroup,
   validateSelector,
 } from './common.ts'
-import { readPoolGroupLane } from './lane.ts'
+import { type PoolGroupLaneRequest, readPoolGroupLane, readPoolGroupLanes } from './lane.ts'
 
-type ParsedLane = { program: PublicKey; mint: PublicKey; selector: bigint }
+type ParsedLane = { program?: PublicKey; mint: PublicKey; selector: bigint }
 
 /** Decodes one lane: marker, tail, admission, CCV sync state and current buckets. */
 export class GetPoolGroupLane extends SolanaQuery<
@@ -37,16 +38,25 @@ export class GetPoolGroupLane extends SolanaQuery<
 
   /** @throws {@link CCTParamsInvalidError} if the mint, program or selector is invalid */
   protected prepare(params: GetPoolGroupLaneParams): ParsedLane {
+    const program = parseOptionalPublicKey(
+      this.name,
+      'poolProgramAddress',
+      params.poolProgramAddress,
+    )
     return {
-      program: parsePoolGroupProgram(this.name, params),
+      ...(program && { program }),
       mint: parsePublicKey(this.name, 'tokenAddress', params.tokenAddress),
       selector: validateSelector(this.name, 'remoteChainSelector', params.remoteChainSelector),
     }
   }
 
-  /** Reads the lane as its transfer paths resolve it. */
-  protected read(chain: SolanaChain, { program, mint, selector }: ParsedLane) {
-    return readPoolGroupLane(this.name, chain, program, mint, selector)
+  /**
+   * Reads the lane as its transfer paths resolve it, on `poolProgramAddress` or the program of the
+   * mint's existing pool.
+   */
+  protected async read(chain: SolanaChain, { program, mint, selector }: ParsedLane) {
+    const poolProgram = await resolveExistingPoolProgram(this.name, chain, mint, program)
+    return readPoolGroupLane(this.name, chain, poolProgram, mint, selector)
   }
 }
 
@@ -84,18 +94,15 @@ export class GetPoolGroupLanes extends SolanaQuery<
     await readPoolGroup(this.name, chain, ref)
     const filters = [
       memcmp(0, BorshAccountsCoder.accountDiscriminator('ChainConfigV2')),
-      { memcmp: { offset: 9, bytes: bs58.encode([2]) } },
-      ...(ref.selector !== undefined ? [memcmp(10, le8(ref.selector))] : []),
+      memcmp(9, Uint8Array.of(2)),
+      ...(ref.selector !== undefined ? [memcmp(10, toLeArray(ref.selector, 8))] : []),
     ]
-    const accounts = await listProgramAccounts(
-      this.name,
-      chain,
-      ref.program,
-      filters,
-      'pass the mints to the op explicitly',
-    )
+    const accounts = await listProgramAccounts(this.name, chain, ref.program, filters, {
+      param: 'connection',
+      fix: 'listing lanes needs it; use an RPC that serves getProgramAccounts, or read each lane with getPoolGroupLane',
+    })
     const group = ref.group.toBase58()
-    const lanes: { mint: PublicKey; selector: bigint }[] = []
+    const lanes: PoolGroupLaneRequest[] = []
     for (const { pubkey, account } of accounts) {
       const lane = decodePoolGroupChainConfigV2(account.data, pubkey.toBase58())
       if (lane.ext?.poolGroupAddress !== group) continue
@@ -103,21 +110,17 @@ export class GetPoolGroupLanes extends SolanaQuery<
       lanes.push({
         mint: parsePublicKey(this.name, 'mint', lane.mint),
         selector: lane.remoteChainSelector,
+        v2: account,
       })
     }
-    const out: GetPoolGroupLaneResult[] = []
-    for (const { mint, selector } of lanes)
-      out.push(await readPoolGroupLane(this.name, chain, ref.program, mint, selector))
+    // a tail whose ChainConfig is gone is no lane: transfers read the ChainConfig first
+    const out = await readPoolGroupLanes(this.name, chain, ref.program, lanes, {
+      skipMissing: true,
+    })
     return out.sort(
       (a, b) =>
         a.tokenAddress.localeCompare(b.tokenAddress) ||
         Number(a.remoteChainSelector - b.remoteChainSelector),
     )
   }
-}
-
-const le8 = (v: bigint) => {
-  const b = Buffer.alloc(8)
-  b.writeBigUInt64LE(v)
-  return b
 }

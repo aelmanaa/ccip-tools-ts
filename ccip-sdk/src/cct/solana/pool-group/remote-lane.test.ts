@@ -1,15 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { BN, BorshAccountsCoder } from '@coral-xyz/anchor'
-import {
-  type Connection,
-  AddressLookupTableProgram,
-  Keypair,
-  PublicKey,
-  SYSVAR_CLOCK_PUBKEY,
-  SystemProgram,
-} from '@solana/web3.js'
+import { Keypair, PublicKey, SystemProgram } from '@solana/web3.js'
 import { getAddress } from 'ethers'
 
 // Register every chain family the way SDK consumers do via the package root
@@ -20,280 +12,51 @@ import {
 } from '../../../errors/index.ts'
 import { EVMChain } from '../../../evm/index.ts'
 import { networkInfo } from '../../../networks.ts'
-import { SolanaChain } from '../../../solana/index.ts'
-import { deriveTokenPoolChainConfigV2Pda } from '../../../solana/token-pool.ts'
-import { deriveTokenAdminRegistryPda } from '../programs/router.ts'
-import { deriveTokenPoolChainConfigPda, deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
+import { deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
+import { LANE_DRIVEN_MARKER, LANE_LINKED_MARKER } from './accounts.ts'
 import {
-  GROUP_CHAIN_POLICY_FIXED_LEN,
-  LANE_DRIVEN_MARKER,
-  LANE_LINKED_MARKER,
-  poolGroupPdas,
-  poolGroupsCoder,
-} from './accounts.ts'
+  type Accounts,
+  type Extra,
+  type GroupChainOpts,
+  type Tail,
+  type TypeAndVersion,
+  CCV,
+  CC_ADDR,
+  EVM_POOL,
+  EVM_TOKEN,
+  GCP,
+  GROUP,
+  LUT,
+  LUT_PROGRAM,
+  MINT,
+  OFFRAMP,
+  OTHER_PROGRAM,
+  POLICY,
+  POLICY_POOL,
+  PROGRAM,
+  RECORD,
+  ROUTER,
+  SEPOLIA,
+  SOURCE_CHAIN,
+  STATE,
+  TAR,
+  V2_ADDR,
+  chainConfigData,
+  chainConfigV2Data,
+  chainWith,
+  disc,
+  groupChainData,
+  hex,
+  lane,
+  lutData,
+  pad32,
+  policyChainData,
+  registryData,
+  sourceChainData,
+  stateData,
+} from './fixtures.test.helpers.ts'
 import { readSolanaRemoteLaneFacts, readSolanaRemotePoolFacts } from './remote-lane.ts'
 
-const SEPOLIA = networkInfo('ethereum-testnet-sepolia').chainSelector
-const PROGRAM = Keypair.generate().publicKey
-const OTHER_PROGRAM = Keypair.generate().publicKey
-const ROUTER = Keypair.generate().publicKey
-const LUT = Keypair.generate().publicKey
-const MINT = Keypair.generate().publicKey
-const STATE = deriveTokenPoolConfigPda(PROGRAM, MINT)
-const GROUP = Keypair.generate().publicKey
-const POLICY = Keypair.generate().publicKey
-const CCV = Keypair.generate().publicKey
-const EVM_TOKEN = '0x1111111111111111111111111111111111111111'
-const EVM_POOL = '0x2222222222222222222222222222222222222222'
-const POLICY_POOL = '0x3333333333333333333333333333333333333333'
-const NOW = 1_800_000_000n
-const LUT_PROGRAM = AddressLookupTableProgram.programId
-const OFFRAMP = Keypair.generate().publicKey
-const SOURCE_CHAIN = PublicKey.findProgramAddressSync(
-  [Buffer.from('source_chain_state'), Buffer.from(new BigUint64Array([SEPOLIA]).buffer)],
-  OFFRAMP,
-)[0]
-
-const hex = (h: string) => Buffer.from(h.slice(2), 'hex')
-const pad32 = (h: string) => Buffer.concat([Buffer.alloc(12), hex(h)])
-const disc = (name: string) => BorshAccountsCoder.accountDiscriminator(name)
-const bn = (v: bigint | number) => new BN(v.toString())
-
-/** An IDL type's zero value, patched, then encoded (zero bytes are a valid Borsh default). */
-function encodeType(name: string, patch: (v: Record<string, unknown>) => void): Buffer {
-  const value = poolGroupsCoder.types.decode<Record<string, unknown>>(name, Buffer.alloc(4096))
-  patch(value)
-  return poolGroupsCoder.types.encode(name, value)
-}
-const account = (name: string, body: Buffer) => Buffer.concat([disc(name), body])
-
-function stateData(mint = MINT, router = ROUTER, decimals = 9): Buffer {
-  return account(
-    'State',
-    encodeType('State', (v) => {
-      v.version = 1
-      Object.assign(v.config as object, { mint, decimals, router })
-    }),
-  )
-}
-
-function registryData(
-  interfaceVersion: number,
-  lookupTable: PublicKey | null = LUT,
-  size = 173,
-): Buffer {
-  const data = Buffer.alloc(size)
-  disc('TokenAdminRegistry').copy(data, 0)
-  data[8] = 1
-  ;(lookupTable ?? PublicKey.default).toBuffer().copy(data, 73)
-  MINT.toBuffer().copy(data, 137)
-  if (size >= 172) {
-    data[169] = 1 // resolution enabled
-    data[171] = interfaceVersion
-  }
-  return data
-}
-
-/** An address lookup table account (`LookupTableMeta` is 56 bytes). */
-function lutData(addresses: PublicKey[], deactivated = false): Buffer {
-  const meta = Buffer.alloc(56)
-  meta.writeUInt32LE(1, 0)
-  meta.writeBigUInt64LE(deactivated ? 5n : 0xffff_ffff_ffff_ffffn, 4)
-  return Buffer.concat([meta, ...addresses.map((a) => a.toBuffer())])
-}
-
-/** A 2.x OffRamp `SourceChain`: one on-ramp, one default CCV, then `legacy_address_length`. */
-function sourceChainData(legacyAddressLength?: number): Buffer {
-  const vec = (n: number) => {
-    const b = Buffer.alloc(4)
-    b.writeUInt32LE(n)
-    return b
-  }
-  return Buffer.concat([
-    Buffer.alloc(8 + 1 + 1 + 8 + 1),
-    vec(1),
-    Buffer.alloc(68),
-    vec(1),
-    Buffer.alloc(32),
-    vec(0),
-    legacyAddressLength === undefined ? Buffer.alloc(0) : Buffer.from([legacyAddressLength]),
-  ])
-}
-
-function clockData(now = NOW): Buffer {
-  const data = Buffer.alloc(40)
-  data.writeBigInt64LE(now, 32)
-  return data
-}
-
-/** A `ChainConfig` at the program's standard length, with an optional marker after it. */
-function chainConfigData(
-  marker?: Buffer,
-  pools: Buffer[] = [hex(EVM_POOL)],
-  token = pad32(EVM_TOKEN),
-): Buffer {
-  const body = encodeType('ChainConfig', (v) => {
-    const base = v.base as {
-      remote: Record<string, unknown>
-      outboundRateLimit: Record<string, unknown>
-    }
-    // a stored bucket of 500 tokens, under a disabled stored config
-    base.outboundRateLimit.tokens = bn(500)
-    base.outboundRateLimit.lastUpdated = bn(Math.floor(Date.now() / 1000))
-    base.remote.poolAddresses = pools.map((address) => ({ address }))
-    base.remote.tokenAddress = { address: token }
-    base.remote.decimals = 18
-  })
-  const standardLen = 8 + 139 + pools.reduce((n, p) => n + 4 + p.length, 0)
-  const data = Buffer.alloc(standardLen + (marker ? 8 : 0))
-  account('ChainConfig', body).copy(data, 0)
-  marker?.copy(data, standardLen)
-  return data
-}
-
-type Tail = {
-  group?: PublicKey
-  sources?: [number, number, number, number]
-  slots?: PublicKey[]
-  pausedOutbound?: boolean
-  format?: 0 | 1
-  driven?: boolean
-  memberIndex?: number
-  uid?: Buffer
-}
-
-function chainConfigV2Data(tail?: Tail, mint = MINT): Buffer {
-  const body = encodeType('ChainConfigV2', (v) => {
-    Object.assign(v, { version: tail ? 2 : 1, mint, remoteChainSelector: bn(SEPOLIA) })
-  })
-  const data = account('ChainConfigV2', body)
-  if (!tail) return data
-  const ext = Buffer.alloc(32 + 4 + 128 + 1 + 1 + 1 + 8 + 1 + 4 + 27)
-  ;(tail.group ?? PublicKey.default).toBuffer().copy(ext, 0)
-  Buffer.from(tail.sources ?? [0, 0, 0, 0]).copy(ext, 32)
-  ;(tail.slots ?? []).forEach((s, i) => s.toBuffer().copy(ext, 36 + 32 * i))
-  ext[164] = tail.pausedOutbound ? 1 : 0
-  ext[166] = tail.format ?? 0
-  ext[175] = tail.driven ? 1 : 0
-  ext.writeUInt32LE(tail.memberIndex ?? 0, 176)
-  const uid = tail.uid ? Buffer.concat([Buffer.from([1]), tail.uid]) : Buffer.from([0])
-  return Buffer.concat([data, ext, uid, Buffer.from([0])])
-}
-
-type GroupChainOpts = {
-  format?: 0 | 1
-  laneMode?: 'off' | 'allMembers' | 'subset'
-  drivenLanesPaused?: boolean
-  groupPaused?: boolean
-  bitmap?: number[]
-  policyPoolLegacy?: boolean
-  ccvs?: PublicKey[]
-  securityGeneration?: number
-  group?: PublicKey
-  selector?: bigint
-}
-
-function groupChainData(opts: GroupChainOpts = {}): Buffer {
-  const body = encodeType('GroupChainPolicy', (v) => {
-    v.version = 1
-    v.group = opts.group ?? GROUP
-    v.remoteChainSelector = bn(opts.selector ?? SEPOLIA)
-    v.groupPaused = !!opts.groupPaused
-    v.drivenLanesPaused = !!opts.drivenLanesPaused
-    v.securityGeneration = opts.securityGeneration ?? 0
-    v.laneMode = { [opts.laneMode ?? 'off']: {} }
-    const policy = v.policy as {
-      connection: Record<string, unknown>
-      rateLimit: { outbound: Record<string, unknown> }
-      security: { current: Record<string, unknown> }
-    }
-    // the record's RATE_LIMIT: capacity 100, rate 1
-    Object.assign(policy.rateLimit.outbound, { enabled: true, capacity: bn(100), rate: bn(1) })
-    policy.security.current.outbound = opts.ccvs ?? []
-    policy.connection.poolDataFormat = opts.format ? { long: {} } : { legacy32: {} }
-    policy.connection.remotePools = [
-      { address: { address: hex(POLICY_POOL) }, allowLegacyPoolData: !!opts.policyPoolLegacy },
-    ]
-  })
-  const fixed = Buffer.alloc(GROUP_CHAIN_POLICY_FIXED_LEN)
-  account('GroupChainPolicy', body).copy(fixed, 0)
-  return Buffer.concat([fixed, Buffer.from(opts.bitmap ?? [])])
-}
-
-function policyChainData(
-  classes: number,
-  format: 0 | 1,
-  opts: { group?: PublicKey; securityGeneration?: number } = {},
-): Buffer {
-  return account(
-    'PolicyChainRecord',
-    encodeType('PolicyChainRecord', (v) => {
-      v.version = 1
-      v.group = opts.group ?? GROUP
-      v.policy = POLICY
-      v.remoteChainSelector = bn(SEPOLIA)
-      v.classes = classes
-      v.securityGeneration = opts.securityGeneration ?? 0
-      const connection = (v.sections as { connection: Record<string, unknown> }).connection
-      connection.poolDataFormat = format ? { long: {} } : { legacy32: {} }
-    }),
-  )
-}
-
-type Accounts = Map<string, { data: Buffer; owner: PublicKey }>
-type TypeAndVersion = () => Promise<[string, string, string]>
-
-function chainWith(
-  accounts: Accounts,
-  opts: {
-    failOn?: PublicKey
-    typeAndVersion?: TypeAndVersion
-    network?: string
-    offRamps?: () => Promise<string[]>
-  } = {},
-): SolanaChain {
-  const get = (key: PublicKey) => {
-    if (opts.failOn?.equals(key)) throw new Error('fetch failed: 503')
-    const a = accounts.get(key.toBase58())
-    return a ? { ...a, lamports: 1, executable: false } : null
-  }
-  const connection = {
-    getAccountInfo: async (key: PublicKey) => get(key),
-    getMultipleAccountsInfo: async (keys: PublicKey[]) => keys.map(get),
-    getSignaturesForAddress: async () => [],
-  } as unknown as Connection
-  const chain = new SolanaChain(connection, networkInfo(opts.network ?? 'solana-devnet'), {
-    apiClient: null,
-  })
-  const routerType: TypeAndVersion = async () => ['CCIPRouter', '2.0.0', 'ccip-router 2.0.0']
-  Object.assign(chain, {
-    typeAndVersion: opts.typeAndVersion ?? routerType,
-    getOffRampsForRouter: opts.offRamps ?? (async () => [OFFRAMP.toBase58()]),
-  })
-  return chain
-}
-
-const CC_ADDR = deriveTokenPoolChainConfigPda(PROGRAM, SEPOLIA, MINT)
-const V2_ADDR = deriveTokenPoolChainConfigV2Pda(PROGRAM, SEPOLIA, MINT)
-const TAR = deriveTokenAdminRegistryPda(ROUTER, MINT)
-const GCP = poolGroupPdas.groupChain(PROGRAM, GROUP, SEPOLIA)
-const RECORD = poolGroupPdas.policyChain(PROGRAM, POLICY, SEPOLIA)
-type Extra = [PublicKey, Buffer, PublicKey?][]
-
-/** The accounts of one lane of `PROGRAM` toward Sepolia. */
-function lane(opts: { iface?: number; cc?: Buffer; v2?: Buffer | null; extra?: Extra } = {}) {
-  const m: Accounts = new Map()
-  const put = (k: PublicKey, data: Buffer, owner = PROGRAM) => m.set(k.toBase58(), { data, owner })
-  put(STATE, stateData())
-  put(TAR, registryData(opts.iface ?? 2), ROUTER)
-  put(LUT, lutData([LUT, TAR, PROGRAM, STATE]), LUT_PROGRAM)
-  put(SYSVAR_CLOCK_PUBKEY, clockData(), SystemProgram.programId)
-  put(SOURCE_CHAIN, sourceChainData(20), OFFRAMP)
-  if (opts.cc) put(CC_ADDR, opts.cc)
-  if (opts.v2) put(V2_ADDR, opts.v2)
-  for (const [k, d, owner] of opts.extra ?? []) put(k, d, owner)
-  return m
-}
 const set = (accounts: Accounts, key: PublicKey, data: Buffer, owner: PublicKey) => {
   accounts.set(key.toBase58(), { data, owner })
   return accounts

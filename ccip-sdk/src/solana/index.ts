@@ -3,6 +3,7 @@ import { Buffer } from 'buffer'
 import { type IdlTypes, BorshAccountsCoder } from '@coral-xyz/anchor'
 import { NATIVE_MINT } from '@solana/spl-token'
 import {
+  type AccountInfo,
   type Commitment,
   type ConnectionConfig,
   type VersionedTransactionResponse,
@@ -178,6 +179,7 @@ import {
   type SolanaSplitMode,
   convertRateLimiter,
   getErrorFromLogs,
+  getMultipleAccountsInfoPaged,
   hexDiscriminator,
   isTransactionTooLargeError,
   parseSolanaLogs,
@@ -2323,6 +2325,27 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
     remoteChainSelector?: bigint,
     _opts?: TokenPoolRemotesOpts,
   ): Promise<Record<string, TokenPoolRemote>> {
+    return (await this._getTokenPoolRemotesWithAccounts(tokenPool, remoteChainSelector)).remotes
+  }
+
+  /**
+   * {@link SolanaChain.getTokenPoolRemotes}, with the raw lane accounts it read: each remote's
+   * `ChainConfig`, and its `ChainConfigV2` when the pool may be a 2.0 pool (`undefined` when not
+   * read), so callers that decode more of a lane need no second read.
+   * @internal
+   */
+  async _getTokenPoolRemotesWithAccounts(
+    tokenPool: string,
+    remoteChainSelector?: bigint,
+  ): Promise<{
+    remotes: Record<string, TokenPoolRemote>
+    tokenPoolProgram: PublicKey
+    mint: PublicKey
+    laneAccounts: Record<
+      string,
+      { chainConfig: AccountInfo<Buffer>; chainConfigV2?: AccountInfo<Buffer> | null }
+    >
+  }> {
     const { tokenPoolProgram, config } = await this._getTokenPoolState(tokenPool)
 
     let poolType: string | undefined, poolVersion: string | undefined
@@ -2333,6 +2356,11 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
     }
 
     const remotes: Record<string, TokenPoolRemote> = {}
+    const laneAccounts: Record<
+      string,
+      { chainConfig: AccountInfo<Buffer>; chainConfigV2?: AccountInfo<Buffer> | null }
+    > = {}
+    const result = () => ({ remotes, tokenPoolProgram, mint: config.mint, laneAccounts })
 
     // The pool's ChainConfig PDA for each candidate remote: the one asked for, else every selector
     // the SDK knows of this network type (lanes never cross mainnet and testnet). A ChainConfig of
@@ -2390,13 +2418,14 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
           inboundRateLimiterState,
           outboundRateLimiterState,
         }
+        laneAccounts[remoteNetwork.name] = { chainConfig: account }
       } catch (err) {
         this.logger.warn('Failed to decode ChainConfig account:', err)
       }
     }
 
     // FTF overrides and ChainConfigV2s only exist on 2.0 pools; probe pools of unknown version too
-    if (poolVersion != null && poolVersion < CCIPVersion.V2_0) return remotes
+    if (poolVersion != null && poolVersion < CCIPVersion.V2_0) return result()
     const names = Object.keys(remotes)
     const pdas = names.flatMap((name) => {
       const { chainSelector } = networkInfo(name)
@@ -2408,6 +2437,7 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
     const pdaAccounts = await this._getMultipleAccountsInfo(pdas)
     for (const [i, name] of names.entries()) {
       const [override, chainConfigV2] = pdaAccounts.slice(2 * i, 2 * i + 2)
+      laneAccounts[name]!.chainConfigV2 = chainConfigV2 ?? null
       // a pool of unknown version without 2.0 accounts may not be a 2.0 pool
       if (!override && !chainConfigV2 && poolVersion == null) continue
       let fast, finality
@@ -2429,7 +2459,7 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
       }
     }
 
-    return remotes
+    return result()
   }
 
   /**
@@ -2437,11 +2467,8 @@ export class SolanaChain extends Chain<typeof ChainFamily.Solana> {
    * @param keys - Accounts to read.
    * @returns Each account, or null where it doesn't exist, in the order of `keys`.
    */
-  private async _getMultipleAccountsInfo(keys: PublicKey[]) {
-    const accounts = []
-    for (let i = 0; i < keys.length; i += 100)
-      accounts.push(...(await this.connection.getMultipleAccountsInfo(keys.slice(i, i + 100))))
-    return accounts
+  private _getMultipleAccountsInfo(keys: PublicKey[]) {
+    return getMultipleAccountsInfoPaged(this.connection, keys)
   }
 
   /**

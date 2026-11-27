@@ -1008,3 +1008,20 @@ export function convertRateLimiter(
   }
   return out
 }
+
+/**
+ * `getMultipleAccountsInfo` over any number of keys, one page of 100 (the RPC limit) at a time.
+ * @param connection - The Solana connection.
+ * @param keys - Accounts to read.
+ * @returns Each account, or null where it doesn't exist, in the order of `keys`.
+ * @internal
+ */
+export async function getMultipleAccountsInfoPaged(
+  connection: Pick<Connection, 'getMultipleAccountsInfo'>,
+  keys: readonly PublicKey[],
+): Promise<(AccountInfo<Buffer> | null)[]> {
+  const accounts: (AccountInfo<Buffer> | null)[] = []
+  for (let i = 0; i < keys.length; i += 100)
+    accounts.push(...(await connection.getMultipleAccountsInfo(keys.slice(i, i + 100))))
+  return accounts
+}

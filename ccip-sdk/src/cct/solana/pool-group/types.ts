@@ -86,7 +86,7 @@ export type PoolGroupFeeSection = {
   /** The fee config. */
   tokenTransferFeeConfig: TokenTransferFeeConfig
 }
-/** RATE_LIMIT section: four buckets of the shared `RateLimitConfig`. Edits do not refill (F7). */
+/** RATE_LIMIT section: four buckets of the shared `RateLimitConfig`. Edits do not refill the buckets: a lowered capacity caps the stored tokens, a raised one leaves them as they are. */
 export type PoolGroupRateLimitSection = {
   /** Outbound. */
   outbound: RateLimitConfig
@@ -413,7 +413,10 @@ export type GetPoolGroupLaneResult = PoolGroupLaneKey & {
   remoteTokenDecimals: number
   /** The lane's own remote pools. */
   ownRemotePools: string[]
-  /** Buckets as of now, from simulating `observe_lane_group`. */
+  /**
+   * Buckets as of now, from simulating `observe_lane_group`. Absent only on a standard lane, which
+   * is not simulated; on a linked or driven lane a refused simulation throws.
+   */
   rateLimits?: {
     /** Inbound tokens. */
     inbound: bigint
@@ -452,6 +455,14 @@ export type GetPoolGroupParams = PoolGroupRef
 export type GetPoolGroupChainParams = PoolGroupRef & {
   /** The chain. */
   remoteChainSelector: bigint
+  /**
+   * The mints to join the subset bitmap with, read by their `GroupMember` PDAs. Without it, set
+   * bits are joined with every current member through `getProgramAccounts`, which many public RPCs
+   * refuse. With it, `subsetTokens` lists those of these mints whose bit is set, and
+   * `staleSubsetMemberIndices` is not computed (empty): an index these mints do not cover is not
+   * judged.
+   */
+  tokenAddresses?: string[]
 }
 /** Params of `getPoolGroupPolicy`. */
 export type GetPoolGroupPolicyParams = PoolGroupRef & {
@@ -481,7 +492,11 @@ export type GetPoolGroupMembersResult = {
 }
 /** Params of `getPoolGroupLane`. */
 export type GetPoolGroupLaneParams = PoolGroupProgramRef & PoolGroupLaneKey
-/** Params of `getPoolGroupLanes`. */
+/**
+ * Params of `getPoolGroupLanes`. The listing needs `getProgramAccounts` over the program's
+ * version-2 `ChainConfigV2` accounts (the group sits after variable-length fields, so it is not a
+ * filter); an RPC that refuses it fails the read.
+ */
 export type GetPoolGroupLanesParams = PoolGroupRef & {
   /** Only this chain. */
   remoteChainSelector?: bigint
@@ -502,7 +517,12 @@ export type GetPoolGroupHooksResult = {
   /** The group's hook authority (signs engine calls). */
   hookAuthority: string
 }
-/** Params of `getPoolGroupListEntries`. */
+/**
+ * Params of `getPoolGroupListEntries`. Entries come from `getProgramAccounts` (memcmp on the list
+ * at offset 10). Blocklist addresses come from `ListUpdated` events (self-CPI, read through core
+ * `getTransaction`): cost is one `getTransaction` per transaction touching the list, back to
+ * `fromSlot`, stopping once every entry has an address.
+ */
 export type GetPoolGroupListEntriesParams = PoolGroupProgramRef & {
   /** The list. */
   list: string
@@ -540,7 +560,14 @@ export type GetPoolGroupRequiredCCVsParams = PoolGroupProgramRef &
     /** Requested finality (outbound, inline FEE only). */
     finality?: FinalityRequested
   }
-/** Result of `getPoolGroupRequiredCCVs`. */
+/**
+ * Result of `getPoolGroupRequiredCCVs`. With SECURITY from the pool group, the program answers from
+ * the lane's synced copy at the cluster clock and ignores amount and finality; on an unsynced lane the
+ * copy differs from what transfers enforce (they fail closed). `finality` changes the answer only when
+ * both SECURITY and FEE are inline (it picks the BPS tier for the outbound threshold amount; with
+ * group FEE the gross amount is compared). The account reads and the simulation may land on
+ * different slots, so `synced` and `ccvs` can disagree across an activation.
+ */
 export type GetPoolGroupRequiredCCVsResult = {
   /** The CCVs; `'default'` for `INCLUDE_DEFAULT_CCVS`. */
   ccvs: string[]
@@ -552,7 +579,11 @@ export type GetPoolGroupRequiredCCVsResult = {
   synced?: boolean
   /** When a pending set the lane has not synced activates. */
   failsClosedAt?: bigint
-  /** Whether `finality` changed the answer's threshold amount. */
+  /**
+   * Whether the program considered `finality` (it picks the BPS tier the outbound threshold amount
+   * is compared after): an outbound transfer with inline SECURITY and FEE and a given `finality`. The
+   * answer may still be the same, for example when both tiers are equal or no threshold is set.
+   */
   finalityApplied: boolean
 }
 /** Params of `getTokenPoolGlobalConfig`. */

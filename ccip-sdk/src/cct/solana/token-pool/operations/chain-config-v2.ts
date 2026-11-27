@@ -20,6 +20,7 @@ import { CCTDataDecodeError, CCTParamsInvalidError } from '../../../errors.ts'
 import type { SolanaGenerateParams } from '../../operation.ts'
 import type { PoolProgramRef } from '../../programs/token-pool.ts'
 import {
+  U32_MAX,
   U64_MAX,
   parseOptionalPublicKey,
   parsePublicKey,
@@ -33,7 +34,6 @@ const MAX_TOKEN_TRANSFER_FEE_BPS = 10_000
 /** Lowest `destBytesOverhead` a 2.0 Solana pool accepts in an enabled fee config. */
 const MIN_TOKEN_TRANSFER_DEST_BYTES_OVERHEAD = 32
 const U16_MAX = 0xffff
-const U32_MAX = 0xffff_ffff
 
 /**
  * CCVs a CCIP 2.0 token pool requires on a lane, on top of those the lane itself requires.

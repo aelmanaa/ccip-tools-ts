@@ -34,6 +34,7 @@ import { decodeRemoteAddress } from '../../remote-address.ts'
 import { deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
 import type { PoolGroupLaneMarker } from './accounts.ts'
 import {
+  type PoolGroupLaneState,
   type Unread,
   isUnread,
   laneFailsClosed,
@@ -41,7 +42,6 @@ import {
   laneOutboundRateLimiter,
   lanePauses,
   laneSectionsFor,
-  type PoolGroupLaneState,
   missing,
   readPoolGroupLaneState,
   tryDecode,

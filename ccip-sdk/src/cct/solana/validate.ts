@@ -31,6 +31,9 @@ import {
 /** Largest value representable by an unsigned 64-bit integer. */
 export const U64_MAX = 0xffff_ffff_ffff_ffffn
 
+/** Largest value representable by an unsigned 32-bit integer. */
+export const U32_MAX = 0xffff_ffff
+
 /**
  * Parses `value` as a Solana public key.
  * @throws CCTParamsInvalidError if `value` is not a valid Solana public key string.

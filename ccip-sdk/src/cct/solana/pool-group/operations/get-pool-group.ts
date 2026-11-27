@@ -18,10 +18,16 @@ export class GetPoolGroup extends SolanaQuery<
     return parsePoolGroupRef(this.name, params)
   }
 
-  /** Decodes the `Group` (a superset of `observe_group`) and probes the program's features. */
+  /**
+   * Decodes the `Group` at the cluster clock (a superset of `observe_group`, with the delay and
+   * default SECURITY in force) and probes the program's features.
+   */
   protected async read(chain: SolanaChain, ref: ParsedPoolGroupRef): Promise<GetPoolGroupResult> {
-    const group = await readPoolGroup(this.name, chain, ref)
+    const { group, now } = await readPoolGroup(this.name, chain, ref)
     const pendingAt = toBigInt(group.pendingMinCcvActivationDelayAt)
+    // as `min_ccv_activation_delay_at`: a pending (lower) delay whose time has come is in force
+    const applied = pendingAt !== 0n && now >= pendingAt
+    const pendingDelay = toBigInt(group.pendingMinCcvActivationDelay)
     return {
       poolGroupAddress: ref.group.toBase58(),
       poolGroupId: group.groupId.toBase58(),
@@ -32,12 +38,10 @@ export class GetPoolGroup extends SolanaQuery<
       maxBpsFee: group.maxBpsFee,
       openMembership: group.openMembership,
       paused: group.paused,
-      minCCVActivationDelay: toBigInt(group.minCcvActivationDelay),
+      minCCVActivationDelay: applied ? pendingDelay : toBigInt(group.minCcvActivationDelay),
       pendingMinCCVActivationDelay:
-        pendingAt === 0n
-          ? null
-          : { delay: toBigInt(group.pendingMinCcvActivationDelay), appliesAt: pendingAt },
-      defaultPolicy: decodeSections(group.defaultPolicy),
+        pendingAt === 0n || applied ? null : { delay: pendingDelay, appliesAt: pendingAt },
+      defaultPolicy: decodeSections(group.defaultPolicy, now),
       ccvEpochCounter: toBigInt(group.ccvEpochCounter),
       nextPolicyId: group.nextPolicyId,
       securityGeneration: group.securityGeneration,

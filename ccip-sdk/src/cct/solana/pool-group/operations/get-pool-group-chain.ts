@@ -1,19 +1,23 @@
+import type { PublicKey } from '@solana/web3.js'
+
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { SolanaQuery } from '../../query.ts'
-import { GROUP_CHAIN_POLICY_FIXED_LEN, poolGroupPdas } from '../accounts.ts'
+import { GROUP_CHAIN_POLICY_FIXED_LEN, decodePoolGroupMember, poolGroupPdas } from '../accounts.ts'
 import { decodeClassBits, decodeLaneMode, decodeSections } from '../decode.ts'
 import type { GetPoolGroupChainParams, GetPoolGroupChainResult } from '../types.ts'
 import {
   type ParsedPoolGroupRef,
   decodeOwned,
+  decodeOwnedData,
   listPoolGroupMembers,
   parsePoolGroupRef,
+  parseTokenAddresses,
   readPoolGroup,
   validateSelector,
 } from './common.ts'
 
-type Parsed = ParsedPoolGroupRef & { selector: bigint }
+type Parsed = ParsedPoolGroupRef & { selector: bigint; mints?: PublicKey[] }
 
 /** The set bits of a subset bitmap: bit `i % 8` of byte `i / 8`. @internal */
 export function subsetIndices(bitmap: Uint8Array): number[] {
@@ -34,20 +38,25 @@ export class GetPoolGroupChain extends SolanaQuery<
 
   /** @throws {@link CCTParamsInvalidError} if the ref or selector is invalid */
   protected prepare(params: GetPoolGroupChainParams): Parsed {
+    const mints = parseTokenAddresses(this.name, params.tokenAddresses)
     return {
       ...parsePoolGroupRef(this.name, params),
       selector: validateSelector(this.name, 'remoteChainSelector', params.remoteChainSelector),
+      ...(mints && { mints }),
     }
   }
 
   /**
-   * Decodes the record and its subset bitmap; set bits are joined with the members
-   * (`getProgramAccounts`) only when there are any.
+   * Decodes the record and its subset bitmap; set bits are joined with `tokenAddresses` by their
+   * member PDAs, or else with every member (`getProgramAccounts`) only when there are any.
    */
   protected async read(chain: SolanaChain, ref: Parsed): Promise<GetPoolGroupChainResult> {
-    await readPoolGroup(this.name, chain, ref)
     const address = poolGroupPdas.groupChain(ref.program, ref.group, ref.selector)
-    const account = await chain.connection.getAccountInfo(address)
+    const memberAddresses = (ref.mints ?? []).map((m) => poolGroupPdas.groupMember(ref.program, m))
+    const {
+      now,
+      extras: [account, ...memberAccounts],
+    } = await readPoolGroup(this.name, chain, ref, [address, ...memberAddresses])
     if (!account)
       throw new CCTParamsInvalidError(
         this.name,
@@ -57,7 +66,15 @@ export class GetPoolGroupChain extends SolanaQuery<
     const record = decodeOwned('groupChainPolicy', account, address, ref.program)
     const indices = subsetIndices(account.data.subarray(GROUP_CHAIN_POLICY_FIXED_LEN))
     const byIndex = new Map<number, string>()
-    if (indices.length)
+    if (ref.mints)
+      memberAccounts.forEach((acc, i) => {
+        const at = memberAddresses[i]!
+        const member =
+          acc && decodePoolGroupMember(decodeOwnedData(acc, at, ref.program), at.toBase58())
+        if (member && member.poolGroupAddress === ref.group.toBase58())
+          byIndex.set(member.memberIndex, member.mint)
+      })
+    else if (indices.length)
       for (const { member } of await listPoolGroupMembers(this.name, chain, ref.program, ref.group))
         byIndex.set(member.memberIndex, member.mint)
     const demand = record.poolDataDemand
@@ -70,7 +87,7 @@ export class GetPoolGroupChain extends SolanaQuery<
       pausedOutbound: record.pausedOutbound,
       pausedInbound: record.pausedInbound,
       memberLaneCount: record.memberLaneCount,
-      policy: decodeSections(record.policy, ref.selector),
+      policy: decodeSections(record.policy, now, ref.selector),
       poolDataDemand: {
         feeInlineLong: demand.feeInlineLong,
         feeUid: demand.feeUid,
@@ -80,7 +97,7 @@ export class GetPoolGroupChain extends SolanaQuery<
       drivenLanesPaused: record.drivenLanesPaused,
       subsetTokens: indices.flatMap((i) => byIndex.get(i) ?? []),
       subsetMemberIndices: indices,
-      staleSubsetMemberIndices: indices.filter((i) => !byIndex.has(i)),
+      staleSubsetMemberIndices: ref.mints ? [] : indices.filter((i) => !byIndex.has(i)),
       securityGeneration: record.securityGeneration,
     }
   }

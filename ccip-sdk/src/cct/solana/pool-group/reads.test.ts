@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import { BN, BorshAccountsCoder } from '@coral-xyz/anchor'
-import { type Connection, Keypair, PublicKey } from '@solana/web3.js'
+import { type Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY } from '@solana/web3.js'
 import bs58 from 'bs58'
 import { getAddress, getBytes, sha256, toUtf8Bytes } from 'ethers'
 
@@ -47,9 +47,19 @@ function encode(name: string, patch: (v: Record<string, unknown>) => void = () =
 
 type Accounts = Map<string, { data: Buffer; owner: PublicKey }>
 
+/** The Clock sysvar at unix time `now`. */
+function clockAccount(now: bigint) {
+  const data = Buffer.alloc(40)
+  data.writeBigInt64LE(now, 32)
+  return { data, owner: new PublicKey('Sysvar1111111111111111111111111111111111111') }
+}
+const NOW = 1_700_000_000n
+
 function chainWith(accounts: Accounts, extra: Record<string, unknown> = {}): SolanaChain {
   const get = (key: PublicKey) => {
-    const a = accounts.get(key.toBase58())
+    const a =
+      accounts.get(key.toBase58()) ??
+      (key.equals(SYSVAR_CLOCK_PUBKEY) ? clockAccount(NOW) : undefined)
     return a ? { ...a, lamports: 1, executable: false } : null
   }
   const connection = {
@@ -380,33 +390,130 @@ describe('hook lists', () => {
     assert.equal(bare.complete, false)
     assert.equal(bare.entries[0]?.address, undefined)
     assert.equal(bare.entries[0]?.addressHash, `0x${blocklistKey(evm).toString('hex')}`)
-    // a ListUpdated(list, added: [padded EVM address], removed: []) inner instruction
+    // a ListUpdated(list, added: [padded EVM address], removed: []) self-CPI, as core parses it
     const tag = Buffer.from('e445a52e51cb9a1d', 'hex')
     const event = Buffer.from(getBytes(sha256(toUtf8Bytes('event:ListUpdated')))).subarray(0, 8)
     assert.equal(event.toString('hex'), 'f8e2b1f4c48817f5')
-    const data = Buffer.concat([tag, event, blocklist.toBuffer(), u32(1), u32(32), padded, u32(0)])
-    const keys = [PROGRAM]
-    const chain = chainWith(lists(), {
-      getSignaturesForAddress: async (_k: PublicKey, opts: { before?: string }) =>
-        opts.before ? [] : [{ signature: 'sig', slot: 10, err: null }],
-      getTransaction: async () => ({
-        transaction: { message: { getAccountKeys: () => ({ get: (i: number) => keys[i] }) } },
-        meta: {
-          innerInstructions: [
-            {
-              index: 0,
-              instructions: [{ programIdIndex: 0, accounts: [], data: bs58.encode(data) }],
-            },
-          ],
-        },
-      }),
+    const listUpdated = (list: PublicKey) =>
+      Buffer.concat([tag, event, list.toBuffer(), u32(1), u32(32), padded, u32(0)])
+    const [eventAuthority] = PublicKey.findProgramAddressSync(
+      [Buffer.from('__event_authority')],
+      PROGRAM,
+    )
+    const payer = Keypair.generate().publicKey
+    /** A v0 response whose program key comes from a lookup table, with one self-CPI event. */
+    const txWith = (data: Buffer, withAuthority = true) => ({
+      slot: 10,
+      blockTime: 1,
+      transaction: {
+        message: { staticAccountKeys: [payer, eventAuthority] },
+        signatures: ['sig'],
+      },
+      meta: {
+        err: null,
+        loadedAddresses: { writable: [], readonly: [PROGRAM] },
+        logMessages: [
+          `Program ${PROGRAM.toBase58()} invoke [1]`,
+          `Program ${PROGRAM.toBase58()} invoke [2]`,
+          `Program ${PROGRAM.toBase58()} success`,
+          `Program ${PROGRAM.toBase58()} success`,
+        ],
+        innerInstructions: [
+          {
+            index: 0,
+            instructions: [
+              { programIdIndex: 2, accounts: withAuthority ? [1] : [], data: bs58.encode(data) },
+            ],
+          },
+        ],
+      },
     })
-    const scanned = await op.query(chain, { ...p, list: blocklist.toBase58() })
+    const scanChain = (
+      pages: { signature: string; slot: number; err: unknown }[][],
+      txs: Record<string, unknown>,
+      fetched: string[] = [],
+    ) =>
+      chainWith(lists(), {
+        getSignaturesForAddress: async (_k: PublicKey, opts: { before?: string }) => {
+          const at = opts.before
+            ? pages.findIndex((pg) => pg.at(-1)?.signature === opts.before) + 1
+            : 0
+          return pages[at] ?? []
+        },
+        getTransaction: async (sig: string) => {
+          fetched.push(sig)
+          return txs[sig] ?? null
+        },
+      })
+    const one = [[{ signature: 'sig', slot: 10, err: null }]]
+    const scanned = await op.query(scanChain(one, { sig: txWith(listUpdated(blocklist)) }), {
+      ...p,
+      list: blocklist.toBase58(),
+    })
     assert.equal(scanned.complete, true)
     assert.equal(scanned.entries[0]?.address, `0x${evm.toString('hex')}`)
     // fromSlot after the update: history not scanned that far back
-    const late = await op.query(chain, { ...p, list: blocklist.toBase58(), fromSlot: 11n })
+    const late = await op.query(scanChain(one, { sig: txWith(listUpdated(blocklist)) }), {
+      ...p,
+      list: blocklist.toBase58(),
+      fromSlot: 11n,
+    })
     assert.equal(late.complete, false)
+    // another list's event, a CPI without the event authority, a pruned transaction: no address
+    for (const tx of [
+      txWith(listUpdated(allowlist)),
+      txWith(listUpdated(blocklist), false),
+      null,
+    ]) {
+      const r = await op.query(scanChain(one, { sig: tx }), { ...p, list: blocklist.toBase58() })
+      assert.equal(r.complete, false)
+    }
+    // a failed transaction is never fetched; the second page (the `before` cursor) is reached
+    const fetched: string[] = []
+    const fullPage = Array.from({ length: 1000 }, (_, i) => ({
+      signature: `s${i}`,
+      slot: 2000 - i,
+      err: i === 0 ? { InstructionError: [0, 'x'] } : null,
+    }))
+    const paged = await op.query(
+      scanChain(
+        [fullPage, [{ signature: 'sig', slot: 10, err: null }]],
+        {
+          sig: txWith(listUpdated(blocklist)),
+        },
+        fetched,
+      ),
+      { ...p, list: blocklist.toBase58() },
+    )
+    assert.equal(paged.complete, true)
+    assert.ok(!fetched.includes('s0'))
+    assert.ok(fetched.includes('sig'))
+  })
+
+  it('entries: a listing shorter than the list count is incomplete', async () => {
+    const accounts = lists()
+    accounts.set(allowlist.toBase58(), {
+      data: encode('Allowlist', (v) =>
+        Object.assign(v, { group: GROUP, admin: OWNER, enabled: true, entryCount: 2 }),
+      ),
+      owner: PROGRAM,
+    })
+    const r = await new GetPoolGroupListEntries().query(chainWith(accounts), {
+      ...p,
+      list: allowlist.toBase58(),
+    })
+    assert.equal(r.complete, false)
+  })
+
+  it('has: an odd-length 0x address is a param error', async () => {
+    await assert.rejects(
+      new HasPoolGroupListEntry().query(chainWith(lists()), {
+        ...p,
+        list: blocklist.toBase58(),
+        address: '0x123',
+      }),
+      CCTParamsInvalidError,
+    )
   })
 
   it('getPoolGroupHooks: the record kinds, lists and hook authority', async () => {
@@ -448,12 +555,36 @@ describe('decoders', () => {
       { address: { address: Buffer.alloc(20, 0x22) }, allowLegacyPoolData: true },
     ]
     value.connection.allowedFinalityConfig = { flags: 1, blockDepth: 5 }
-    const sections = decodeSections(value, SEPOLIA)
+    const sections = decodeSections(value, 0n, SEPOLIA)
     assert.deepEqual(sections.security.current.outbound, ['default', OWNER.toBase58()])
     assert.equal(sections.connection.remotePools[0]?.address, getAddress(`0x${'22'.repeat(20)}`))
     assert.deepEqual(sections.connection.allowedFinality, { finalityDepth: 5, finalitySafe: true })
     assert.equal(sections.rateLimit.outbound.enabled, false)
-    assert.equal(decodeSections(value).connection.remotePools[0]?.address, `0x${'22'.repeat(20)}`)
+    assert.equal(
+      decodeSections(value, 0n).connection.remotePools[0]?.address,
+      `0x${'22'.repeat(20)}`,
+    )
+  })
+
+  it('SECURITY reports the set in force: an activated pending set is folded into current', () => {
+    const value = poolGroupsCoder.types.decode<Parameters<typeof decodeSections>[0]>(
+      'PolicySections',
+      Buffer.alloc(4096),
+    )
+    value.security.current.outbound = [OWNER]
+    value.security.current.epoch = new BN(1)
+    value.security.pending = {
+      outbound: [PublicKey.default],
+      inbound: [],
+      epoch: new BN(2),
+      activatesAt: new BN(1_000),
+    }
+    const before = decodeSections(value, 999n).security
+    assert.deepEqual(before.current.outbound, [OWNER.toBase58()])
+    assert.equal(before.pending?.activatesAt, 1_000n)
+    const after = decodeSections(value, 1_000n).security
+    assert.deepEqual(after.current, { outbound: ['default'], inbound: [], epoch: 2n })
+    assert.equal(after.pending, null)
   })
 
   it('class bits, lane mode, writable statics', () => {

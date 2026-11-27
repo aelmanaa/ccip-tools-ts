@@ -1,16 +1,15 @@
-import type { PublicKey } from '@solana/web3.js'
+import type { Buffer } from 'buffer'
+
+import { BorshAccountsCoder } from '@coral-xyz/anchor'
+import type { AccountInfo, PublicKey } from '@solana/web3.js'
 
 import type { TokenPoolRemote } from '../../../../chain.ts'
 import { networkInfo } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
-import {
-  decodeTokenPoolChainConfig,
-  deriveTokenPoolChainConfigV2Pda,
-} from '../../../../solana/token-pool.ts'
-import {
-  decodePoolGroupChainConfigV2,
-  decodePoolGroupLaneMarker,
-} from '../../pool-group/accounts.ts'
+import { decodeTokenPoolChainConfig } from '../../../../solana/token-pool.ts'
+import { CCTDataDecodeError } from '../../../errors.ts'
+import { chainConfigStandardLen } from '../../pool-group/accounts.ts'
+import { decodePoolGroupLaneBase, isUnread } from '../../pool-group/lane.ts'
 import {
   type PoolProgramRef,
   deriveTokenPoolChainConfigPda,
@@ -92,34 +91,67 @@ export class GetTokenPoolRemotes extends SolanaQuery<
   ): Promise<GetTokenPoolRemotesResult> {
     const poolProgram = await resolveExistingPoolProgram(this.name, chain, mint, poolProgramAddress)
     const state = deriveTokenPoolConfigPda(poolProgram, mint).toBase58()
-    const remotes: GetTokenPoolRemotesResult = await chain.getTokenPoolRemotes(
+    // core's read, with the lane accounts it fetched: the marker and tail need no second read
+    const { remotes: base, laneAccounts } = await chain._getTokenPoolRemotesWithAccounts(
       state,
       remoteChainSelector,
     )
-    // pool-group lanes: the marker after the standard `ChainConfig`, and the tail's group
-    const names = Object.keys(remotes)
-    const selectors = names.map((name) => networkInfo(name).chainSelector)
-    const accounts = await chain.connection.getMultipleAccountsInfo(
-      selectors.flatMap((selector) => [
-        deriveTokenPoolChainConfigPda(poolProgram, selector, mint),
-        deriveTokenPoolChainConfigV2Pda(poolProgram, selector, mint),
-      ]),
-    )
-    for (const [i, name] of names.entries()) {
-      const [cc, v2] = [accounts[2 * i], accounts[2 * i + 1]]
-      if (!cc?.owner.equals(poolProgram)) continue
-      try {
-        const kind = decodePoolGroupLaneMarker(cc.data, decodeTokenPoolChainConfig(cc.data))
-        if (kind === 'standard') continue
-        const ext = v2 && decodePoolGroupChainConfigV2(v2.data, name).ext
-        remotes[name] = {
-          ...remotes[name]!,
-          poolGroup: { kind, poolGroupAddress: ext?.poolGroupAddress ?? null },
-        }
-      } catch {
-        // as the shared reader: a lane whose accounts do not decode keeps its base config only
+    const remotes: GetTokenPoolRemotesResult = base
+    for (const [name, { chainConfig, chainConfigV2 }] of Object.entries(laneAccounts)) {
+      if (!claimsPoolGroupLane(chainConfig, chainConfigV2)) continue
+      // the S1a lane decoder: marker and tail must agree, else the lane is not as the program writes it
+      const lane = decodePoolGroupLaneBase(
+        poolProgram,
+        mint,
+        networkInfo(name).chainSelector,
+        chainConfig,
+        chainConfigV2 ?? null,
+      )
+      if (lane === null) continue
+      if (isUnread(lane))
+        throw new CCTDataDecodeError(
+          deriveTokenPoolChainConfigPda(
+            poolProgram,
+            networkInfo(name).chainSelector,
+            mint,
+          ).toBase58(),
+          {
+            context: { reason: lane.reason },
+          },
+        )
+      if (lane.kind === 'standard') continue
+      remotes[name] = {
+        ...remotes[name]!,
+        poolGroup: { kind: lane.kind, poolGroupAddress: lane.ext?.poolGroupAddress ?? null },
       }
     }
     return remotes
+  }
+}
+
+const CHAIN_CONFIG_V2_DISCRIMINATOR = BorshAccountsCoder.accountDiscriminator('ChainConfigV2')
+
+/**
+ * Whether a lane's accounts claim the pool-groups layout: a `ChainConfig` with the 8-byte marker
+ * after its standard length, or a version-2 `ChainConfigV2` (the version a tail needs). A lane of
+ * any other pool (standard, CCTP, Lombard) claims neither and keeps its base config as core reads it.
+ */
+function claimsPoolGroupLane(
+  chainConfig: AccountInfo<Buffer>,
+  chainConfigV2: AccountInfo<Buffer> | null | undefined,
+): boolean {
+  if (
+    chainConfigV2 &&
+    chainConfigV2.data.length > 9 &&
+    chainConfigV2.data.subarray(0, 8).equals(CHAIN_CONFIG_V2_DISCRIMINATOR) &&
+    chainConfigV2.data[9] === 2
+  )
+    return true
+  try {
+    const standard = chainConfigStandardLen(decodeTokenPoolChainConfig(chainConfig.data))
+    return chainConfig.data.length === standard + 8
+  } catch {
+    // core decodes the lane with the pool's own layout; one this decoder cannot read claims nothing
+    return false
   }
 }

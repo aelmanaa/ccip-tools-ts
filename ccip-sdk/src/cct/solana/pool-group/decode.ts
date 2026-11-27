@@ -96,16 +96,22 @@ export function decodeHookConfig(hook: Types['HookConfig']): PoolGroupHookConfig
 }
 
 /**
- * IDL `PolicySections` → {@link PoolGroupSections}. Remote pools are decoded for
+ * IDL `PolicySections` → {@link PoolGroupSections}, at the cluster time `now`: SECURITY reports the
+ * set in force (a pending set that has activated is folded into `current`, as `compact` and
+ * `effective_at` do), so `pending` is only a set still to come. Remote pools are decoded for
  * `remoteChainSelector`'s family; a record without a chain (a group or policy default) keeps them as
  * `0x` hex.
  * @internal
  */
 export function decodeSections(
   sections: IdlPolicySections,
+  now: bigint,
   remoteChainSelector?: bigint,
 ): PoolGroupSections {
   const { connection, fee, rateLimit, security } = sections
+  // as `SecurityPolicy::effective_at`: a pending set whose time has come is the set in force
+  const activated =
+    security.pending !== null && now >= BigInt(security.pending.activatesAt.toString())
   return {
     connection: {
       remotePools: connection.remotePools.map((pool) => {
@@ -129,13 +135,14 @@ export function decodeSections(
       fastFinalityInbound: decodeRateLimitConfig(rateLimit.ftfInbound),
     },
     security: {
-      current: decodeCCVSet(security.current),
-      pending: security.pending
-        ? {
-            ...decodeCCVSet(security.pending),
-            activatesAt: BigInt(security.pending.activatesAt.toString()),
-          }
-        : null,
+      current: decodeCCVSet(activated ? security.pending! : security.current),
+      pending:
+        security.pending && !activated
+          ? {
+              ...decodeCCVSet(security.pending),
+              activatesAt: BigInt(security.pending.activatesAt.toString()),
+            }
+          : null,
       allowDroppingDefaultCCVs: security.allowDroppingDefaultCcvs,
       hook: security.hook ? decodeHookConfig(security.hook) : null,
     },

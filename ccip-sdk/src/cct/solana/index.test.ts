@@ -216,6 +216,7 @@ describe('SolanaTokenManager (cct/solana)', () => {
         getSupportedTokens: async () => [mint],
         getTokenInfo: async () => ({ symbol: 'TKN', decimals: 6 }),
         getTokenPoolRemotes: async () => ({}),
+        _getTokenPoolRemotesWithAccounts: async () => ({ remotes: {}, laneAccounts: {} }),
         getRegistryTokenConfig: async (router: string) =>
           router === overrideRouter
             ? {

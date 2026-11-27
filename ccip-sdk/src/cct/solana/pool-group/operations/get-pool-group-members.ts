@@ -3,13 +3,14 @@ import type { PublicKey } from '@solana/web3.js'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { SolanaQuery } from '../../query.ts'
-import { parsePublicKey, validateUniquePublicKeys } from '../../validate.ts'
 import { decodePoolGroupMember, decodePoolGroupRegistry, poolGroupPdas } from '../accounts.ts'
 import type { GetPoolGroupMembersParams, GetPoolGroupMembersResult } from '../types.ts'
 import {
   type ParsedPoolGroupRef,
+  decodeOwnedData,
   listPoolGroupMembers,
   parsePoolGroupRef,
+  parseTokenAddresses,
   readPoolGroup,
 } from './common.ts'
 import { toPoolGroupMember } from './members.ts'
@@ -27,14 +28,8 @@ export class GetPoolGroupMembers extends SolanaQuery<
   /** @throws {@link CCTParamsInvalidError} if the ref or a token address is invalid */
   protected prepare(params: GetPoolGroupMembersParams): Parsed {
     const ref = parsePoolGroupRef(this.name, params)
-    if (params.tokenAddresses === undefined) return ref
-    if (!Array.isArray(params.tokenAddresses))
-      throw new CCTParamsInvalidError(this.name, 'tokenAddresses', 'must be an array')
-    const mints = params.tokenAddresses.map((t, i) =>
-      parsePublicKey(this.name, `tokenAddresses[${i}]`, t),
-    )
-    validateUniquePublicKeys(this.name, 'tokenAddresses', mints)
-    return { ...ref, mints }
+    const mints = parseTokenAddresses(this.name, params.tokenAddresses)
+    return mints ? { ...ref, mints } : ref
   }
 
   /**
@@ -42,22 +37,25 @@ export class GetPoolGroupMembers extends SolanaQuery<
    * another group, or of none, is refused); otherwise `getProgramAccounts`.
    */
   protected async read(chain: SolanaChain, ref: Parsed): Promise<GetPoolGroupMembersResult> {
-    await readPoolGroup(this.name, chain, ref)
     const registryAddress = poolGroupPdas.groupRegistry(ref.program, ref.group)
-    const registryAccount = await chain.connection.getAccountInfo(registryAddress)
-    const registry =
-      registryAccount && registryAccount.owner.equals(ref.program)
-        ? {
-            address: registryAddress.toBase58(),
-            ...decodePoolGroupRegistry(registryAccount.data, registryAddress.toBase58()),
-          }
-        : null
+    const memberAddresses = (ref.mints ?? []).map((m) => poolGroupPdas.groupMember(ref.program, m))
+    const {
+      extras: [registryAccount, ...memberAccounts],
+    } = await readPoolGroup(this.name, chain, ref, [registryAddress, ...memberAddresses])
+    // absent before the first join; any other owner is not the program's registry
+    const registry = registryAccount
+      ? {
+          address: registryAddress.toBase58(),
+          ...decodePoolGroupRegistry(
+            decodeOwnedData(registryAccount, registryAddress, ref.program),
+            registryAddress.toBase58(),
+          ),
+        }
+      : null
     let members
     if (ref.mints) {
-      const addresses = ref.mints.map((m) => poolGroupPdas.groupMember(ref.program, m))
-      const accounts = await chain.connection.getMultipleAccountsInfo(addresses)
-      members = accounts.map((account, i) => {
-        const address = addresses[i]!
+      members = memberAccounts.map((account, i) => {
+        const address = memberAddresses[i]!
         const member =
           account?.owner.equals(ref.program) &&
           decodePoolGroupMember(account.data, address.toBase58())

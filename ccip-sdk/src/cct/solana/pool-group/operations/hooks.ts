@@ -1,10 +1,10 @@
 import { Buffer } from 'buffer'
 
-import { BorshAccountsCoder } from '@coral-xyz/anchor'
+import { BorshAccountsCoder, BorshEventCoder } from '@coral-xyz/anchor'
 import { PublicKey } from '@solana/web3.js'
-import bs58 from 'bs58'
 import { getBytes, isHexString, sha256, toUtf8Bytes } from 'ethers'
 
+import { CCIPTransactionNotFoundError } from '../../../../errors/index.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTDataDecodeError, CCTParamsInvalidError } from '../../../errors.ts'
 import { SolanaQuery } from '../../query.ts'
@@ -16,6 +16,7 @@ import {
   poolGroupPdas,
 } from '../accounts.ts'
 import { decodeHookConfig, keyOrNull } from '../decode.ts'
+import { POOL_GROUPS_PROGRAM_IDL } from '../program.ts'
 import type {
   GetPoolGroupHooksParams,
   GetPoolGroupHooksResult,
@@ -123,10 +124,11 @@ export class GetPoolGroupHooks extends SolanaQuery<
         throw new CCTParamsInvalidError(this.name, 'record', 'not a pool group SECURITY record')
     }
     const hook = security.hook ? decodeHookConfig(security.hook) : null
-    const lists: PoolGroupHookList[] = []
-    for (const list of [hook?.allowlist, hook?.blocklist])
-      if (list)
-        lists.push(await readHookList(this.name, chain, program, new PublicKey(list), 'record'))
+    const lists: PoolGroupHookList[] = await Promise.all(
+      [hook?.allowlist, hook?.blocklist].flatMap((list) =>
+        list ? [readHookList(this.name, chain, program, new PublicKey(list), 'record')] : [],
+      ),
+    )
     return {
       hook,
       lists,
@@ -135,28 +137,45 @@ export class GetPoolGroupHooks extends SolanaQuery<
   }
 }
 
-/** `e445a52e51cb9a1d`: Anchor's `emit_cpi!` instruction tag, then the event discriminator. */
-const EVENT_IX_TAG = Buffer.from('e445a52e51cb9a1d', 'hex')
-const LIST_UPDATED = Buffer.from(getBytes(sha256(toUtf8Bytes('event:ListUpdated')))).subarray(0, 8)
+/** Decodes the pool program's events from core's parsed logs (`emit_cpi!` payloads). */
+const eventCoder = new BorshEventCoder(POOL_GROUPS_PROGRAM_IDL)
+/** Hex topic of `ListUpdated` (its event discriminator), as core's parsed logs carry it. */
+const LIST_UPDATED_TOPIC = hex(
+  Buffer.from(getBytes(sha256(toUtf8Bytes('event:ListUpdated')))).subarray(0, 8),
+)
+/** Transactions of a list fetched at once while scanning its history. */
+const TX_CONCURRENCY = 4
 
-/** Decodes a `ListUpdated` self-CPI payload (after the 16-byte tag): list, added, removed. */
-function decodeListUpdated(data: Buffer): { list: string; added: Buffer[] } | undefined {
-  let at = 16 + 32
-  if (data.length < at) return
-  const list = new PublicKey(data.subarray(16, at)).toBase58()
-  if (at + 4 > data.length) return
-  const count = data.readUInt32LE(at)
-  at += 4
-  const added: Buffer[] = []
-  for (let i = 0; i < count; i++) {
-    if (at + 4 > data.length) return
-    const len = data.readUInt32LE(at)
-    at += 4
-    if (at + len > data.length) return
-    added.push(data.subarray(at, at + len))
-    at += len
+/**
+ * The `ListUpdated` events for `list` in one transaction, from core `getTransaction` (which resolves
+ * v0 lookup-table keys and checks each self-CPI's event authority); `[]` when the RPC no longer has
+ * the transaction.
+ */
+async function listUpdatesIn(
+  chain: SolanaChain,
+  program: PublicKey,
+  list: PublicKey,
+  signature: string,
+): Promise<Buffer[][]> {
+  let tx
+  try {
+    tx = await chain.getTransaction(signature)
+  } catch (err) {
+    if (err instanceof CCIPTransactionNotFoundError) return []
+    throw err
   }
-  return { list, added }
+  const out: Buffer[][] = []
+  for (const log of tx.logs) {
+    if (log.address !== program.toBase58() || log.topics[0] !== LIST_UPDATED_TOPIC) continue
+    if (typeof log.data !== 'string') continue
+    const event = eventCoder.decode(log.data)
+    if (event?.name !== 'ListUpdated') continue
+    const { list: eventList, added } = event.data
+    if (!(eventList instanceof PublicKey) || !eventList.equals(list) || !Array.isArray(added))
+      continue
+    out.push(added.flatMap((a: unknown) => (a instanceof Uint8Array ? [Buffer.from(a)] : [])))
+  }
+  return out
 }
 
 /** Lists a hook list's entries. */
@@ -190,7 +209,7 @@ export class GetPoolGroupListEntries extends SolanaQuery<
     chain: SolanaChain,
     { program, list, fromSlot }: ProgramOnly & { list: PublicKey; fromSlot?: bigint },
   ): Promise<GetPoolGroupListEntriesResult> {
-    const { kind } = await readHookList(this.name, chain, program, list, 'list')
+    const { kind, entryCount } = await readHookList(this.name, chain, program, list, 'list')
     const entries = await listProgramAccounts(
       this.name,
       chain,
@@ -202,7 +221,10 @@ export class GetPoolGroupListEntries extends SolanaQuery<
         ),
         memcmp(10, list.toBytes()),
       ],
-      'check single entries with hasPoolGroupListEntry',
+      {
+        param: 'connection',
+        fix: 'listing entries needs it; check single entries with hasPoolGroupListEntry',
+      },
     )
     const field = (data: Buffer) => {
       if (data.length < 74)
@@ -212,7 +234,8 @@ export class GetPoolGroupListEntries extends SolanaQuery<
     if (kind === 'allowlist')
       return {
         kind,
-        complete: true,
+        // a listing shorter than the list's count is a truncated RPC answer
+        complete: entries.length === entryCount,
         entries: entries.map(({ account }) => {
           const sender = field(account.data)
           return {
@@ -225,43 +248,33 @@ export class GetPoolGroupListEntries extends SolanaQuery<
     const addresses = new Map<string, string>()
     const wanted = new Set(hashes)
     let before: string | undefined
-    scan: for (;;) {
+    // newest first, so the newest add of a present hash wins; stops once every hash has an address
+    scan: while (wanted.size > addresses.size) {
       const sigs = await chain.connection.getSignaturesForAddress(list, { before, limit: 1000 })
       if (!sigs.length) break
-      for (const sig of sigs) {
-        if (fromSlot !== undefined && BigInt(sig.slot) < fromSlot) break scan
-        if (sig.err) continue
-        const tx = await chain.connection.getTransaction(sig.signature, {
-          maxSupportedTransactionVersion: 0,
-          commitment: 'confirmed',
-        })
-        const keys = tx?.transaction.message.getAccountKeys({
-          accountKeysFromLookups: tx.meta?.loadedAddresses,
-        })
-        for (const { instructions } of tx?.meta?.innerInstructions ?? [])
-          for (const ix of instructions) {
-            if (!keys?.get(ix.programIdIndex)?.equals(program)) continue
-            const data = Buffer.from(bs58.decode(ix.data))
-            if (
-              !data.subarray(0, 8).equals(EVENT_IX_TAG) ||
-              !data.subarray(8, 16).equals(LIST_UPDATED)
-            )
-              continue
-            const event = decodeListUpdated(data)
-            if (event?.list !== list.toBase58()) continue
-            for (const added of event.added) {
-              const key = hex(blocklistKey(added))
-              if (wanted.has(key) && !addresses.has(key))
-                addresses.set(key, hex(normalizeBlocklistAddress(added)))
-            }
-          }
+      const page = sigs.filter((sig) => fromSlot === undefined || BigInt(sig.slot) >= fromSlot)
+      const done = page.length < sigs.length
+      const ok = page.filter((sig) => !sig.err)
+      for (let i = 0; i < ok.length; i += TX_CONCURRENCY) {
+        const updates = await Promise.all(
+          ok
+            .slice(i, i + TX_CONCURRENCY)
+            .map((sig) => listUpdatesIn(chain, program, list, sig.signature)),
+        )
+        for (const added of updates.flat(2)) {
+          const key = hex(blocklistKey(added))
+          if (wanted.has(key) && !addresses.has(key))
+            addresses.set(key, hex(normalizeBlocklistAddress(added)))
+        }
         if (addresses.size === wanted.size) break scan
       }
+      if (done) break
       before = sigs[sigs.length - 1]!.signature
     }
     return {
       kind,
-      complete: addresses.size === wanted.size,
+      // a listing shorter than the list's count is a truncated RPC answer
+      complete: addresses.size === wanted.size && hashes.length === entryCount,
       entries: hashes.map((addressHash) => ({
         ...(addresses.has(addressHash) && { address: addresses.get(addressHash)! }),
         addressHash,
@@ -272,8 +285,16 @@ export class GetPoolGroupListEntries extends SolanaQuery<
 
 /** Parses a list address: base58 (Solana) or `0x` hex (any chain). */
 function addressBytes(operation: string, value: unknown): Buffer {
-  if (typeof value === 'string' && isHexString(value) && value.length > 2)
+  if (typeof value === 'string' && value.startsWith('0x')) {
+    // `0` is not base58, so a `0x` value is hex or invalid, never a Solana address
+    if (!isHexString(value) || value.length <= 2 || value.length % 2)
+      throw new CCTParamsInvalidError(
+        operation,
+        'address',
+        'must be even-length `0x` hex, or base58',
+      )
     return Buffer.from(getBytes(value))
+  }
   return parsePublicKey(operation, 'address', value).toBuffer()
 }
 
