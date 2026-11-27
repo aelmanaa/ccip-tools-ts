@@ -623,15 +623,15 @@ type SendOutcome = { landed: true; hash: string } | { landed: false; reason: str
  * {@link ABSENT_READS_FOR_EXPIRY} consecutive reads (then it can never land). Height and status are
  * read through the same connection; behind a load balancer they may still come from different
  * nodes, which the consecutive reads guard against. A failing read is retried until `timeoutMs`.
- * @returns the status's `err` (`null`: success) when found, `undefined` when expired unlanded
- * @throws the last read error, or a timeout error, when the fate is still unknown at `timeoutMs`
+ * @returns the status's `err` (`null`: success) when found, `undefined` when expired unlanded,
+ *   `unresolved` (with the last read error) when the fate is still unknown at `timeoutMs`
  */
 async function resolveSignature(
   connection: Connection,
   signature: string,
   lastValidBlockHeight: number,
   { pollMs, timeoutMs }: { pollMs: number; timeoutMs: number },
-): Promise<{ err: unknown } | undefined> {
+): Promise<{ err: unknown } | { unresolved: true; lastError: unknown } | undefined> {
   const deadline = Date.now() + timeoutMs
   let absentPastExpiry = 0
   let lastError: unknown
@@ -650,10 +650,7 @@ async function resolveSignature(
     } catch (err) {
       lastError = err
     }
-    if (Date.now() >= deadline)
-      throw (
-        lastError ?? new Error(`the status of ${signature} is still unknown after ${timeoutMs} ms`)
-      )
+    if (Date.now() >= deadline) return { unresolved: true, lastError }
     await new Promise((resolve) => setTimeout(resolve, pollMs))
   }
 }
@@ -730,19 +727,16 @@ async function sendOne(
     chain.logger?.warn(
       `${operation}: the send of ${signature} failed in transport (${transport instanceof Error ? transport.message : String(transport)}); waiting for its status`,
     )
-    let found: { err: unknown } | undefined
-    try {
-      found = await resolveSignature(connection, signature, blockhash.lastValidBlockHeight, {
-        pollMs,
-        timeoutMs: pollTimeoutMs,
-      })
-    } catch (poll) {
-      // its fate is unknown: it may still land, so neither a resend nor a rebuild is safe
+    const found = await resolveSignature(connection, signature, blockhash.lastValidBlockHeight, {
+      pollMs,
+      timeoutMs: pollTimeoutMs,
+    })
+    // its fate is unknown: it may still land, so neither a resend nor a rebuild is safe
+    if (found && 'unresolved' in found)
       throw new CCTTxNotConfirmedError(operation, signature, {
-        cause: poll instanceof Error ? poll : undefined,
-        context: { ...context, pendingSignature: signature },
+        cause: found.lastError instanceof Error ? found.lastError : undefined,
+        context: { ...context, pendingSignature: signature, pollTimeoutMs },
       })
-    }
     if (!found) return { landed: false, reason: `${signature} expired without landing` }
     err = found.err
   }
