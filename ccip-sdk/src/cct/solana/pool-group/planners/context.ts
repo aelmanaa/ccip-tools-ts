@@ -6,7 +6,7 @@
  * @packageDocumentation
  */
 
-import { ComputeBudgetProgram, type PublicKey } from '@solana/web3.js'
+import { type PublicKey, ComputeBudgetProgram } from '@solana/web3.js'
 
 import type { ChainGetter } from '../../../../chain.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
@@ -275,7 +275,11 @@ export function parsePlannerSigner(
   if (solana !== undefined && (typeof solana !== 'object' || solana === null))
     throw new CCTParamsInvalidError(operation, 'solana', 'must be an object')
   const actor = parseOptionalPublicKey(operation, 'authority', params.authority) ?? payer
-  const crankPayer = parseOptionalPublicKey(operation, 'solana.crankPayer', params.solana?.crankPayer)
+  const crankPayer = parseOptionalPublicKey(
+    operation,
+    'solana.crankPayer',
+    params.solana?.crankPayer,
+  )
   const lookupTablePayer = parseOptionalPublicKey(
     operation,
     'solana.lookupTablePayer',

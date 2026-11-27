@@ -392,6 +392,16 @@ export class SquadsHarness {
     return index
   }
 
+  /** Measured execute compute per inner transaction: the SDK's limit and what landed (calibration). */
+  readonly executeCU: {
+    limit: number
+    consumed: number
+    instructions: number
+    accounts: number
+  }[] = []
+  /** Set to run executes with this limit instead of the SDK's (to measure the real consumption). */
+  computeUnitLimitOverride?: number
+
   /** Executes every transaction of the batch of `index`, in order. */
   async executeBatch(member: Keypair, index: bigint, transactions: PoolGroupSquadsTransaction[]) {
     for (const [i, tx] of transactions.entries()) {
@@ -405,12 +415,28 @@ export class SquadsHarness {
         })
         .remainingAccounts(executeAccounts(this.vault, tx))
         .instruction()
-      await this.send(
+      const sig = await this.send(
         'batchExecuteTransaction',
         [member],
-        [ComputeBudgetProgram.setComputeUnitLimit({ units: tx.computeUnitLimit }), ix],
+        [
+          ComputeBudgetProgram.setComputeUnitLimit({
+            units: this.computeUnitLimitOverride ?? tx.computeUnitLimit,
+          }),
+          ix,
+        ],
         tx.lookupTables,
       )
+      const landed = await this.connection.getTransaction(sig, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      })
+      this.executeCU.push({
+        limit: tx.computeUnitLimit,
+        consumed: landed?.meta?.computeUnitsConsumed ?? 0,
+        instructions: tx.instructions.length,
+        accounts: new Set(tx.instructions.flatMap((i) => i.keys.map((k) => k.pubkey.toBase58())))
+          .size,
+      })
     }
   }
 }

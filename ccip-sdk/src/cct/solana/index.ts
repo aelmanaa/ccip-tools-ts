@@ -56,6 +56,21 @@ import { POOL_GROUP_MEMBERSHIP_OPERATIONS } from './pool-group/operations/member
 import { POOL_GROUP_PAUSE_OPERATIONS } from './pool-group/operations/pauses.ts'
 import { POOL_GROUP_POLICY_OPERATIONS } from './pool-group/operations/policies.ts'
 import { POOL_GROUP_SECURITY_OPERATIONS } from './pool-group/operations/security.ts'
+import { SOLANA_MULTI_TOKEN_POOL_PLANNERS } from './pool-group/planners/index.ts'
+import type {
+  ExecuteEnableMultiTokenPoolChainParams,
+  ExecuteOnboardMultiTokenPoolTokensParams,
+  ExecutePoolGroupPlanResult,
+  ExecuteRemoveMultiTokenPoolTokenParams,
+  GenerateEnableMultiTokenPoolChainParams,
+  GenerateOnboardMultiTokenPoolTokensParams,
+  GeneratePoolGroupPlanResult,
+  GenerateRemoveMultiTokenPoolTokenParams,
+  PoolGroupChainEnablementStepName,
+  PoolGroupLeaveStepName,
+  PoolGroupOnboardingStepName,
+  PoolGroupPlan,
+} from './pool-group/planners/types.ts'
 import type {
   CheckPoolGroupSnapshotParams,
   GetPoolGroupChainParams,
@@ -6289,6 +6304,168 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   }
 
   /**
+   * Plans onboarding N tokens into a pool group (`create_group`, `onboardToken`'s steps, `join_group` or `init_group_lanes`, `materialize_group_lanes`, `assign_lane_policies`, the lane check).
+   * @remarks `remoteTokens` is each token's exact lane set: every chain must already serve driven lanes (enable it first). A live chain is never paused: its new lanes need `solana.acknowledgeLiveAdmission`, else `blockedBy`. Plans from chain state; builds nothing.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC, with the dotted
+   * path), or a step's op refuses the state; `reason` names the fix
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const { steps, blockedBy } = await sol.getMultiTokenPoolTokenOnboardingPlan({ poolGroupId, tokens: [{ tokenAddress: mint, remoteTokens }], getChain, payer: vault })
+   * ```
+   */
+  getMultiTokenPoolTokenOnboardingPlan(
+    opts: GenerateOnboardMultiTokenPoolTokensParams,
+  ): Promise<PoolGroupPlan<PoolGroupOnboardingStepName>> {
+    return SOLANA_MULTI_TOKEN_POOL_PLANNERS.onboarding.plan(this.chain, opts)
+  }
+  /**
+   * Builds every ready step of plans onboarding N tokens into a pool group (`create_group`, `onboardToken`'s steps, `join_group` or `init_group_lanes`, `materialize_group_lanes`, `assign_lane_policies`, the lane check): each by its own op on current state, with every guard.
+   * @remarks `remoteTokens` is each token's exact lane set: every chain must already serve driven lanes (enable it first). A live chain is never paused: its new lanes need `solana.acknowledgeLiveAdmission`, else `blockedBy`. Ready steps commute (one Squads batch: map `ready` to `toPoolGroupSquadsBatch`
+   * as `{ id: step.id, transactions }`). Pass back `pendingStepHashes` and `landedStepIds`:
+   * a pause is lifted only when its own pause step is listed as landed.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC, with the dotted
+   * path), or a step's op refuses the state; `reason` names the fix
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const r = await sol.generateUnsignedOnboardMultiTokenPoolTokens({ poolGroupId, tokens: [{ tokenAddress: mint, remoteTokens }], getChain, payer: vault, maxReadySteps: 20, landedStepIds })
+   * ```
+   */
+  generateUnsignedOnboardMultiTokenPoolTokens(
+    opts: GenerateOnboardMultiTokenPoolTokensParams,
+  ): Promise<GeneratePoolGroupPlanResult<PoolGroupOnboardingStepName>> {
+    return SOLANA_MULTI_TOKEN_POOL_PLANNERS.onboarding.generate(this.chain, opts)
+  }
+  /**
+   * Runs plans onboarding N tokens into a pool group (`create_group`, `onboardToken`'s steps, `join_group` or `init_group_lanes`, `materialize_group_lanes`, `assign_lane_policies`, the lane check) with `opts.wallet`: lands each ready step it is the actor of and re-plans.
+   * @remarks `remoteTokens` is each token's exact lane set: every chain must already serve driven lanes (enable it first). A live chain is never paused: its new lanes need `solana.acknowledgeLiveAdmission`, else `blockedBy`. Stops at a step for another actor or a block (`blockedBy`); `onStep` and
+   * `signal` apply; it lifts only the pauses it landed itself.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC, with the dotted
+   * path), or a step's op refuses the state; `reason` names the fix
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails (`context.executedSteps` lists the landed steps)
+   * @example
+   * ```ts
+   * const { steps, blockedBy } = await sol.onboardMultiTokenPoolTokens({ poolGroupId, tokens: [{ tokenAddress: mint, remoteTokens }], getChain, wallet })
+   * ```
+   */
+  onboardMultiTokenPoolTokens(
+    opts: ExecuteOnboardMultiTokenPoolTokensParams,
+  ): Promise<ExecutePoolGroupPlanResult<PoolGroupOnboardingStepName>> {
+    return SOLANA_MULTI_TOKEN_POOL_PLANNERS.onboarding.execute(this.chain, opts)
+  }
+
+  /**
+   * Plans enabling a remote chain for a pool group (`add_group_chain`, `set_group_chain_policy`, the policy's chain record, member remote tokens, `set_group_chain_lanes`, materialize, assign, sync, the lane check).
+   * @remarks A record in `'off'` leaves it with its driven lanes paused (the program requires it); a live record is never paused, and lanes it newly admits need `solana.acknowledgeLiveAdmission`. Plans from chain state; builds nothing.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC, with the dotted
+   * path), or a step's op refuses the state; `reason` names the fix
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const { steps, blockedBy } = await sol.getMultiTokenPoolChainEnablementPlan({ poolGroupId, remoteChain, tokenAddresses: 'all-members', getChain, payer: vault })
+   * ```
+   */
+  getMultiTokenPoolChainEnablementPlan(
+    opts: GenerateEnableMultiTokenPoolChainParams,
+  ): Promise<PoolGroupPlan<PoolGroupChainEnablementStepName>> {
+    return SOLANA_MULTI_TOKEN_POOL_PLANNERS.chainEnablement.plan(this.chain, opts)
+  }
+  /**
+   * Builds every ready step of plans enabling a remote chain for a pool group (`add_group_chain`, `set_group_chain_policy`, the policy's chain record, member remote tokens, `set_group_chain_lanes`, materialize, assign, sync, the lane check): each by its own op on current state, with every guard.
+   * @remarks A record in `'off'` leaves it with its driven lanes paused (the program requires it); a live record is never paused, and lanes it newly admits need `solana.acknowledgeLiveAdmission`. Ready steps commute (one Squads batch: map `ready` to `toPoolGroupSquadsBatch`
+   * as `{ id: step.id, transactions }`). Pass back `pendingStepHashes` and `landedStepIds`:
+   * a pause is lifted only when its own pause step is listed as landed.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC, with the dotted
+   * path), or a step's op refuses the state; `reason` names the fix
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const r = await sol.generateUnsignedEnableMultiTokenPoolChain({ poolGroupId, remoteChain, tokenAddresses: 'all-members', getChain, payer: vault, maxReadySteps: 20, landedStepIds })
+   * ```
+   */
+  generateUnsignedEnableMultiTokenPoolChain(
+    opts: GenerateEnableMultiTokenPoolChainParams,
+  ): Promise<GeneratePoolGroupPlanResult<PoolGroupChainEnablementStepName>> {
+    return SOLANA_MULTI_TOKEN_POOL_PLANNERS.chainEnablement.generate(this.chain, opts)
+  }
+  /**
+   * Runs plans enabling a remote chain for a pool group (`add_group_chain`, `set_group_chain_policy`, the policy's chain record, member remote tokens, `set_group_chain_lanes`, materialize, assign, sync, the lane check) with `opts.wallet`: lands each ready step it is the actor of and re-plans.
+   * @remarks A record in `'off'` leaves it with its driven lanes paused (the program requires it); a live record is never paused, and lanes it newly admits need `solana.acknowledgeLiveAdmission`. Stops at a step for another actor or a block (`blockedBy`); `onStep` and
+   * `signal` apply; it lifts only the pauses it landed itself.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC, with the dotted
+   * path), or a step's op refuses the state; `reason` names the fix
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails (`context.executedSteps` lists the landed steps)
+   * @example
+   * ```ts
+   * const { steps, blockedBy } = await sol.enableMultiTokenPoolChain({ poolGroupId, remoteChain, tokenAddresses: 'all-members', getChain, wallet })
+   * ```
+   */
+  enableMultiTokenPoolChain(
+    opts: ExecuteEnableMultiTokenPoolChainParams,
+  ): Promise<ExecutePoolGroupPlanResult<PoolGroupChainEnablementStepName>> {
+    return SOLANA_MULTI_TOKEN_POOL_PLANNERS.chainEnablement.execute(this.chain, opts)
+  }
+
+  /**
+   * Plans a token leaving its pool group (`set_lane_pause`, own fee for long linked lanes, `unlink_lanes`, `set_member_remote_tokens` with `close_group_lanes`, `close_group_members`). Destructive.
+   * @remarks Each lane waits (`blockedBy`) until the remote side stopped sending and the caller lists it in `solana.confirmInFlightDrained`. No delist. Plans from chain state; builds nothing.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC, with the dotted
+   * path), or a step's op refuses the state; `reason` names the fix
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const { steps, blockedBy } = await sol.getMultiTokenPoolTokenRemovalPlan({ poolGroupId, tokenAddress: mint, getChain, payer: vault })
+   * ```
+   */
+  getMultiTokenPoolTokenRemovalPlan(
+    opts: GenerateRemoveMultiTokenPoolTokenParams,
+  ): Promise<PoolGroupPlan<PoolGroupLeaveStepName>> {
+    return SOLANA_MULTI_TOKEN_POOL_PLANNERS.tokenRemoval.plan(this.chain, opts)
+  }
+  /**
+   * Builds every ready step of plans a token leaving its pool group (`set_lane_pause`, own fee for long linked lanes, `unlink_lanes`, `set_member_remote_tokens` with `close_group_lanes`, `close_group_members`). Destructive: each by its own op on current state, with every guard.
+   * @remarks Each lane waits (`blockedBy`) until the remote side stopped sending and the caller lists it in `solana.confirmInFlightDrained`. No delist. Ready steps commute (one Squads batch: map `ready` to `toPoolGroupSquadsBatch`
+   * as `{ id: step.id, transactions }`). Pass back `pendingStepHashes` and `landedStepIds`:
+   * a pause is lifted only when its own pause step is listed as landed.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC, with the dotted
+   * path), or a step's op refuses the state; `reason` names the fix
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const r = await sol.generateUnsignedRemoveMultiTokenPoolToken({ poolGroupId, tokenAddress: mint, getChain, payer: vault, maxReadySteps: 20, landedStepIds })
+   * ```
+   */
+  generateUnsignedRemoveMultiTokenPoolToken(
+    opts: GenerateRemoveMultiTokenPoolTokenParams,
+  ): Promise<GeneratePoolGroupPlanResult<PoolGroupLeaveStepName>> {
+    return SOLANA_MULTI_TOKEN_POOL_PLANNERS.tokenRemoval.generate(this.chain, opts)
+  }
+  /**
+   * Runs plans a token leaving its pool group (`set_lane_pause`, own fee for long linked lanes, `unlink_lanes`, `set_member_remote_tokens` with `close_group_lanes`, `close_group_members`). Destructive with `opts.wallet`: lands each ready step it is the actor of and re-plans.
+   * @remarks Each lane waits (`blockedBy`) until the remote side stopped sending and the caller lists it in `solana.confirmInFlightDrained`. No delist. Stops at a step for another actor or a block (`blockedBy`); `onStep` and
+   * `signal` apply; it lifts only the pauses it landed itself.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC, with the dotted
+   * path), or a step's op refuses the state; `reason` names the fix
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails (`context.executedSteps` lists the landed steps)
+   * @example
+   * ```ts
+   * const { steps, blockedBy } = await sol.removeMultiTokenPoolToken({ poolGroupId, tokenAddress: mint, getChain, wallet })
+   * ```
+   */
+  removeMultiTokenPoolToken(
+    opts: ExecuteRemoveMultiTokenPoolTokenParams,
+  ): Promise<ExecutePoolGroupPlanResult<PoolGroupLeaveStepName>> {
+    return SOLANA_MULTI_TOKEN_POOL_PLANNERS.tokenRemoval.execute(this.chain, opts)
+  }
+
+  /**
    * Reads the family-neutral view of one lane (same params and result as on EVM).
    * @remarks Read-only: needs no wallet and builds no transaction. `poolAddress` is the pool
    * program; omitted, the program of the mint's existing pool. Buckets and the fee config are what
@@ -6387,6 +6564,36 @@ export {
   TOKEN_ONBOARDING_STEPS,
 } from './onboarding/onboard-token.ts'
 export type * from './pool-group/types.ts'
+export {
+  type ExecuteEnableMultiTokenPoolChainParams,
+  type ExecuteOnboardMultiTokenPoolTokensParams,
+  type ExecutePoolGroupPlanResult,
+  type ExecuteRemoveMultiTokenPoolTokenParams,
+  type GenerateEnableMultiTokenPoolChainParams,
+  type GenerateOnboardMultiTokenPoolTokensParams,
+  type GeneratePoolGroupPlanResult,
+  type GenerateRemoveMultiTokenPoolTokenParams,
+  type PoolGroupChainEnablementStepName,
+  type PoolGroupExecutedPlanStep,
+  type PoolGroupLeaveStepName,
+  type PoolGroupOnboardingCreate,
+  type PoolGroupOnboardingCreateChain,
+  type PoolGroupOnboardingStepName,
+  type PoolGroupPlan,
+  type PoolGroupReadyStep,
+  type PoolGroupRunIds,
+  type SolanaEnableMultiTokenPoolChainParams,
+  type SolanaMultiTokenPoolChainRemoteToken,
+  type SolanaMultiTokenPoolOnboardingToken,
+  type SolanaMultiTokenPoolPlannerExecutionOptions,
+  type SolanaMultiTokenPoolRemoteChainConfig,
+  type SolanaMultiTokenPoolRemoteToken,
+  type SolanaOnboardMultiTokenPoolTokensParams,
+  type SolanaRemoveMultiTokenPoolTokenParams,
+  POOL_GROUP_CHAIN_ENABLEMENT_STEPS,
+  POOL_GROUP_LEAVE_STEPS,
+  POOL_GROUP_ONBOARDING_STEPS,
+} from './pool-group/planners/types.ts'
 export type * from './pool-group/write-types.ts'
 export { toPoolGroupSquadsBatch, toPoolGroupSquadsTransaction } from './pool-group/squads.ts'
 export { POOL_GROUP_FEATURES, POOL_GROUP_POLICY_CLASSES } from './pool-group/types.ts'

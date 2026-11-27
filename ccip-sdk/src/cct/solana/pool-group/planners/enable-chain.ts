@@ -12,19 +12,19 @@ import { AddressLookupTableProgram, PublicKey } from '@solana/web3.js'
 
 import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import type {
-  MultiTokenPoolLaneFinding,
-  MultiTokenPoolPlanBlock,
-  MultiTokenPoolRateLimits,
+import {
+  type MultiTokenPoolLaneFinding,
+  type MultiTokenPoolPlanBlock,
+  type MultiTokenPoolRateLimits,
+  POOL_DATA_FORMATS,
 } from '../../../multi-token-pool.ts'
-import { POOL_DATA_FORMATS } from '../../../multi-token-pool.ts'
 import { parseRemoteAddress, parseUniqueRemoteAddresses } from '../../../remote-address.ts'
 import { submit } from '../../submit.ts'
 import { parseRateLimitConfig } from '../../token-pool/operations/set-chain-rate-limit.ts'
 import { U64_MAX, parsePublicKey, validateBigInt, validateInteger } from '../../validate.ts'
 import { poolGroupPdas } from '../accounts.ts'
-import { parsePoolGroupRef } from '../operations/common.ts'
 import { POOL_GROUP_CHAIN_OPERATIONS } from '../operations/chains.ts'
+import { parsePoolGroupRef } from '../operations/common.ts'
 import { GetPoolGroupMembers } from '../operations/get-pool-group-members.ts'
 import {
   GetPoolGroupPolicy,
@@ -48,8 +48,8 @@ import {
 } from './context.ts'
 import { unpauseDecision } from './engine.ts'
 import {
-  LANES_PER_STEP,
   type LaneCheckInputs,
+  LANES_PER_STEP,
   assignSteps,
   assignmentHolds,
   chainLanesStep,
@@ -119,15 +119,24 @@ export function parseEnablement(params: GenerateEnableMultiTokenPoolChainParams)
   )
   const remotePools = remote.remotePools.map((p, i) => {
     if (typeof p.allowLegacyPoolData !== 'boolean')
-      throw new CCTParamsInvalidError(NAME, `remoteChain.remotePools[${i}].allowLegacyPoolData`, 'must be a boolean')
+      throw new CCTParamsInvalidError(
+        NAME,
+        `remoteChain.remotePools[${i}].allowLegacyPoolData`,
+        'must be a boolean',
+      )
     return { address: addresses[i]!, allowLegacyPoolData: p.allowLegacyPoolData }
   })
   if (remote.poolDataFormat !== undefined && !POOL_DATA_FORMATS.includes(remote.poolDataFormat))
-    throw new CCTParamsInvalidError(NAME, 'remoteChain.poolDataFormat', "must be 'legacy' or 'long'")
+    throw new CCTParamsInvalidError(
+      NAME,
+      'remoteChain.poolDataFormat',
+      "must be 'legacy' or 'long'",
+    )
   const limits: unknown = remote.rateLimits
   if (typeof limits !== 'object' || limits === null)
     throw new CCTParamsInvalidError(NAME, 'remoteChain.rateLimits', 'must be an object')
-  for (const b of BUCKETS) parseRateLimitConfig(NAME, `remoteChain.rateLimits.${b}`, remote.rateLimits[b])
+  for (const b of BUCKETS)
+    parseRateLimitConfig(NAME, `remoteChain.rateLimits.${b}`, remote.rateLimits[b])
   const fee: unknown = remote.tokenTransferFeeConfig
   if (typeof fee !== 'object' || fee === null)
     throw new CCTParamsInvalidError(NAME, 'remoteChain.tokenTransferFeeConfig', 'must be an object')
@@ -139,7 +148,9 @@ export function parseEnablement(params: GenerateEnableMultiTokenPoolChainParams)
   let tokens: string[] | 'all-members'
   if (params.tokenAddresses === 'all-members') tokens = 'all-members'
   else if (Array.isArray(params.tokenAddresses))
-    tokens = params.tokenAddresses.map((t, i) => parsePublicKey(NAME, `tokenAddresses[${i}]`, t).toBase58())
+    tokens = params.tokenAddresses.map((t, i) =>
+      parsePublicKey(NAME, `tokenAddresses[${i}]`, t).toBase58(),
+    )
   else
     throw new CCTParamsInvalidError(
       NAME,
@@ -151,11 +162,20 @@ export function parseEnablement(params: GenerateEnableMultiTokenPoolChainParams)
   const remoteTokens = (params.remoteTokens ?? []).map((r, i) => {
     const mint = parsePublicKey(NAME, `remoteTokens[${i}].tokenAddress`, r.tokenAddress).toBase58()
     if (Array.isArray(tokens) && !tokens.includes(mint))
-      throw new CCTParamsInvalidError(NAME, `remoteTokens[${i}].tokenAddress`, 'not admitted by tokenAddresses')
+      throw new CCTParamsInvalidError(
+        NAME,
+        `remoteTokens[${i}].tokenAddress`,
+        'not admitted by tokenAddresses',
+      )
     validateInteger(NAME, `remoteTokens[${i}].remoteTokenDecimals`, r.remoteTokenDecimals, 0, 255)
     return {
       mint,
-      token: parseRemoteAddress(NAME, `remoteTokens[${i}].remoteTokenAddress`, r.remoteTokenAddress, selector),
+      token: parseRemoteAddress(
+        NAME,
+        `remoteTokens[${i}].remoteTokenAddress`,
+        r.remoteTokenAddress,
+        selector,
+      ),
       decimals: r.remoteTokenDecimals,
     }
   })
@@ -190,8 +210,12 @@ export function parseEnablement(params: GenerateEnableMultiTokenPoolChainParams)
       check: {
         ...(params.getChain && { getChain: params.getChain }),
         ...(params.remoteAttestations && { remoteAttestations: params.remoteAttestations }),
-        ...(params.minDestGasOverhead !== undefined && { minDestGasOverhead: params.minDestGasOverhead }),
-        ...(params.maxTransferFeeBps !== undefined && { maxTransferFeeBps: params.maxTransferFeeBps }),
+        ...(params.minDestGasOverhead !== undefined && {
+          minDestGasOverhead: params.minDestGasOverhead,
+        }),
+        ...(params.maxTransferFeeBps !== undefined && {
+          maxTransferFeeBps: params.maxTransferFeeBps,
+        }),
       },
     },
   }
@@ -221,11 +245,16 @@ export async function expandEnablement(
 ): Promise<Expansion<Name>> {
   const g = ctx.ref.group
   const C = parsed.selector
-  const refParams = { poolProgramAddress: ctx.ref.program.toBase58(), poolGroupAddress: g.toBase58() }
+  const refParams = {
+    poolProgramAddress: ctx.ref.program.toBase58(),
+    poolGroupAddress: g.toBase58(),
+  }
   // 'all-members' reaches every member: list them (getProgramAccounts)
   const listed =
     parsed.tokens === 'all-members'
-      ? (await new GetPoolGroupMembers().query(ctx.chain, refParams)).poolGroupMembers.map((m) => m.tokenAddress)
+      ? (await new GetPoolGroupMembers().query(ctx.chain, refParams)).poolGroupMembers.map(
+          (m) => m.tokenAddress,
+        )
       : parsed.tokens
   const mints = [...new Set([...listed, ...parsed.remoteTokens.map((r) => r.mint)])]
   const state = await readPlanState(ctx, { selectors: [C], mints })
@@ -263,7 +292,10 @@ export async function expandEnablement(
     // a new record copies the default: CONNECTION's finality starts at full finality
     const update: PoolGroupSectionUpdate =
       !record && section.policyClass === 'connection' && !section.connection.allowedFinality
-        ? { ...section, connection: { ...section.connection, allowedFinality: { finalityDepth: 0 } } }
+        ? {
+            ...section,
+            connection: { ...section.connection, allowedFinality: { finalityDepth: 0 } },
+          }
         : section
     if (record && sectionHolds(record.policy, update)) continue
     const inherits = record?.inheritsDefault.includes(update.policyClass) ?? true
@@ -282,7 +314,10 @@ export async function expandEnablement(
   const policyIds: string[] = []
   let carried: PoolGroupPolicyClass[] = []
   if (parsed.policy !== undefined) {
-    const policy = await new GetPoolGroupPolicy().query(ctx.chain, { ...refParams, policyId: parsed.policy })
+    const policy = await new GetPoolGroupPolicy().query(ctx.chain, {
+      ...refParams,
+      policyId: parsed.policy,
+    })
     carried = policy.classes
     const has = policy.remoteChainSelectors.includes(C)
     let initId: string | undefined
@@ -324,7 +359,12 @@ export async function expandEnablement(
           'solana.detachFromPoolGroupDefault',
           `policy ${parsed.policy}'s chain record of ${C} takes ${section.policyClass} from the policy default: writing it detaches it; pass true to agree`,
         )
-      const id = stepId(ctx, 'editPoolGroupPolicyChainRecord', C, `${parsed.policy}-${section.policyClass}`)
+      const id = stepId(
+        ctx,
+        'editPoolGroupPolicyChainRecord',
+        C,
+        `${parsed.policy}-${section.policyClass}`,
+      )
       policyIds.push(id)
       specs.push(
         opStep(
@@ -362,7 +402,8 @@ export async function expandEnablement(
   for (const table of parsed.lookupTables) {
     const { value } = await ctx.chain.connection.getAddressLookupTable(new PublicKey(table))
     const held = value?.state.addresses.map((a) => a.toBase58()) ?? []
-    if (!value || held.includes(recordAddress.toBase58()) || !held.some((a) => others.has(a))) continue
+    if (!value || held.includes(recordAddress.toBase58()) || !held.some((a) => others.has(a)))
+      continue
     const authority = value.state.authority?.toBase58()
     if (!authority) continue
     const id = stepId(ctx, 'appendToChainRecordLookupTable', C, table)
@@ -396,7 +437,9 @@ export async function expandEnablement(
             generate: (payer) =>
               Promise.resolve({ transactions: [toPlannerTx(tx(payer), payer, [])], findings: [] }),
             execute: async (wallet) => ({
-              hashes: [(await submit(ctx.chain, wallet, tx(wallet.publicKey.toBase58()), NAME)).hash],
+              hashes: [
+                (await submit(ctx.chain, wallet, tx(wallet.publicKey.toBase58()), NAME)).hash,
+              ],
               findings: [],
             }),
           },
@@ -408,7 +451,9 @@ export async function expandEnablement(
   // ── who is admitted after the plan, and who lists the chain ──
   const members = state.members
   const admittedAfter = (mint: string) =>
-    parsed.tokens === 'all-members' ? members.has(mint) : parsed.tokens.includes(mint) || (!!record && recordAdmits(record, mint))
+    parsed.tokens === 'all-members'
+      ? members.has(mint)
+      : parsed.tokens.includes(mint) || (!!record && recordAdmits(record, mint))
   const listsAfter = (mint: string) =>
     parsed.remoteTokens.some((r) => r.mint === mint) ||
     !!members.get(mint)?.remoteTokens.some((t) => t.remoteChainSelectors.includes(C))
@@ -420,7 +465,11 @@ export async function expandEnablement(
   const upserts = parsed.remoteTokens.filter((r, i) => {
     const member = members.get(r.mint)
     if (!member || member.poolGroupAddress !== g.toBase58())
-      throw new CCTParamsInvalidError(NAME, `remoteTokens[${i}].tokenAddress`, `${r.mint} is not a member of the pool group: onboard it first (onboardMultiTokenPoolTokens)`)
+      throw new CCTParamsInvalidError(
+        NAME,
+        `remoteTokens[${i}].tokenAddress`,
+        `${r.mint} is not a member of the pool group: onboard it first (onboardMultiTokenPoolTokens)`,
+      )
     return !memberHas(member.remoteTokens, C, r)
   })
   const byOwner = new Map<string, typeof upserts>()
@@ -434,7 +483,7 @@ export async function expandEnablement(
       const id = stepId(ctx, 'setPoolGroupMemberRemoteTokens', C, n++)
       const ack = isLive
         ? chunk
-            .filter((r) => record && recordAdmits(record, r.mint) && !laneOf(state, r.mint, C))
+            .filter((r) => recordAdmits(record, r.mint) && !laneOf(state, r.mint, C))
             .map((r) => ({ tokenAddress: r.mint, remoteChainSelector: C }))
         : []
       needsAck.push(...ack)
@@ -470,7 +519,11 @@ export async function expandEnablement(
   const listTokens = parsed.tokens === 'all-members' ? [] : parsed.tokens
   listTokens.forEach((m, i) => {
     if (!members.has(m))
-      throw new CCTParamsInvalidError(NAME, `tokenAddresses[${i}]`, `${m} is not a member of the pool group yet: onboard it first, or admit 'all-members'`)
+      throw new CCTParamsInvalidError(
+        NAME,
+        `tokenAddresses[${i}]`,
+        `${m} is not a member of the pool group yet: onboard it first, or admit 'all-members'`,
+      )
   })
   const laneMode = parsed.tokens === 'all-members' ? 'all-members' : 'subset'
   const pauseId = stepId(ctx, 'pausePoolGroupChainLanes', C)
@@ -492,7 +545,10 @@ export async function expandEnablement(
     const missing = listTokens.filter((m) => !recordAdmits(record, m))
     const widen = laneMode === 'all-members' && record.laneMode !== 'all-members'
     if (missing.length || widen) {
-      const newly = mints.filter((m) => !recordAdmits(record, m) && admittedAfter(m) && listsAfter(m) && !laneOf(state, m, C))
+      const newly = mints.filter(
+        (m) =>
+          !recordAdmits(record, m) && admittedAfter(m) && listsAfter(m) && !laneOf(state, m, C),
+      )
       const ack = isLive ? newly.map((m) => ({ tokenAddress: m, remoteChainSelector: C })) : []
       needsAck.push(...ack)
       admitId = stepId(ctx, 'admitPoolGroupMembers', C)
@@ -512,7 +568,11 @@ export async function expandEnablement(
   if (needsAck.length && !parsed.acknowledgeLiveAdmission)
     blockedBy = {
       reason: `${needsAck.length} lane(s) would be admitted on ${C}, which is already live: a live chain is never paused, so pass solana.acknowledgeLiveAdmission: true (each lane is lane-checked before it goes live)`,
-      steps: specs.filter((s) => s.step.name === 'admitPoolGroupMembers' || s.step.name === 'addMemberRemoteTokens').map((s) => s.step.id),
+      steps: specs
+        .filter(
+          (s) => s.step.name === 'admitPoolGroupMembers' || s.step.name === 'addMemberRemoteTokens',
+        )
+        .map((s) => s.step.id),
     }
 
   // ── materialize what is admitted and listed, then assign and sync ──
@@ -525,21 +585,36 @@ export async function expandEnablement(
     ...chunk.flatMap((m) => (upsertIdOf.has(m) ? [upsertIdOf.get(m)!] : [])),
   ])) {
     specs.push(spec)
-    for (const m of toCreate) if (spec.step.writeSet.includes(keys.lane(m, C))) laneStepOf.set(m, spec.step.id)
+    for (const m of toCreate)
+      if (spec.step.writeSet.includes(keys.lane(m, C))) laneStepOf.set(m, spec.step.id)
   }
   const assignIds: string[] = []
   if (parsed.policy !== undefined) {
     const lanes = target
-      .filter((m) => !assignmentHolds(laneOf(state, m, C)?.classSource ?? null, parsed.policy!, carried))
-      .map((m) => ({ mint: m, owner: state.poolOwners.get(m) ?? ctx.actor, current: laneOf(state, m, C)?.classSource ?? null }))
+      .filter(
+        (m) => !assignmentHolds(laneOf(state, m, C)?.classSource ?? null, parsed.policy!, carried),
+      )
+      .map((m) => ({
+        mint: m,
+        owner: state.poolOwners.get(m) ?? ctx.actor,
+        current: laneOf(state, m, C)?.classSource ?? null,
+      }))
     if (lanes.length && carried.includes('security'))
-      findings.push(...securityCopiedFindings(lanes.map((l) => ({ tokenAddress: l.mint, remoteChainSelector: C })), parsed.policy))
+      findings.push(
+        ...securityCopiedFindings(
+          lanes.map((l) => ({ tokenAddress: l.mint, remoteChainSelector: C })),
+          parsed.policy,
+        ),
+      )
     for (const spec of assignSteps(ctx, 'assignPoolGroupLanePolicies', {
       selector: C,
       policyId: parsed.policy,
       carried,
       lanes,
-      dependsOn: (chunk) => [...policyIds, ...chunk.flatMap((m) => (laneStepOf.has(m) ? [laneStepOf.get(m)!] : []))],
+      dependsOn: (chunk) => [
+        ...policyIds,
+        ...chunk.flatMap((m) => (laneStepOf.has(m) ? [laneStepOf.get(m)!] : [])),
+      ],
     })) {
       specs.push(spec)
       assignIds.push(spec.step.id)
@@ -575,9 +650,14 @@ export async function expandEnablement(
   const writes = specs.filter((s) => s.run).map((s) => s.step.id)
   const check = checkStep<Name>(ctx, 'checkLanes', lanes, writes, parsed.check)
   specs.push(check)
-  const pausedNow = pausing || (!!record && record.laneMode !== 'off' && record.drivenLanesPaused)
+  const pausedNow = pausing || record.drivenLanesPaused
   if (parsed.unpause && pausedNow) {
-    const decision = unpauseDecision({ pauseStepId: pauseId, pausePlanned: pausing, landed: ctx.landed, what: `the driven lanes of ${C}` })
+    const decision = unpauseDecision({
+      pauseStepId: pauseId,
+      pausePlanned: pausing,
+      landed: ctx.landed,
+      what: `the driven lanes of ${C}`,
+    })
     if (!decision.lift) blockedBy ??= decision.block
     else
       specs.push(

@@ -55,7 +55,9 @@ export function stepsConflict(
     return x.some((k) => set.has(k))
   }
   return (
-    meets(a.writeSet, b.writeSet) || meets(a.writeSet, b.guardReads) || meets(a.guardReads, b.writeSet)
+    meets(a.writeSet, b.writeSet) ||
+    meets(a.writeSet, b.guardReads) ||
+    meets(a.guardReads, b.writeSet)
   )
 }
 

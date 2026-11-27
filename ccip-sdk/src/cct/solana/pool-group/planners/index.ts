@@ -95,7 +95,10 @@ function contextOf(
 }
 
 /** The wallet of a signed planner call (the Squads executor is refused: a vault executes proposals). */
-function walletOf(operation: string, params: { wallet: unknown; solana?: { budget?: SolanaTxBudget } }) {
+function walletOf(
+  operation: string,
+  params: { wallet: unknown; solana?: { budget?: SolanaTxBudget } },
+) {
   if (!isWallet(params.wallet)) throw new CCIPWalletInvalidError(params.wallet)
   if (params.solana?.budget?.executor === 'squads-v4')
     throw new CCTParamsInvalidError(
@@ -112,7 +115,11 @@ const payerOf = (operation: string, payer: unknown) => parsePublicKey(operation,
 /** A flow: how to parse its params into a context and an expansion. */
 type Flow<Name extends string, P> = {
   name: string
-  prepare(chain: SolanaChain, params: P, payer: PublicKey): {
+  prepare(
+    chain: SolanaChain,
+    params: P,
+    payer: PublicKey,
+  ): {
     ctx: PlannerContext
     options: RunOptions
     expand: () => Promise<Expansion<Name>>
@@ -128,14 +135,15 @@ const onboarding: Flow<PoolGroupOnboardingStepName, GenerateOnboardMultiTokenPoo
   },
 }
 
-const enablement: Flow<PoolGroupChainEnablementStepName, GenerateEnableMultiTokenPoolChainParams> = {
-  name: 'enableMultiTokenPoolChain',
-  prepare(chain, params, payer) {
-    const { ref, parsed } = parseEnablement(params)
-    const { ctx, options } = contextOf(this.name, chain, ref, params, payer)
-    return { ctx, options, expand: () => expandEnablement(ctx, parsed) }
-  },
-}
+const enablement: Flow<PoolGroupChainEnablementStepName, GenerateEnableMultiTokenPoolChainParams> =
+  {
+    name: 'enableMultiTokenPoolChain',
+    prepare(chain, params, payer) {
+      const { ref, parsed } = parseEnablement(params)
+      const { ctx, options } = contextOf(this.name, chain, ref, params, payer)
+      return { ctx, options, expand: () => expandEnablement(ctx, parsed) }
+    },
+  }
 
 const removal: Flow<PoolGroupLeaveStepName, GenerateRemoveMultiTokenPoolTokenParams> = {
   name: 'removeMultiTokenPoolToken',
@@ -147,10 +155,11 @@ const removal: Flow<PoolGroupLeaveStepName, GenerateRemoveMultiTokenPoolTokenPar
 }
 
 /** The three forms of one flow. */
-function forms<Name extends string, P extends { payer: string }, E extends { wallet: unknown; computeUnits?: number; solana?: { budget?: SolanaTxBudget } }>(
-  flow: Flow<Name, P>,
-  toGenerate: (e: E, payer: string) => P,
-) {
+function forms<
+  Name extends string,
+  P extends { payer: string },
+  E extends { wallet: unknown; computeUnits?: number; solana?: { budget?: SolanaTxBudget } },
+>(flow: Flow<Name, P>, toGenerate: (e: E, payer: string) => P) {
   return {
     plan(chain: SolanaChain, params: P): Promise<PoolGroupPlan<Name>> {
       const { ctx, options, expand } = flow.prepare(chain, params, payerOf(flow.name, params.payer))
@@ -163,7 +172,11 @@ function forms<Name extends string, P extends { payer: string }, E extends { wal
     execute(chain: SolanaChain, params: E): Promise<ExecutePoolGroupPlanResult<Name>> {
       const wallet = walletOf(flow.name, params)
       const payer = wallet.publicKey.toBase58()
-      const { ctx, options, expand } = flow.prepare(chain, toGenerate(params, payer), new PublicKey(payer))
+      const { ctx, options, expand } = flow.prepare(
+        chain,
+        toGenerate(params, payer),
+        new PublicKey(payer),
+      )
       return executeFlow(ctx, expand, options, wallet, params.computeUnits)
     },
   }
@@ -171,16 +184,19 @@ function forms<Name extends string, P extends { payer: string }, E extends { wal
 
 /** The shared planners, by flow; the facade on `SolanaTokenManager` delegates here. @internal */
 export const SOLANA_MULTI_TOKEN_POOL_PLANNERS = {
-  onboarding: forms<PoolGroupOnboardingStepName, GenerateOnboardMultiTokenPoolTokensParams, ExecuteOnboardMultiTokenPoolTokensParams>(
-    onboarding,
-    ({ wallet: _w, computeUnits: _c, ...rest }, payer) => ({ ...rest, payer }),
-  ),
-  chainEnablement: forms<PoolGroupChainEnablementStepName, GenerateEnableMultiTokenPoolChainParams, ExecuteEnableMultiTokenPoolChainParams>(
-    enablement,
-    ({ wallet: _w, computeUnits: _c, ...rest }, payer) => ({ ...rest, payer }),
-  ),
-  tokenRemoval: forms<PoolGroupLeaveStepName, GenerateRemoveMultiTokenPoolTokenParams, ExecuteRemoveMultiTokenPoolTokenParams>(
-    removal,
-    ({ wallet: _w, computeUnits: _c, ...rest }, payer) => ({ ...rest, payer }),
-  ),
+  onboarding: forms<
+    PoolGroupOnboardingStepName,
+    GenerateOnboardMultiTokenPoolTokensParams,
+    ExecuteOnboardMultiTokenPoolTokensParams
+  >(onboarding, ({ wallet: _w, computeUnits: _c, ...rest }, payer) => ({ ...rest, payer })),
+  chainEnablement: forms<
+    PoolGroupChainEnablementStepName,
+    GenerateEnableMultiTokenPoolChainParams,
+    ExecuteEnableMultiTokenPoolChainParams
+  >(enablement, ({ wallet: _w, computeUnits: _c, ...rest }, payer) => ({ ...rest, payer })),
+  tokenRemoval: forms<
+    PoolGroupLeaveStepName,
+    GenerateRemoveMultiTokenPoolTokenParams,
+    ExecuteRemoveMultiTokenPoolTokenParams
+  >(removal, ({ wallet: _w, computeUnits: _c, ...rest }, payer) => ({ ...rest, payer })),
 } as const

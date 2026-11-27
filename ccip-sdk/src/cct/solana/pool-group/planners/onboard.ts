@@ -16,10 +16,14 @@ import type {
   MultiTokenPoolLaneFinding,
   MultiTokenPoolPlanBlock,
 } from '../../../multi-token-pool.ts'
-import { laneFamilyOf, parseRemoteAddress, parseUniqueRemoteAddresses } from '../../../remote-address.ts'
 import {
-  OnboardToken,
+  laneFamilyOf,
+  parseRemoteAddress,
+  parseUniqueRemoteAddresses,
+} from '../../../remote-address.ts'
+import {
   type TokenOnboardingStepName,
+  OnboardToken,
   parseOnboardTokenParams,
   planTokenOnboarding,
   readTokenOnboardingState,
@@ -27,9 +31,9 @@ import {
 import { deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { U64_MAX, validateBigInt, validateInteger } from '../../validate.ts'
 import { poolGroupPdas } from '../accounts.ts'
+import { POOL_GROUP_CHAIN_OPERATIONS } from '../operations/chains.ts'
 import { parsePoolGroupProgram, parsePoolGroupRef } from '../operations/common.ts'
 import { GetPoolGroupPolicy } from '../operations/get-pool-group-policy.ts'
-import { POOL_GROUP_CHAIN_OPERATIONS } from '../operations/chains.ts'
 import { POOL_GROUP_LANE_OPERATIONS } from '../operations/lanes.ts'
 import { POOL_GROUP_LIFECYCLE_OPERATIONS } from '../operations/lifecycle.ts'
 import { parseMemberChains } from '../operations/members-common.ts'
@@ -144,26 +148,45 @@ export function parseOnboarding(params: GenerateOnboardMultiTokenPoolTokensParam
       )
     poolGroupId = Keypair.generate().publicKey.toBase58()
   }
-  const ref = parsePoolGroupRef(NAME, {
-    ...params,
-    poolProgramAddress: program.toBase58(),
-    ...(poolGroupId !== undefined && params.poolGroupAddress === undefined && { poolGroupId }),
-  })
+  if (params.poolGroupAddress !== undefined && params.poolGroupId !== undefined)
+    throw new CCTParamsInvalidError(
+      NAME,
+      'poolGroupAddress',
+      'pass exactly one of poolGroupAddress and poolGroupId',
+    )
+  const ref = parsePoolGroupRef(
+    NAME,
+    params.poolGroupAddress !== undefined
+      ? {
+          poolProgramAddress: program.toBase58(),
+          poolGroupAddress: params.poolGroupAddress,
+          ...(params.expectedOwner !== undefined && { expectedOwner: params.expectedOwner }),
+        }
+      : {
+          poolProgramAddress: program.toBase58(),
+          poolGroupId: poolGroupId ?? '',
+          ...(params.expectedOwner !== undefined && { expectedOwner: params.expectedOwner }),
+        },
+  )
   if (!Array.isArray(params.tokens) || !params.tokens.length)
     throw new CCTParamsInvalidError(NAME, 'tokens', 'must be a non-empty array')
-  const laneKind = solana.laneKind ?? 'driven'
-  if (laneKind !== 'driven' && laneKind !== 'linked')
+  const kind: unknown = solana.laneKind ?? 'driven'
+  if (kind !== 'driven' && kind !== 'linked')
     throw new CCTParamsInvalidError(NAME, 'solana.laneKind', "must be 'driven' or 'linked'")
+  const laneKind = kind
   const seen = new Set<string>()
   const tokens = params.tokens.map((t, i): ParsedOnboardingToken => {
     const at = `tokens[${i}]`
-    if (typeof t !== 'object' || t === null)
+    const raw: unknown = t
+    if (typeof raw !== 'object' || raw === null)
       throw new CCTParamsInvalidError(NAME, at, 'must be an object')
-    if (Reflect.get(t, 'evm') !== undefined)
-      throw new CCTParamsInvalidError(NAME, `${at}.evm`, 'an EVM block on a Solana token: use `solana`')
-    const mint = new PublicKey(
-      parseRemoteAddressOrThrow(at, t.tokenAddress),
-    ).toBase58()
+    if (Reflect.get(raw, 'evm') !== undefined)
+      throw new CCTParamsInvalidError(
+        NAME,
+        `${at}.evm`,
+        'an EVM block on a Solana token: use `solana`',
+      )
+    const mint = new PublicKey(parseRemoteAddressOrThrow(at, t.tokenAddress)).toBase58()
     if (seen.has(mint))
       throw new CCTParamsInvalidError(NAME, `${at}.tokenAddress`, 'must name each token once')
     seen.add(mint)
@@ -174,23 +197,42 @@ export function parseOnboarding(params: GenerateOnboardMultiTokenPoolTokensParam
       const rp = `${at}.remoteTokens[${j}]`
       validateBigInt(NAME, `${rp}.remoteChainSelector`, r.remoteChainSelector, 1n, U64_MAX)
       if (chains.has(r.remoteChainSelector))
-        throw new CCTParamsInvalidError(NAME, `${rp}.remoteChainSelector`, 'must list each chain once')
+        throw new CCTParamsInvalidError(
+          NAME,
+          `${rp}.remoteChainSelector`,
+          'must list each chain once',
+        )
       chains.add(r.remoteChainSelector)
       validateInteger(NAME, `${rp}.remoteTokenDecimals`, r.remoteTokenDecimals, 0, 255)
       return {
         selector: r.remoteChainSelector,
-        token: parseRemoteAddress(NAME, `${rp}.remoteTokenAddress`, r.remoteTokenAddress, r.remoteChainSelector),
+        token: parseRemoteAddress(
+          NAME,
+          `${rp}.remoteTokenAddress`,
+          r.remoteTokenAddress,
+          r.remoteChainSelector,
+        ),
         decimals: r.remoteTokenDecimals,
       }
     })
     if (t.policy !== undefined) validateInteger(NAME, `${at}.policy`, t.policy, 0, 255)
     const s = t.solana ?? {}
-    if (s.poolType !== undefined && s.poolType !== 'burn-mint')
-      throw new CCTParamsInvalidError(NAME, `${at}.solana.poolType`, "only 'burn-mint' pools join a pool group")
+    const poolType: unknown = s.poolType
+    if (poolType !== undefined && poolType !== 'burn-mint')
+      throw new CCTParamsInvalidError(
+        NAME,
+        `${at}.solana.poolType`,
+        "only 'burn-mint' pools join a pool group",
+      )
     const remotePoolAddresses =
       laneKind === 'linked' && s.remotePoolAddresses
         ? remotes.length
-          ? parseUniqueRemoteAddresses(NAME, `${at}.solana.remotePoolAddresses`, s.remotePoolAddresses, remotes[0]!.selector)
+          ? parseUniqueRemoteAddresses(
+              NAME,
+              `${at}.solana.remotePoolAddresses`,
+              s.remotePoolAddresses,
+              remotes[0]!.selector,
+            )
           : []
         : []
     return {
@@ -204,19 +246,30 @@ export function parseOnboarding(params: GenerateOnboardMultiTokenPoolTokensParam
     }
   })
   const create = solana.create
+  const rawCreate: unknown = create
   if (create !== undefined) {
-    if (typeof create !== 'object' || create === null)
+    if (typeof rawCreate !== 'object' || rawCreate === null)
       throw new CCTParamsInvalidError(NAME, 'solana.create', 'must be an object')
     for (const [i, c] of (create.chains ?? []).entries()) {
-      validateBigInt(NAME, `solana.create.chains[${i}].remoteChainSelector`, c.remoteChainSelector, 1n, U64_MAX)
-      if (c.laneMode !== undefined && c.laneMode !== 'all-members')
+      validateBigInt(
+        NAME,
+        `solana.create.chains[${i}].remoteChainSelector`,
+        c.remoteChainSelector,
+        1n,
+        U64_MAX,
+      )
+      const laneMode: unknown = c.laneMode
+      if (laneMode !== undefined && laneMode !== 'all-members')
         throw new CCTParamsInvalidError(
           NAME,
           `solana.create.chains[${i}].laneMode`,
           "only 'all-members' at creation: a subset needs member indices, which exist only after the joins (add them with enableMultiTokenPoolChain)",
         )
       const pools = c.sections?.find((x) => x.policyClass === 'connection')
-      if (c.laneMode && !(pools?.policyClass === 'connection' && pools.connection.remotePools?.length))
+      if (
+        c.laneMode &&
+        !(pools?.policyClass === 'connection' && pools.connection.remotePools?.length)
+      )
         throw new CCTParamsInvalidError(
           NAME,
           `solana.create.chains[${i}].sections`,
@@ -236,8 +289,12 @@ export function parseOnboarding(params: GenerateOnboardMultiTokenPoolTokensParam
       check: {
         ...(params.getChain && { getChain: params.getChain }),
         ...(params.remoteAttestations && { remoteAttestations: params.remoteAttestations }),
-        ...(params.minDestGasOverhead !== undefined && { minDestGasOverhead: params.minDestGasOverhead }),
-        ...(params.maxTransferFeeBps !== undefined && { maxTransferFeeBps: params.maxTransferFeeBps }),
+        ...(params.minDestGasOverhead !== undefined && {
+          minDestGasOverhead: params.minDestGasOverhead,
+        }),
+        ...(params.maxTransferFeeBps !== undefined && {
+          maxTransferFeeBps: params.maxTransferFeeBps,
+        }),
       },
     },
   }
@@ -271,7 +328,10 @@ export function memberRemoteTokensOf(
 }
 
 /** Whether a member's stored remote tokens are exactly `remotes`. */
-function memberMatches(stored: PoolGroupMemberRemoteToken[], remotes: ParsedOnboardingToken['remotes']) {
+function memberMatches(
+  stored: PoolGroupMemberRemoteToken[],
+  remotes: ParsedOnboardingToken['remotes'],
+) {
   const have = parseMemberChains(NAME, 'member', stored)
   const want = parseMemberChains(NAME, 'tokens', memberRemoteTokensOf(remotes))
   if (have.size !== want.size) return false
@@ -369,7 +429,9 @@ function tokenSpecs(
                 return {
                   transactions: r.transactions.map((tx) => toPlannerTx(tx, r.payer, [token.mint])),
                   findings: [],
-                  ...(r.lookupTableAddress && { created: { lookupTableAddress: r.lookupTableAddress } }),
+                  ...(r.lookupTableAddress && {
+                    created: { lookupTableAddress: r.lookupTableAddress },
+                  }),
                 }
               },
               // the signed form runs every remaining onboardToken step of the mint at once
@@ -385,7 +447,10 @@ function tokenSpecs(
           }
         : {
             // later steps of the mint are built after the earlier ones land
-            evaluate: () => Promise.resolve({ reason: `waits for the earlier onboardToken steps of ${token.mint}` }),
+            evaluate: () =>
+              Promise.resolve({
+                reason: `waits for the earlier onboardToken steps of ${token.mint}`,
+              }),
           },
     )
     previous = [id]
@@ -408,7 +473,10 @@ export async function expandOnboarding(
 ): Promise<Expansion<Name>> {
   const created = createChains(parsed.create)
   const selectors = [
-    ...new Set([...parsed.tokens.flatMap((t) => t.remotes.map((r) => r.selector)), ...created.keys()]),
+    ...new Set([
+      ...parsed.tokens.flatMap((t) => t.remotes.map((r) => r.selector)),
+      ...created.keys(),
+    ]),
   ]
   const mints = parsed.tokens.map((t) => t.mint)
   const state = await readPlanState(ctx, { selectors, mints })
@@ -419,14 +487,20 @@ export async function expandOnboarding(
 
   // ── the pool group ──
   if (!state.group && !parsed.create)
-    throw new CCTParamsInvalidError(NAME, 'poolGroupAddress', `no pool group at ${g.toBase58()}: pass solana.create to create it`)
+    throw new CCTParamsInvalidError(
+      NAME,
+      'poolGroupAddress',
+      `no pool group at ${g.toBase58()}: pass solana.create to create it`,
+    )
   if (state.group && parsed.create && state.group.owner !== ctx.actor)
     throw new CCTParamsInvalidError(
       NAME,
       'solana.create',
       `the pool group at ${g.toBase58()} exists and is owned by ${state.group.owner}, not ${ctx.actor}: it may be a squatter's; pick another id`,
     )
-  const missingChains = [...created.keys()].filter((c) => !state.group?.remoteChainSelectors.includes(c))
+  const missingChains = [...created.keys()].filter(
+    (c) => !state.group?.remoteChainSelectors.includes(c),
+  )
   let createId: string | undefined
   if (parsed.create && (!state.group || missingChains.length)) {
     createId = stepId(ctx, 'createPoolGroup')
@@ -439,7 +513,9 @@ export async function expandOnboarding(
           id: createId,
           name: 'createPoolGroup',
           operation: 'createPoolGroup',
-          summary: state.group ? `add ${missingChains.length} chain(s) to the pool group` : `create the pool group ${g.toBase58()}`,
+          summary: state.group
+            ? `add ${missingChains.length} chain(s) to the pool group`
+            : `create the pool group ${g.toBase58()}`,
           writeSet: [keys.group(g), ...[...created.keys()].map((s) => keys.chain(g, s))],
           guardReads: [],
           signer: { kind: 'pool-group-owner', on: g.toBase58() },
@@ -450,7 +526,9 @@ export async function expandOnboarding(
           ...(poolGroupId && { poolGroupId }),
           ...(c.maxBpsFee !== undefined && { maxBpsFee: c.maxBpsFee }),
           ...(c.openMembership !== undefined && { openMembership: c.openMembership }),
-          ...(c.minCCVActivationDelay !== undefined && { minCCVActivationDelay: c.minCCVActivationDelay }),
+          ...(c.minCCVActivationDelay !== undefined && {
+            minCCVActivationDelay: c.minCCVActivationDelay,
+          }),
           ...(c.initialRoles && { initialRoles: c.initialRoles }),
           ...(created.size && { initialChains: [...created.keys()] }),
           ...(ctx.budget && { budget: ctx.budget }),
@@ -490,7 +568,10 @@ export async function expandOnboarding(
     specs.push(...ts)
     lastTokenStep.set(token.mint, ts.at(-1)!.step.id)
   }
-  const afterToken = (mint: string) => [...afterCreate, ...(lastTokenStep.has(mint) ? [lastTokenStep.get(mint)!] : [])]
+  const afterToken = (mint: string) => [
+    ...afterCreate,
+    ...(lastTokenStep.has(mint) ? [lastTokenStep.get(mint)!] : []),
+  ]
 
   // ── the driven-lanes pause of chains create moves out of 'off' ──
   const pauseIds = new Map<bigint, string>()
@@ -514,19 +595,33 @@ export async function expandOnboarding(
 
   // ── exact lane set: every listed chain serves the lanes ──
   const modeOf = (selector: bigint) =>
-    pauseIds.has(selector) ? created.get(selector)!.laneMode! : (state.records.get(selector)?.laneMode ?? 'off')
+    pauseIds.has(selector)
+      ? created.get(selector)!.laneMode!
+      : (state.records.get(selector)?.laneMode ?? 'off')
   for (const [i, token] of parsed.tokens.entries())
     for (const [j, r] of token.remotes.entries()) {
       const param = `tokens[${i}].remoteTokens[${j}]`
       if (!state.records.has(r.selector) && !created.has(r.selector))
-        throw new CCTParamsInvalidError(NAME, param, `the pool group has no chain record for ${r.selector}: enable the chain first (enableMultiTokenPoolChain)`)
+        throw new CCTParamsInvalidError(
+          NAME,
+          param,
+          `the pool group has no chain record for ${r.selector}: enable the chain first (enableMultiTokenPoolChain)`,
+        )
       if (parsed.laneKind === 'linked') continue
       const mode = modeOf(r.selector)
       if (mode === 'off')
-        throw new CCTParamsInvalidError(NAME, param, `the chain record of ${r.selector} is 'off': enable the chain first (enableMultiTokenPoolChain), so the token's driven lane can exist`)
+        throw new CCTParamsInvalidError(
+          NAME,
+          param,
+          `the chain record of ${r.selector} is 'off': enable the chain first (enableMultiTokenPoolChain), so the token's driven lane can exist`,
+        )
       const record = state.records.get(r.selector)
       if (mode === 'subset' && record && !recordAdmits(record, token.mint))
-        throw new CCTParamsInvalidError(NAME, param, `the chain record of ${r.selector} admits a subset that lacks ${token.mint}, so its lane would not exist: add it with enableMultiTokenPoolChain`)
+        throw new CCTParamsInvalidError(
+          NAME,
+          param,
+          `the chain record of ${r.selector} admits a subset that lacks ${token.mint}, so its lane would not exist: add it with enableMultiTokenPoolChain`,
+        )
     }
 
   // ── membership (driven) or linked lanes ──
@@ -542,9 +637,17 @@ export async function expandOnboarding(
       const member = state.members.get(token.mint)
       if (member) {
         if (member.poolGroupAddress !== g.toBase58())
-          throw new CCTParamsInvalidError(NAME, `tokens[${i}].tokenAddress`, `${token.mint} is a member of another pool group (${member.poolGroupAddress}): remove it there first`)
+          throw new CCTParamsInvalidError(
+            NAME,
+            `tokens[${i}].tokenAddress`,
+            `${token.mint} is a member of another pool group (${member.poolGroupAddress}): remove it there first`,
+          )
         if (!memberMatches(member.remoteTokens, token.remotes))
-          throw new CCTParamsInvalidError(NAME, `tokens[${i}].remoteTokens`, `${token.mint} is a member already, listing other remote tokens: change them with enableMultiTokenPoolChain's remoteTokens, or remove the token first`)
+          throw new CCTParamsInvalidError(
+            NAME,
+            `tokens[${i}].remoteTokens`,
+            `${token.mint} is a member already, listing other remote tokens: change them with enableMultiTokenPoolChain's remoteTokens, or remove the token first`,
+          )
         continue
       }
       joining.push({ token, owner: state.poolOwners.get(token.mint) ?? ctx.actor })
@@ -577,7 +680,9 @@ export async function expandOnboarding(
               dependsOn: chunk.flatMap((t) => afterToken(t.mint)),
               summary: `${chunk.length} token(s) join the pool group`,
               writeSet: chunk.map((t) => keys.member(t.mint)),
-              guardReads: [...new Set(chunk.flatMap((t) => t.remotes.map((r) => keys.chain(g, r.selector))))],
+              guardReads: [
+                ...new Set(chunk.flatMap((t) => t.remotes.map((r) => keys.chain(g, r.selector)))),
+              ],
               signer: poolOwnerSigner(ctx, owner),
               progress: chunk.length,
             },
@@ -585,7 +690,8 @@ export async function expandOnboarding(
             {
               ...opBase(ctx),
               poolGroupMembers: members,
-              ...(admitted.length && parsed.acknowledgeLiveAdmission && { acknowledgeLiveAdmission: admitted }),
+              ...(admitted.length &&
+                parsed.acknowledgeLiveAdmission && { acknowledgeLiveAdmission: admitted }),
             },
           ),
         )
@@ -604,10 +710,19 @@ export async function expandOnboarding(
           (pauseIds.has(selector) || recordAdmitsOrAll(state, selector, t.mint)),
       )
       if (!needs.length) continue
-      for (const spec of materializeSteps(ctx, 'materializePoolGroupLanes', selector, needs.map((t) => t.mint), (chunk) => [
-        ...(pauseIds.has(selector) ? [pauseIds.get(selector)!] : []),
-        ...chunk.flatMap((m) => [...(joinIdOf.has(m) ? [joinIdOf.get(m)!] : []), ...afterToken(m)]),
-      ])) {
+      for (const spec of materializeSteps(
+        ctx,
+        'materializePoolGroupLanes',
+        selector,
+        needs.map((t) => t.mint),
+        (chunk) => [
+          ...(pauseIds.has(selector) ? [pauseIds.get(selector)!] : []),
+          ...chunk.flatMap((m) => [
+            ...(joinIdOf.has(m) ? [joinIdOf.get(m)!] : []),
+            ...afterToken(m),
+          ]),
+        ],
+      )) {
         specs.push(spec)
         for (const key of spec.step.writeSet)
           if (key.startsWith('lane:')) laneStepOf.set(key, spec.step.id)
@@ -619,7 +734,11 @@ export async function expandOnboarding(
       const fresh = needs.filter((t) => {
         const lane = laneOf(state, t.mint, selector)
         if (lane && lane.poolGroupAddress !== g.toBase58())
-          throw new CCTParamsInvalidError(NAME, 'tokens', `${t.mint} has a lane toward ${selector} that is not linked to this pool group: link it with linkPoolGroupLanes, or remove it`)
+          throw new CCTParamsInvalidError(
+            NAME,
+            'tokens',
+            `${t.mint} has a lane toward ${selector} that is not linked to this pool group: link it with linkPoolGroupLanes, or remove it`,
+          )
         return !lane
       })
       const byOwner = new Map<string, ParsedOnboardingToken[]>()
@@ -659,7 +778,12 @@ export async function expandOnboarding(
                     remotePoolAddresses: t.remotePoolAddresses,
                   }
                 }),
-                classSource: { connection: 'default', fee: 'default', rateLimit: 'default', security: 'default' },
+                classSource: {
+                  connection: 'default',
+                  fee: 'default',
+                  rateLimit: 'default',
+                  security: 'default',
+                },
               },
             ),
           )
@@ -668,7 +792,9 @@ export async function expandOnboarding(
   }
 
   // ── policies ──
-  const policyIds = [...new Set(parsed.tokens.flatMap((t) => (t.policy !== undefined ? [t.policy] : [])))]
+  const policyIds = [
+    ...new Set(parsed.tokens.flatMap((t) => (t.policy !== undefined ? [t.policy] : []))),
+  ]
   for (const policyId of policyIds) {
     const policy = await new GetPoolGroupPolicy().query(ctx.chain, {
       poolProgramAddress: ctx.ref.program.toBase58(),
@@ -677,7 +803,9 @@ export async function expandOnboarding(
     })
     const carried: PoolGroupPolicyClass[] = policy.classes
     for (const selector of selectors) {
-      const tokens = parsed.tokens.filter((t) => t.policy === policyId && t.remotes.some((r) => r.selector === selector))
+      const tokens = parsed.tokens.filter(
+        (t) => t.policy === policyId && t.remotes.some((r) => r.selector === selector),
+      )
       if (!tokens.length) continue
       if (!policy.remoteChainSelectors.includes(selector))
         throw new CCTParamsInvalidError(
@@ -686,7 +814,14 @@ export async function expandOnboarding(
           `policy ${policyId} has no chain record for ${selector}: run enableMultiTokenPoolChain with policy ${policyId} first`,
         )
       const lanes = tokens
-        .filter((t) => !assignmentHolds(laneOf(state, t.mint, selector)?.classSource ?? null, policyId, carried))
+        .filter(
+          (t) =>
+            !assignmentHolds(
+              laneOf(state, t.mint, selector)?.classSource ?? null,
+              policyId,
+              carried,
+            ),
+        )
         .map((t) => ({
           mint: t.mint,
           owner: state.poolOwners.get(t.mint) ?? ctx.actor,
@@ -694,17 +829,23 @@ export async function expandOnboarding(
         }))
       if (!lanes.length) continue
       if (carried.includes('security'))
-        findings.push(...securityCopiedFindings(lanes.map((l) => ({ tokenAddress: l.mint, remoteChainSelector: selector })), policyId))
+        findings.push(
+          ...securityCopiedFindings(
+            lanes.map((l) => ({ tokenAddress: l.mint, remoteChainSelector: selector })),
+            policyId,
+          ),
+        )
       specs.push(
         ...assignSteps(ctx, 'assignPoolGroupLanePolicies', {
           selector,
           policyId,
           carried,
           lanes,
-          dependsOn: (chunk) => chunk.flatMap((m) => {
-            const s = laneStepOf.get(keys.lane(m, selector))
-            return s ? [s] : []
-          }),
+          dependsOn: (chunk) =>
+            chunk.flatMap((m) => {
+              const s = laneStepOf.get(keys.lane(m, selector))
+              return s ? [s] : []
+            }),
         }),
       )
     }
@@ -712,16 +853,24 @@ export async function expandOnboarding(
 
   // ── check, then lift this run's pauses ──
   const writes = specs.filter((s) => s.run).map((s) => s.step.id)
-  const allLanes = parsed.tokens.flatMap((t) => t.remotes.map((r) => ({ tokenAddress: t.mint, remoteChainSelector: r.selector })))
+  const allLanes = parsed.tokens.flatMap((t) =>
+    t.remotes.map((r) => ({ tokenAddress: t.mint, remoteChainSelector: r.selector })),
+  )
   const check = checkStep<Name>(ctx, 'checkLanes', allLanes, writes, parsed.check)
   specs.push(check)
   if (parsed.unpause)
     for (const selector of selectors) {
       const record = state.records.get(selector)
-      const pausedNow = pauseIds.has(selector) || (record?.laneMode !== 'off' && record?.drivenLanesPaused)
+      const pausedNow =
+        pauseIds.has(selector) || (record?.laneMode !== 'off' && record?.drivenLanesPaused)
       if (!pausedNow) continue
       const pauseStepId = stepId(ctx, 'pausePoolGroupChainLanes', selector)
-      const decision = unpauseDecision({ pauseStepId, pausePlanned: pauseIds.has(selector), landed: ctx.landed, what: `the driven lanes of ${selector}` })
+      const decision = unpauseDecision({
+        pauseStepId,
+        pausePlanned: pauseIds.has(selector),
+        landed: ctx.landed,
+        what: `the driven lanes of ${selector}`,
+      })
       if (!decision.lift) {
         blockedBy ??= decision.block
         continue
@@ -744,7 +893,11 @@ export async function expandOnboarding(
     ...(blockedBy && { blockedBy }),
     findings,
     observedAt: state.slot,
-    ...(state.group ? { poolGroupId: state.group.poolGroupId } : parsed.poolGroupId ? { poolGroupId: parsed.poolGroupId } : {}),
+    ...(state.group
+      ? { poolGroupId: state.group.poolGroupId }
+      : parsed.poolGroupId
+        ? { poolGroupId: parsed.poolGroupId }
+        : {}),
     poolGroupAddress: g.toBase58(),
   }
 }
@@ -765,11 +918,11 @@ export function sectionStep<N extends string>(
   dependsOn: string[],
   detach = true,
 ): StepSpec<N> {
-  const roles = { connection: ['connectionAdmin'], fee: ['feeAdmin'], rateLimit: ['rateLimitAdmin'] }[
-    section.policyClass === 'connection' || section.policyClass === 'fee' || section.policyClass === 'rateLimit'
-      ? section.policyClass
-      : 'connection'
-  ]
+  const roles = {
+    connection: ['connectionAdmin'],
+    fee: ['feeAdmin'],
+    rateLimit: ['rateLimitAdmin'],
+  }[section.policyClass]
   return opStep(
     ctx,
     {
@@ -793,4 +946,5 @@ export function sectionStep<N extends string>(
 }
 
 /** The pool group PDA of an id under a program. @internal */
-export const poolGroupOf = (program: PublicKey, id: string) => poolGroupPdas.group(program, new PublicKey(id))
+export const poolGroupOf = (program: PublicKey, id: string) =>
+  poolGroupPdas.group(program, new PublicKey(id))

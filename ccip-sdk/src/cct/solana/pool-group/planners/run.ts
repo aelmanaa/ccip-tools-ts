@@ -71,7 +71,7 @@ export async function evaluatePlan<Name extends string>(
   const blocks: MultiTokenPoolPlanBlock[] = expansion.blockedBy ? [expansion.blockedBy] : []
   const held = new Set<string>(expansion.blockedBy?.steps ?? [])
   // virtual steps whose dependencies landed are judged now; a pass frees what depends on them
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false
     const remaining = new Set(specs.map((s) => s.step.id))
     for (const spec of specs) {
@@ -196,7 +196,7 @@ export async function executeFlow<Name extends string>(
   try {
     let last: { id: string; progress: number; findings: MultiTokenPoolLaneFinding[] } | undefined
     for (;;) {
-      if (options.signal?.aborted) throw options.signal.reason ?? new Error('aborted')
+      options.signal?.throwIfAborted()
       refreshAccountState(ctx.chain)
       let evaluated = await evaluatePlan(ctx, expand, options, walletActor)
       const stillThere = () =>

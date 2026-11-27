@@ -13,20 +13,19 @@ import { PublicKey } from '@solana/web3.js'
 
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
-  LONG_POOL_DATA_BYTES,
   type MultiTokenPoolLaneKey,
   type MultiTokenPoolPlanBlock,
+  LONG_POOL_DATA_BYTES,
   longPoolDataBytes,
 } from '../../../multi-token-pool.ts'
 import { decodeRemoteAddress } from '../../../remote-address.ts'
-import { EditChainConfigV2 } from '../../token-pool/operations/edit-chain-config-v2.ts'
 import { readTokenPoolChainConfigV2 } from '../../token-pool/operations/chain-config-v2.ts'
+import { EditChainConfigV2 } from '../../token-pool/operations/edit-chain-config-v2.ts'
 import { U64_MAX, parsePublicKey, validateBigInt } from '../../validate.ts'
 import { isUnread } from '../lane.ts'
 import { parsePoolGroupRef } from '../operations/common.ts'
-import { GetPoolGroup } from '../operations/get-pool-group.ts'
 import { GetPoolGroupChain } from '../operations/get-pool-group-chain.ts'
-import { GetPoolGroupMembers } from '../operations/get-pool-group-members.ts'
+import { GetPoolGroup } from '../operations/get-pool-group.ts'
 import { readPoolGroupLaneStates } from '../operations/lane.ts'
 import { POOL_GROUP_LANE_OPERATIONS } from '../operations/lanes.ts'
 import { POOL_GROUP_MEMBERSHIP_OPERATIONS } from '../operations/membership.ts'
@@ -43,11 +42,8 @@ import {
   stepId,
   toPlannerTx,
 } from './context.ts'
-import { opBase, opStep, poolOwnerSigner } from './flow-common.ts'
-import type {
-  GenerateRemoveMultiTokenPoolTokenParams,
-  PoolGroupLeaveStepName,
-} from './types.ts'
+import { membersAmong, opBase, opStep, poolOwnerSigner } from './flow-common.ts'
+import type { GenerateRemoveMultiTokenPoolTokenParams, PoolGroupLeaveStepName } from './types.ts'
 
 const NAME = 'removeMultiTokenPoolToken'
 type Name = PoolGroupLeaveStepName
@@ -75,18 +71,36 @@ export function parseRemoval(params: GenerateRemoveMultiTokenPoolTokenParams): {
   let selectors: bigint[] | undefined
   if (solana.remoteChainSelectors !== undefined) {
     if (!Array.isArray(solana.remoteChainSelectors) || !solana.remoteChainSelectors.length)
-      throw new CCTParamsInvalidError(NAME, 'solana.remoteChainSelectors', 'must be a non-empty array')
+      throw new CCTParamsInvalidError(
+        NAME,
+        'solana.remoteChainSelectors',
+        'must be a non-empty array',
+      )
     selectors = solana.remoteChainSelectors.map((s, i) => {
       validateBigInt(NAME, `solana.remoteChainSelectors[${i}]`, s, 1n, U64_MAX)
       return s
     })
     if (new Set(selectors).size !== selectors.length)
-      throw new CCTParamsInvalidError(NAME, 'solana.remoteChainSelectors', 'must list each chain once')
+      throw new CCTParamsInvalidError(
+        NAME,
+        'solana.remoteChainSelectors',
+        'must list each chain once',
+      )
   }
   const confirmed = new Set<string>()
   for (const [i, l] of (solana.confirmInFlightDrained ?? []).entries()) {
-    const m = parsePublicKey(NAME, `solana.confirmInFlightDrained[${i}].tokenAddress`, l.tokenAddress).toBase58()
-    validateBigInt(NAME, `solana.confirmInFlightDrained[${i}].remoteChainSelector`, l.remoteChainSelector, 1n, U64_MAX)
+    const m = parsePublicKey(
+      NAME,
+      `solana.confirmInFlightDrained[${i}].tokenAddress`,
+      l.tokenAddress,
+    ).toBase58()
+    validateBigInt(
+      NAME,
+      `solana.confirmInFlightDrained[${i}].remoteChainSelector`,
+      l.remoteChainSelector,
+      1n,
+      U64_MAX,
+    )
     confirmed.add(laneKeyOf({ tokenAddress: m, remoteChainSelector: l.remoteChainSelector }))
   }
   return { ref, parsed: { mint, ...(selectors && { selectors }), confirmed } }
@@ -117,7 +131,10 @@ async function remoteOutboundStopped(
   lane: LeavingLane,
 ): Promise<{ stopped: boolean } | { unread: string }> {
   const { remoteChainOf } = await import('../../../evm/pool-config-manager/guard-facts.ts')
-  const remote = await remoteChainOf({ ...(ctx.getChain && { getChain: ctx.getChain }) }, lane.key.remoteChainSelector)
+  const remote = await remoteChainOf(
+    { ...(ctx.getChain && { getChain: ctx.getChain }) },
+    lane.key.remoteChainSelector,
+  )
   if ('status' in remote) return { unread: remote.reason }
   const { EVMChain } = await import('../../../../evm/index.ts')
   if (!(remote instanceof EVMChain)) return { unread: 'only an EVM remote side is read' }
@@ -131,7 +148,9 @@ async function remoteOutboundStopped(
         tokenAddress: lane.remoteToken,
         remoteChainSelector: ctx.chain.network.chainSelector,
       })
-      return { stopped: !view.exists || view.outboundStatus.status !== 'ok' || view.stopped.outbound }
+      return {
+        stopped: !view.exists || view.outboundStatus.status !== 'ok' || view.stopped.outbound,
+      }
     } catch (err) {
       reasons.push(`${pool}: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -148,14 +167,13 @@ export async function expandRemoval(
   parsed: ParsedRemoval,
 ): Promise<Expansion<Name>> {
   const g = ctx.ref.group
-  const refParams = { poolProgramAddress: ctx.ref.program.toBase58(), poolGroupAddress: g.toBase58() }
+  const refParams = {
+    poolProgramAddress: ctx.ref.program.toBase58(),
+    poolGroupAddress: g.toBase58(),
+  }
   const slot = BigInt(await ctx.chain.connection.getSlot('confirmed'))
   const group = await new GetPoolGroup().query(ctx.chain, refParams)
-  const { poolGroupMembers } = await new GetPoolGroupMembers().query(ctx.chain, {
-    ...refParams,
-    tokenAddresses: [parsed.mint],
-  })
-  const member = poolGroupMembers.find((m) => m.poolGroupAddress === g.toBase58())
+  const [member] = await membersAmong(ctx, [parsed.mint])
   const memberChains = member?.remoteTokens.flatMap((t) => t.remoteChainSelectors) ?? []
   const inScope = (s: bigint) => !parsed.selectors || parsed.selectors.includes(s)
   const chains = [...new Set([...group.remoteChainSelectors, ...memberChains])].filter(inScope)
@@ -171,10 +189,18 @@ export async function expandRemoval(
   for (const [i, s] of states.entries()) {
     if (!s) continue
     if (isUnread(s))
-      throw new CCTParamsInvalidError(NAME, 'tokenAddress', `the lane of ${parsed.mint} toward ${chains[i]} cannot be read: ${s.reason}`)
+      throw new CCTParamsInvalidError(
+        NAME,
+        'tokenAddress',
+        `the lane of ${parsed.mint} toward ${chains[i]} cannot be read: ${s.reason}`,
+      )
     if (s.ext?.poolGroupAddress !== g.toBase58()) continue
     const selector = chains[i]!
-    const record = await new GetPoolGroupChain().query(ctx.chain, { ...refParams, remoteChainSelector: selector, tokenAddresses: [parsed.mint] })
+    const record = await new GetPoolGroupChain().query(ctx.chain, {
+      ...refParams,
+      remoteChainSelector: selector,
+      tokenAddresses: [parsed.mint],
+    })
     const decode = (bytes: Uint8Array) => decodeRemoteAddress(Buffer.from(bytes), selector)
     const ownPools = s.chainConfig.base.remote.poolAddresses.map((p) => decode(p.address))
     const groupPools = record.policy.connection.remotePools.map((p) => p.address)
@@ -191,8 +217,7 @@ export async function expandRemoval(
       remotePools: [...new Set([...groupPools, ...ownPools])],
     })
   }
-  if (!lanes.length && !member)
-    throw new CCTParamsInvalidError(NAME, 'tokenAddress', `${parsed.mint} has no lane and no membership in this pool group`)
+  // nothing left of the token in the group (a finished or resumed removal): an empty plan
 
   const specs: StepSpec<Name>[] = []
   // ── pause outbound (a Squads proposal writes both flags: inbound keeps its own) ──
@@ -305,7 +330,12 @@ export async function expandRemoval(
     const k = laneKeyOf(l.key)
     const after = [drainIdOf.get(k)!]
     if (l.ownFormat === 'long') {
-      const own = await readTokenPoolChainConfigV2(ctx.chain, ctx.ref.program, mint, l.key.remoteChainSelector)
+      const own = await readTokenPoolChainConfigV2(
+        ctx.chain,
+        ctx.ref.program,
+        mint,
+        l.key.remoteChainSelector,
+      )
       const need = l.uid !== null ? longPoolDataBytes(32) : LONG_POOL_DATA_BYTES
       const fee = own?.tokenTransferFeeConfig
       if (!fee?.isEnabled || fee.destBytesOverhead < need) {
@@ -346,11 +376,23 @@ export async function expandRemoval(
             {
               run: {
                 generate: async (payer) => ({
-                  transactions: [toPlannerTx(await edit.generate(ctx.chain, { ...params, payer }), payer, [parsed.mint])],
+                  transactions: [
+                    toPlannerTx(await edit.generate(ctx.chain, { ...params, payer }), payer, [
+                      parsed.mint,
+                    ]),
+                  ],
                   findings: [],
                 }),
                 execute: async (wallet, computeUnits) => ({
-                  hashes: [(await edit.execute(ctx.chain, { ...params, wallet, ...(computeUnits !== undefined && { computeUnits }) })).hash],
+                  hashes: [
+                    (
+                      await edit.execute(ctx.chain, {
+                        ...params,
+                        wallet,
+                        ...(computeUnits !== undefined && { computeUnits }),
+                      })
+                    ).hash,
+                  ],
                   findings: [],
                 }),
               },
@@ -372,7 +414,10 @@ export async function expandRemoval(
           operation: 'unlinkPoolGroupLanes',
           dependsOn: after,
           summary: `unlink ${parsed.mint} → ${l.key.remoteChainSelector} from the pool group (it keeps its own fields)`,
-          writeSet: [keys.lane(parsed.mint, l.key.remoteChainSelector), keys.chain(g, l.key.remoteChainSelector)],
+          writeSet: [
+            keys.lane(parsed.mint, l.key.remoteChainSelector),
+            keys.chain(g, l.key.remoteChainSelector),
+          ],
           guardReads: [],
           signer: poolOwnerSigner(ctx, owner, parsed.mint),
         },
@@ -405,7 +450,10 @@ export async function expandRemoval(
           operation: 'setPoolGroupMemberRemoteTokens',
           dependsOn: driven.map((l) => drainIdOf.get(laneKeyOf(l.key))!),
           summary: `drop ${dropChains.length} chain(s) from ${parsed.mint}'s member and close its ${closing.length} driven lane(s)`,
-          writeSet: [keys.member(parsed.mint), ...closing.map((l) => keys.lane(l.tokenAddress, l.remoteChainSelector))],
+          writeSet: [
+            keys.member(parsed.mint),
+            ...closing.map((l) => keys.lane(l.tokenAddress, l.remoteChainSelector)),
+          ],
           guardReads: dropChains.map((c) => keys.chain(g, c)),
           signer: poolOwnerSigner(ctx, owner, parsed.mint),
           progress: dropChains.length,
@@ -413,7 +461,10 @@ export async function expandRemoval(
         POOL_GROUP_MEMBERSHIP_OPERATIONS.setPoolGroupMemberRemoteTokens,
         {
           ...opBase(ctx),
-          removeChains: dropChains.map((c) => ({ tokenAddress: parsed.mint, remoteChainSelector: c })),
+          removeChains: dropChains.map((c) => ({
+            tokenAddress: parsed.mint,
+            remoteChainSelector: c,
+          })),
           ...(closing.length && {
             confirmDroppedLanes: closing,
             closeDroppedLanes: true,
@@ -443,5 +494,11 @@ export async function expandRemoval(
         { ...opBase(ctx), tokenAddresses: [parsed.mint] },
       ),
     )
-  return { specs, findings: [], observedAt: slot, poolGroupId: group.poolGroupId, poolGroupAddress: g.toBase58() }
+  return {
+    specs,
+    findings: [],
+    observedAt: slot,
+    poolGroupId: group.poolGroupId,
+    poolGroupAddress: g.toBase58(),
+  }
 }
