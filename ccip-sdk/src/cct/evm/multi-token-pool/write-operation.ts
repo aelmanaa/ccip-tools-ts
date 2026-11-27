@@ -96,7 +96,10 @@ export type MultiTokenPoolUnsealedTransactionResult = TransactionResult &
 
 /** The result fields a signed send adds to its unsigned build. @internal */
 type SignedResultOf<Tx extends UnsignedEVMTx> = TransactionResult &
-  Omit<Tx, keyof UnsignedEVMTx> & { blockNumber: number }
+  Omit<Tx, keyof UnsignedEVMTx> & {
+    /** The block the write mined in; every later MTTP read or build on the provider is at or after it. */
+    blockNumber: number
+  }
 
 /**
  * Base of every multi-token pool write. A build that seals a snapshot is rebuilt right before a
