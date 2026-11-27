@@ -33,12 +33,13 @@ import { SolanaChain } from '../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import { SolanaTokenManager } from '../index.ts'
 import { deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
+import type { PoolGroupSectionUpdate } from './write-types.ts'
 
 const PROGRAM = '22P6h4QV5wswBX63KCncFGctC9dyVRMjykBBDdhwXjg7'
 const LINKED_GROUP = 'BDiSFAren1qkqK5BjT3JpFNbbTbawoC6YxVghrAwDGbt'
 const SEPOLIA = networkInfo('ethereum-testnet-sepolia').chainSelector
 const FUJI = networkInfo('avalanche-testnet-fuji').chainSelector
-const THIRD = networkInfo('arbitrum-testnet-sepolia').chainSelector
+const THIRD = networkInfo('ethereum-testnet-sepolia-arbitrum-1').chainSelector
 const PORT = 18_951
 /** `Group.owner`: after the discriminator, version, bump and group id. */
 const GROUP_OWNER_OFFSET = 8 + 1 + 1 + 32
@@ -332,17 +333,30 @@ describe(
           ...g,
           remoteChainSelector: lane.remoteChainSelector,
         })
-        const pools = chainRecord.policy.connection.remotePools.map((p) => p.address)
-        if (!pools.length) return t.skip('the chain record trusts no remote pool')
+        // a pool only the record trusts: add one, then drop it
+        const detach = chainRecord.inheritsDefault.includes('connection')
+        const kept = chainRecord.policy.connection.remotePools
+        const extra = `0x${Buffer.from(Keypair.generate().publicKey.toBytes().subarray(0, 20)).toString('hex')}`
+        await cct.setPoolGroupChainPolicy({
+          ...g,
+          remoteChainSelector: lane.remoteChainSelector,
+          section: {
+            policyClass: 'connection',
+            connection: { remotePools: [...kept, { address: extra, allowLegacyPoolData: false }] },
+          },
+          ...(detach && { detachFromPoolGroupDefault: true }),
+          wallet: wallet(),
+        })
+        const drop: PoolGroupSectionUpdate = {
+          policyClass: 'connection',
+          connection: { remotePools: [] },
+        }
         const params = {
           ...g,
           remoteChainSelector: lane.remoteChainSelector,
-          section: { policyClass: 'connection', connection: { remotePools: [] } },
-          ...(chainRecord.inheritsDefault.includes('connection') && {
-            detachFromPoolGroupDefault: true,
-          }),
+          section: drop,
           payer: owner.publicKey.toBase58(),
-        } as const
+        }
         let dropped: unknown
         await assert.rejects(cct.generateUnsignedSetPoolGroupChainPolicy(params), (e: unknown) => {
           assert.ok(e instanceof CCTParamsInvalidError)

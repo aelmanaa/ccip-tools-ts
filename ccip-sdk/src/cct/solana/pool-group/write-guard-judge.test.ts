@@ -165,6 +165,32 @@ describe('judgePoolGroupWrite', () => {
     assert.deepEqual(r.findings, [])
   })
 
+  it("scope 'loosened': a clamp builds on a lane that fails a rule; loosening it is judged", async () => {
+    // RATE_LIMIT from the group default, FEE from a named policy above the new cap
+    const before = linked(
+      { sources: [0, 2, 1, 0] },
+      groupChainData({ maxBpsFee: 1_000 }),
+      policyChainData(2, 0, { feeBps: 500 }),
+    )
+    const clamp = new Map([[GCP, groupChainData({ maxBpsFee: 100, outboundCapacity: 50 })]])
+    const r = await judge(chainFor(before, clamp), { scope: 'loosened' })
+    assert.deepEqual(r.affectedLanes, [laneKey])
+    assert.deepEqual(r.findings, [])
+    const loosen = new Map([[GCP, groupChainData({ maxBpsFee: 100, outboundCapacity: 500 })]])
+    await assert.rejects(
+      judge(chainFor(before, loosen), { scope: 'loosened' }),
+      refusedWith('TRANSFER_FEE_ABOVE_CAP'),
+    )
+  })
+
+  it("scope 'none' lists no lanes", async () => {
+    const before = feeLane(1_000)
+    const r = await judge(chainFor(before, new Map([[GCP, groupChainData({ maxBpsFee: 100 })]])), {
+      scope: 'none',
+    })
+    assert.deepEqual(r.affectedLanes, [])
+  })
+
   it('a write that makes a lane live is refused, naming the lanes; reported with goingLiveSeverity warning', async () => {
     const before = linked({ sources: [0, 0, 0, 0] }, groupChainData({ groupPaused: true }))
     const after = new Map([[GCP, groupChainData()]])

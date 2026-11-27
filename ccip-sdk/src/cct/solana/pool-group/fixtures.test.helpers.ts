@@ -20,6 +20,7 @@ import { deriveTokenPoolChainConfigV2Pda } from '../../../solana/token-pool.ts'
 import { deriveTokenAdminRegistryPda } from '../programs/router.ts'
 import { deriveTokenPoolChainConfigPda, deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
 import { GROUP_CHAIN_POLICY_FIXED_LEN, poolGroupPdas, poolGroupsCoder } from './accounts.ts'
+import type { IdlPolicySections } from './lane.ts'
 
 export const SEPOLIA = networkInfo('ethereum-testnet-sepolia').chainSelector
 export const PROGRAM = Keypair.generate().publicKey
@@ -203,6 +204,8 @@ export type GroupChainOpts = {
   feeBps?: number
   /** The record's CONNECTION remote pools; defaults to `[POLICY_POOL]`. */
   remotePools?: string[]
+  /** The record's RATE_LIMIT outbound capacity; defaults to 100. */
+  outboundCapacity?: number
   /** A pending CCV set of the record's SECURITY. */
   pending?: { outbound: PublicKey[]; inbound: PublicKey[]; epoch: bigint; activatesAt: bigint }
 }
@@ -230,7 +233,11 @@ export function groupChainData(opts: GroupChainOpts = {}): Buffer {
       security: { current: Record<string, unknown> }
     }
     // the record's RATE_LIMIT: capacity 100, rate 1
-    Object.assign(policy.rateLimit.outbound, { enabled: true, capacity: bn(100), rate: bn(1) })
+    Object.assign(policy.rateLimit.outbound, {
+      enabled: true,
+      capacity: bn(opts.outboundCapacity ?? 100),
+      rate: bn(1),
+    })
     policy.security.current.outbound = opts.ccvs ?? []
     policy.connection.poolDataFormat = opts.format ? { long: {} } : { legacy32: {} }
     policy.connection.remotePools = (opts.remotePools ?? [POLICY_POOL]).map((pool) => ({
@@ -355,4 +362,17 @@ export function lane(
   if (opts.v2) put(V2_ADDR, opts.v2)
   for (const [k, d, owner] of opts.extra ?? []) put(k, d, owner)
   return m
+}
+
+/** A record's `PolicySections` (FEE 64-byte overhead, BPS 5/3; outbound bucket capacity 100). */
+export function poolGroupSectionsFixture(): IdlPolicySections {
+  const v = poolGroupsCoder.types.decode<IdlPolicySections>('PolicySections', Buffer.alloc(4096))
+  Object.assign(v.fee.tokenTransferFeeConfig, {
+    destBytesOverhead: 64,
+    finalityBpsFee: 5,
+    fastFinalityBpsFee: 3,
+    isEnabled: true,
+  })
+  Object.assign(v.rateLimit.outbound, { enabled: true, capacity: bn(100), rate: bn(1) })
+  return v
 }
