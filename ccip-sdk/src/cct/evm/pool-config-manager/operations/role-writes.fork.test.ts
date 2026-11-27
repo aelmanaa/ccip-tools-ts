@@ -248,6 +248,42 @@ describe('MTTP role, admin and fee writes (Sepolia fork)', { skip, timeout: 600_
     assert.equal(BigInt(balance), amount)
   })
 
+  it('refuses a renounce with nothing scheduled, a transfer pending, or before it matures (E7 M3)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const adminWallet = await wallet(admin)
+    // a non-zero delay: the live PCM has 0, so "matures at" never runs there
+    await mined(
+      cct.changeMultiTokenPoolDefaultAdminDelay({ ...target, newDelay: 60, wallet: adminWallet }),
+    )
+    await warp(61)
+    assert.equal((await cct.getPoolConfigManagerState(target)).defaultAdminDelay, 60)
+    const unsignedRenounce = () =>
+      cct.generateUnsignedRenounceMultiTokenPoolDefaultAdmin({
+        ...target,
+        sender: admin,
+        confirmPermanentFreeze: true,
+      })
+    await assert.rejects(unsignedRenounce(), refused('poolAddress', /has no scheduled renounce/))
+    const begin = (newAdmin: string) =>
+      mined(
+        cct.beginMultiTokenPoolDefaultAdminTransfer({ ...target, newAdmin, wallet: adminWallet }),
+      )
+    const cancel = () =>
+      mined(cct.cancelMultiTokenPoolDefaultAdminTransfer({ ...target, wallet: adminWallet }))
+    await begin(BOB)
+    await assert.rejects(
+      unsignedRenounce(),
+      refused('poolAddress', new RegExp(`a transfer to ${BOB} is pending`)),
+    )
+    await cancel()
+    await begin(ZeroAddress)
+    await assert.rejects(unsignedRenounce(), refused('poolAddress', /matures at/))
+    await warp(61)
+    const built = await unsignedRenounce()
+    assert.equal(built.simulatedFrom, 'sender')
+    await cancel()
+  })
+
   it('runs the default admin lifecycle: cancel, delay change and rollback, accept, renounce', async (t) => {
     if (!deployed) return t.skip('mttp-core not deployed')
     const { defaultAdminDelay } = await cct.getPoolConfigManagerState(target)

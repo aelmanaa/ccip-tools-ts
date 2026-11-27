@@ -38,6 +38,37 @@ describe('renounceMultiTokenPoolDefaultAdmin', () => {
     await assert.rejects(renounce(scheduled(Number(SCHEDULE) - 1).chain), refusedWith(/matures at/))
   })
 
+  it('refuses with no renounce scheduled', async () => {
+    await assert.rejects(
+      renounce(scheduled(Number(SCHEDULE) + 1, ZeroAddress, 0n).chain),
+      refusedWith(/has no scheduled renounce: schedule one/),
+    )
+  })
+
+  it('refuses while a transfer to a non-zero admin is pending, naming it', async () => {
+    const BOB = getAddress('0x' + 'b0'.repeat(20))
+    await assert.rejects(
+      renounce(scheduled(Number(SCHEDULE) + 1, BOB).chain),
+      refusedWith(new RegExp(`a transfer to ${BOB} is pending`)),
+    )
+  })
+
+  it('refuses a missing or non-literal confirmPermanentFreeze before any RPC', async () => {
+    for (const confirm of [undefined, 'true', 1, false]) {
+      const { chain, calls } = scheduled(Number(SCHEDULE) + 1)
+      await assert.rejects(
+        new RenounceMultiTokenPoolDefaultAdmin().generate(chain, {
+          poolConfigManager: PCM,
+          sender: OWNER,
+          confirmPermanentFreeze: confirm as unknown as true,
+        }),
+        (e: unknown) =>
+          e instanceof CCTParamsInvalidError && e.context.param === 'confirmPermanentFreeze',
+      )
+      assert.deepEqual(calls, [], String(confirm))
+    }
+  })
+
   it('builds one second after the schedule', async () => {
     const tx = await renounce(scheduled(Number(SCHEDULE) + 1).chain)
     assert.equal(tx.transactions[0]!.to, PCM)
