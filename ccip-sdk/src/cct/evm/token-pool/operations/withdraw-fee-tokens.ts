@@ -14,6 +14,7 @@ import type { Interface } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
+import { redirectMultiTokenPool } from '../../multi-token-pool/pool-reads.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import { validateArray, validateNonZeroAddress } from '../../validate.ts'
 import {
@@ -75,7 +76,14 @@ export class WithdrawFeeTokens extends EVMOperation<WithdrawFeeTokensParams> {
     chain: EVMChain,
     params: WithdrawFeeTokensParams,
   ): Promise<UnsignedEVMTx> {
-    const { type, version } = await resolveTokenPool(chain, params.poolAddress)
+    const { type, version } = await resolveTokenPool(chain, params.poolAddress).catch(
+      (err: unknown) =>
+        redirectMultiTokenPool(
+          err,
+          'withdrawMultiTokenPoolFeeTokens',
+          'the same poolAddress, feeTokens and recipient; a multi-token pool is withdrawn through its PoolConfigManager by a FEE_COLLECTOR_ROLE holder, and the result lists the amounts',
+        ),
+    )
     const encode = resolveEncoder(this.encoders, version, this.name)
     if (params.sender !== undefined)
       await assertPoolOwnerOrFeeAdmin(this.name, chain, params.poolAddress, params.sender)

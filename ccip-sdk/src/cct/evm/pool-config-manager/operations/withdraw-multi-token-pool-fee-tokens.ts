@@ -1,0 +1,155 @@
+/**
+ * withdrawMultiTokenPoolFeeTokens — `pcm.withdrawFeeTokens(pool, feeTokens, recipient)`: withdraws a
+ * multi-token pool's whole balance of each fee token through its PoolConfigManager.
+ *
+ * @packageDocumentation
+ */
+
+import { getAddress } from 'ethers'
+
+import type { EVMChain } from '../../../../evm/index.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
+import {
+  type PoolConfigManagerRole,
+  POOL_CONFIG_MANAGER_TYPE,
+  getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
+  resolveMultiTokenPool,
+} from '../../multi-token-pool/contracts.ts'
+import type { EVMExecuteParams } from '../../operation.ts'
+import { validateArray, validateNonZeroAddress } from '../../validate.ts'
+import {
+  type MultiTokenPoolTransactionResult,
+  type MultiTokenPoolUnsignedTx,
+  type PoolConfigManagerWrite,
+  type PoolConfigManagerWriteContext,
+  PoolConfigManagerWriteOperation,
+} from '../write-operation.ts'
+
+/**
+ * Parameters of `withdrawMultiTokenPoolFeeTokens`. Not a `PoolConfigManagerTarget`: the pool is always
+ * named (the PCM withdraws from it), and the PCM may be given too.
+ */
+export type WithdrawMultiTokenPoolFeeTokensParams = {
+  /** The pool whose balance is withdrawn. */
+  poolAddress: string
+  /** The PCM to send to; defaults to `pool.getPoolConfigManager()` and must equal it. */
+  poolConfigManager?: string
+  /** Fee tokens whose whole pool balance to withdraw, at least one. */
+  feeTokens: string[]
+  /** Non-zero address receiving the balances. */
+  recipient: string
+  /** A `FEE_COLLECTOR_ROLE` holder; optional when generating an unsigned transaction. */
+  sender?: string
+}
+
+/** Result of `withdrawMultiTokenPoolFeeTokens`: the amounts, from the pool's `FeeTokenWithdrawn` logs. */
+export type WithdrawMultiTokenPoolFeeTokensResult = MultiTokenPoolTransactionResult & {
+  /** Each token's amount the pool sent to the recipient. */
+  withdrawn: { token: string; amount: bigint }[]
+}
+
+/** Params after `prepare`: the target is the pool, the PCM kept to compare. */
+type Parsed = Omit<WithdrawMultiTokenPoolFeeTokensParams, 'poolConfigManager'> & {
+  poolConfigManager?: undefined
+  /** The PCM the caller named, checked against the pool's. */
+  expectedPoolConfigManager?: string
+}
+
+/**
+ * Withdraws a multi-token pool's fee token balances through its PCM. Gate: `FEE_COLLECTOR_ROLE`
+ * (not `DEFAULT_ADMIN_ROLE`). Validation follows main's `withdrawFeeTokens`.
+ * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `poolConfigManager` is
+ *   not the pool's, or `sender` lacks the gate
+ */
+export class WithdrawMultiTokenPoolFeeTokens extends PoolConfigManagerWriteOperation<
+  Parsed & { poolConfigManager?: undefined },
+  Parsed
+> {
+  readonly name = 'withdrawMultiTokenPoolFeeTokens'
+
+  /** Validates every address, as main's `withdrawFeeTokens` does; an empty list would mine as a no-op. */
+  protected override prepare(params: Parsed): Parsed {
+    const raw = params as WithdrawMultiTokenPoolFeeTokensParams
+    const { poolAddress, feeTokens, recipient, poolConfigManager } = raw
+    validateNonZeroAddress(this.name, 'poolAddress', poolAddress)
+    if (poolConfigManager !== undefined)
+      validateNonZeroAddress(this.name, 'poolConfigManager', poolConfigManager)
+    validateArray(this.name, 'feeTokens', feeTokens, 1)
+    feeTokens.forEach((t, i) => validateNonZeroAddress(this.name, `feeTokens[${i}]`, t))
+    validateNonZeroAddress(this.name, 'recipient', recipient)
+    const { poolConfigManager: _, ...rest } = raw
+    return {
+      ...rest,
+      ...(poolConfigManager !== undefined && {
+        expectedPoolConfigManager: getAddress(poolConfigManager),
+      }),
+    }
+  }
+
+  protected gate(): readonly PoolConfigManagerRole[] {
+    return ['FEE_COLLECTOR_ROLE']
+  }
+
+  // a withdrawal changes no stored record
+  protected override changesRecords(): boolean {
+    return false
+  }
+
+  protected encode(
+    _chain: EVMChain,
+    { poolAddress, feeTokens, recipient, expectedPoolConfigManager }: Parsed,
+    { address, version }: PoolConfigManagerWriteContext,
+  ): PoolConfigManagerWrite {
+    if (
+      expectedPoolConfigManager !== undefined &&
+      expectedPoolConfigManager !== getAddress(address)
+    )
+      throw new CCTParamsInvalidError(
+        this.name,
+        'poolConfigManager',
+        `is not the PoolConfigManager pool ${getAddress(poolAddress)} calls (${getAddress(address)}): omit it, or name the pool's own`,
+      )
+    return {
+      data: getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
+        multiTokenPoolFunctionOf(this.name),
+        [getAddress(poolAddress), feeTokens.map((t) => getAddress(t)), getAddress(recipient)],
+      ),
+    }
+  }
+
+  /**
+   * Builds the unsigned transaction from the public params. The pool is always the target, and a
+   * named PCM is only compared (`prepare` folds it into `expectedPoolConfigManager`), so the params
+   * name both where the PCM write params allow one.
+   */
+  generateFrom(
+    chain: EVMChain,
+    params: WithdrawMultiTokenPoolFeeTokensParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.generate(chain, params as Parsed)
+  }
+
+  /** Signs and submits, then reads the amounts from the pool's `FeeTokenWithdrawn` logs. */
+  override async execute(
+    chain: EVMChain,
+    params: EVMExecuteParams<WithdrawMultiTokenPoolFeeTokensParams>,
+  ): Promise<WithdrawMultiTokenPoolFeeTokensResult> {
+    const result = await super.execute(chain, params as EVMExecuteParams<Parsed>)
+    const receipt = await chain.provider.getTransactionReceipt(result.hash)
+    const { type, version } = await resolveMultiTokenPool(chain, params.poolAddress)
+    const pool = getMultiTokenPoolInterface(type, version)
+    const event = pool.getEvent('FeeTokenWithdrawn')!
+    const withdrawn = (receipt?.logs ?? [])
+      .filter(
+        (log) =>
+          getAddress(log.address) === getAddress(params.poolAddress) &&
+          log.topics[0] === event.topicHash,
+      )
+      .map((log) => {
+        const { args } = pool.parseLog(log)!
+        return { token: getAddress(String(args.feeToken)), amount: BigInt(args.amount) }
+      })
+    return { ...result, withdrawn }
+  }
+}

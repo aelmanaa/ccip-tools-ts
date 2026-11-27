@@ -118,6 +118,21 @@ export function validateUint32(operation: string, param: string, value: unknown)
 }
 
 /**
+ * Asserts `value` is an integer in `[0, 2^48 − 1]` (a Solidity `uint48`, e.g. an OZ admin delay in
+ * seconds; it fits a safe JS integer).
+ * @throws {@link CCTParamsInvalidError} if `value` is not such an integer
+ */
+export function validateUint48(operation: string, param: string, value: unknown): void {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 2 ** 48 - 1)
+    return
+  throw new CCTParamsInvalidError(
+    operation,
+    param,
+    `must be an integer in [0, 2^48 − 1], got ${String(value)}`,
+  )
+}
+
+/**
  * Shared `uintN` range check: the three widths below differ only in their bound and their message,
  * so the comparison itself lives here once.
  * @throws {@link CCTParamsInvalidError} if `value` is not a `bigint` in `[0, 2^bits − 1]`
