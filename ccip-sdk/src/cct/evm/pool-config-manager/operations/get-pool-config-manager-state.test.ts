@@ -75,4 +75,21 @@ describe('GetPoolConfigManagerState (cct/evm pool-config-manager)', () => {
       )
     assert.deepEqual(calls, [])
   })
+
+  it('reads every admin getter and the static config at one block (E7 m7)', async () => {
+    const { chain, callBlocks } = stackChain()
+    await new GetPoolConfigManagerState().query(chain, { poolConfigManager: PCM })
+    const pinned = callBlocks.filter((c) =>
+      [
+        'getStaticConfig',
+        'defaultAdmin',
+        'pendingDefaultAdmin',
+        'defaultAdminDelay',
+        'pendingDefaultAdminDelay',
+        'defaultAdminDelayIncreaseWait',
+      ].includes(c.name),
+    )
+    assert.equal(pinned.length, 6)
+    assert.deepEqual(new Set(pinned.map((c) => c.blockTag)), new Set([1_000]))
+  })
 })
