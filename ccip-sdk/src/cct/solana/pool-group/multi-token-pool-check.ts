@@ -46,7 +46,13 @@ import { laneFamilyOf } from '../../remote-address.ts'
 import { deriveTokenPoolSignerPda } from '../programs/token-pool.ts'
 import { readTokenMintAuthority } from '../token-admin-registry/mint-authority.ts'
 import { resolvePoolProgramTypeAndVersion } from '../validate.ts'
-import { isUnread, laneCcvSync, laneFailsClosed, lanePauses } from './lane.ts'
+import {
+  isUnread,
+  laneCcvSync,
+  laneFailsClosed,
+  laneFailsClosedFinding,
+  lanePauses,
+} from './lane.ts'
 import {
   type SolanaMultiTokenPoolLaneRead,
   readSolanaMultiTokenPoolLane,
@@ -641,13 +647,10 @@ export async function checkSolanaMultiTokenPoolLane(
         'connection',
       )
     const failsClosed = orThrow(laneFailsClosed(state), where)
-    if (failsClosed !== undefined)
-      add(
-        'CCVS_NOT_SYNCED',
-        'error',
-        `every transfer reverts: ${failsClosed}; sync the lane`,
-        'security',
-      )
+    if (failsClosed !== undefined) {
+      const { check, recordType, fix } = laneFailsClosedFinding(failsClosed)
+      add(check, 'error', `every transfer reverts: ${failsClosed}; ${fix}`, recordType)
+    }
     const sync = orThrow(laneCcvSync(state), where)
     if (sync?.failsClosedAt !== undefined)
       add(

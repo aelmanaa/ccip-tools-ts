@@ -47,6 +47,7 @@ import {
   GetTokenPoolGlobalConfig,
   HasPoolGroupListEntry,
 } from './pool-group/operations/index.ts'
+import { POOL_GROUP_LIFECYCLE_OPERATIONS } from './pool-group/operations/lifecycle.ts'
 import type {
   CheckPoolGroupSnapshotParams,
   GetPoolGroupChainParams,
@@ -74,6 +75,28 @@ import type {
   HasPoolGroupListEntryParams,
   PoolGroupFeature,
 } from './pool-group/types.ts'
+import type {
+  ExecuteAcceptPoolGroupOwnershipParams,
+  ExecuteAcceptPoolGroupOwnershipResult,
+  ExecuteCreatePoolGroupParams,
+  ExecuteCreatePoolGroupResult,
+  ExecuteSetPoolGroupRolesParams,
+  ExecuteSetPoolGroupRolesResult,
+  ExecuteSetPoolGroupSettingsParams,
+  ExecuteSetPoolGroupSettingsResult,
+  ExecuteTransferPoolGroupOwnershipParams,
+  ExecuteTransferPoolGroupOwnershipResult,
+  GenerateAcceptPoolGroupOwnershipParams,
+  GenerateAcceptPoolGroupOwnershipResult,
+  GenerateCreatePoolGroupParams,
+  GenerateCreatePoolGroupResult,
+  GenerateSetPoolGroupRolesParams,
+  GenerateSetPoolGroupRolesResult,
+  GenerateSetPoolGroupSettingsParams,
+  GenerateSetPoolGroupSettingsResult,
+  GenerateTransferPoolGroupOwnershipParams,
+  GenerateTransferPoolGroupOwnershipResult,
+} from './pool-group/write-types.ts'
 import {
   type SerializeUnsignedTxOptions,
   type SerializedSolanaTxEncoding,
@@ -3507,6 +3530,292 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    */
   checkPoolGroupSnapshot(opts: CheckPoolGroupSnapshotParams): Promise<MultiTokenPoolSnapshotCheck> {
     return this.#checkPoolGroupSnapshot.query(this.chain, opts)
+  }
+
+  // Pool groups (lifecycle and roles)
+
+  /**
+   * Builds the unsigned `create_group` transaction, with `set_group_roles` and up to about 8
+   * `add_group_chain` for `initialRoles` and `initialChains` in the same transaction.
+   * @remarks The id defaults to a fresh random key (a known id can be front-run by anyone, since
+   * `create_group` is permissionless). Refused when the PDA already exists. Unset roles default to
+   * `authority`. More chains go into further transactions that land strictly after the first; a
+   * partial landing is completed by re-reading. Signer: anyone (becomes the owner).
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { poolGroupAddress, poolGroupId } = await sol.generateUnsignedCreatePoolGroup({
+   *   initialRoles: { feeAdmin: ops, pauser: ops },
+   *   initialChains: [sepolia],
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedCreatePoolGroup(
+    opts: GenerateCreatePoolGroupParams,
+  ): Promise<GenerateCreatePoolGroupResult> {
+    return POOL_GROUP_LIFECYCLE_OPERATIONS.createPoolGroup.generate(this.chain, opts)
+  }
+  /**
+   * Creates a pool group with `opts.wallet` as owner, with initial roles and chains in one
+   * transaction.
+   * @remarks See `generateUnsignedCreatePoolGroup`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { poolGroupAddress } = await sol.createPoolGroup({ initialChains: [sepolia], wallet })
+   * ```
+   */
+  createPoolGroup(opts: ExecuteCreatePoolGroupParams): Promise<ExecuteCreatePoolGroupResult> {
+    return POOL_GROUP_LIFECYCLE_OPERATIONS.createPoolGroup.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds the unsigned `set_group_roles` transactions: sets roles, merged with the current ones.
+   * @remarks The instruction replaces all seven roles; omitted roles are kept and `null` clears
+   * one. Signer: the pool group owner. Each transaction lists `requiredSigners` and carries its
+   * compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
+   * executor every written field must be given explicitly instead of merged)
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSetPoolGroupRoles({
+   *   poolGroupId, roles: { feeAdmin: ops },
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSetPoolGroupRoles(
+    opts: GenerateSetPoolGroupRolesParams,
+  ): Promise<GenerateSetPoolGroupRolesResult> {
+    return POOL_GROUP_LIFECYCLE_OPERATIONS.setPoolGroupRoles.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `set_group_roles` with `opts.wallet` as payer and default authority: sets
+   * roles, merged with the current ones.
+   * @remarks The instruction replaces all seven roles; omitted roles are kept and `null` clears
+   * one. Re-reads merged and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
+   * executor every written field must be given explicitly instead of merged)
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.setPoolGroupRoles({
+   *   poolGroupId, roles: { feeAdmin: ops },
+   *   wallet,
+   * })
+   * ```
+   */
+  setPoolGroupRoles(opts: ExecuteSetPoolGroupRolesParams): Promise<ExecuteSetPoolGroupRolesResult> {
+    return POOL_GROUP_LIFECYCLE_OPERATIONS.setPoolGroupRoles.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds the unsigned `set_group_settings` transactions: changes the fee cap, membership, CCV
+   * notice or hook lookup table.
+   * @remarks `maxBpsFee` and `openMembership` are always written, so omitted ones are read and
+   * kept; lowering the cap passes every chain record and is refused below any record's fee; the
+   * hook table must be active and frozen. Signer: the pool group owner. Each transaction lists
+   * `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
+   * executor every written field must be given explicitly instead of merged)
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSetPoolGroupSettings({
+   *   poolGroupId, minCCVActivationDelay: 172_800,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSetPoolGroupSettings(
+    opts: GenerateSetPoolGroupSettingsParams,
+  ): Promise<GenerateSetPoolGroupSettingsResult> {
+    return POOL_GROUP_LIFECYCLE_OPERATIONS.setPoolGroupSettings.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `set_group_settings` with `opts.wallet` as payer and default authority: changes
+   * the fee cap, membership, CCV notice or hook lookup table.
+   * @remarks `maxBpsFee` and `openMembership` are always written, so omitted ones are read and
+   * kept; lowering the cap passes every chain record and is refused below any record's fee; the
+   * hook table must be active and frozen. Re-reads merged and snapshotted state right before
+   * sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
+   * executor every written field must be given explicitly instead of merged)
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.setPoolGroupSettings({
+   *   poolGroupId, minCCVActivationDelay: 172_800,
+   *   wallet,
+   * })
+   * ```
+   */
+  setPoolGroupSettings(
+    opts: ExecuteSetPoolGroupSettingsParams,
+  ): Promise<ExecuteSetPoolGroupSettingsResult> {
+    return POOL_GROUP_LIFECYCLE_OPERATIONS.setPoolGroupSettings.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds the unsigned `transfer_group_ownership` transactions: proposes a new owner.
+   * @remarks Cannot be cancelled, only replaced. Signer: the pool group owner. Each transaction
+   * lists `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedTransferPoolGroupOwnership({
+   *   poolGroupId, proposedOwner: newOwner,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedTransferPoolGroupOwnership(
+    opts: GenerateTransferPoolGroupOwnershipParams,
+  ): Promise<GenerateTransferPoolGroupOwnershipResult> {
+    return POOL_GROUP_LIFECYCLE_OPERATIONS.transferPoolGroupOwnership.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `transfer_group_ownership` with `opts.wallet` as payer and default authority:
+   * proposes a new owner.
+   * @remarks Cannot be cancelled, only replaced. Re-reads merged and snapshotted state right before
+   * sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.transferPoolGroupOwnership({
+   *   poolGroupId, proposedOwner: newOwner,
+   *   wallet,
+   * })
+   * ```
+   */
+  transferPoolGroupOwnership(
+    opts: ExecuteTransferPoolGroupOwnershipParams,
+  ): Promise<ExecuteTransferPoolGroupOwnershipResult> {
+    return POOL_GROUP_LIFECYCLE_OPERATIONS.transferPoolGroupOwnership.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds the unsigned `accept_group_ownership` transactions: accepts ownership.
+   * @remarks Passes every chain record; clears every role and resets SECURITY: `followUps` lists
+   * `setPoolGroupRoles`, `resetPoolGroupPolicySecurity` per named SECURITY policy, re-syncs, list
+   * admin hand-overs and the hook table. Signer: the proposed owner. Each transaction lists
+   * `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedAcceptPoolGroupOwnership({
+   *   poolGroupId,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedAcceptPoolGroupOwnership(
+    opts: GenerateAcceptPoolGroupOwnershipParams,
+  ): Promise<GenerateAcceptPoolGroupOwnershipResult> {
+    return POOL_GROUP_LIFECYCLE_OPERATIONS.acceptPoolGroupOwnership.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `accept_group_ownership` with `opts.wallet` as payer and default authority:
+   * accepts ownership.
+   * @remarks Passes every chain record; clears every role and resets SECURITY: `followUps` lists
+   * `setPoolGroupRoles`, `resetPoolGroupPolicySecurity` per named SECURITY policy, re-syncs, list
+   * admin hand-overs and the hook table. Re-reads merged and snapshotted state right before
+   * sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.acceptPoolGroupOwnership({
+   *   poolGroupId,
+   *   wallet,
+   * })
+   * ```
+   */
+  acceptPoolGroupOwnership(
+    opts: ExecuteAcceptPoolGroupOwnershipParams,
+  ): Promise<ExecuteAcceptPoolGroupOwnershipResult> {
+    return POOL_GROUP_LIFECYCLE_OPERATIONS.acceptPoolGroupOwnership.execute(this.chain, opts)
   }
 
   /**

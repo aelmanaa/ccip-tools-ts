@@ -591,7 +591,7 @@ const SIGNATURE_POLL_TIMEOUT_MS = 150_000
 const ABSENT_READS_FOR_EXPIRY = 2
 
 /** Input of {@link executePoolGroupTransactions}. @internal */
-export type ExecutePoolGroupInput = {
+export type ExecutePoolGroupInput<R extends PoolGroupUnsignedResult = PoolGroupUnsignedResult> = {
   /** The op, for errors. */
   operation: string
   /** The chain. */
@@ -604,7 +604,7 @@ export type ExecutePoolGroupInput = {
    * It must read at `confirmed` commitment or later from an up-to-date node: a read that lags a
    * transaction the runner counted as landed would build that transaction again.
    */
-  build: () => Promise<PoolGroupUnsignedResult>
+  build: () => Promise<R>
   /** Rebuilds allowed after transactions that expired unlanded; defaults to 3. */
   maxRebuilds?: number
   /** Poll interval while a signature's fate is unknown; defaults to 2 s (tests set 0). */
@@ -793,9 +793,9 @@ function assertWalletSendable(
  *   op (it re-reads chain state) only once that signature is known to have landed or expired
  * @internal
  */
-export async function executePoolGroupTransactions(
-  input: ExecutePoolGroupInput,
-): Promise<PoolGroupExecuteResult> {
+export async function executePoolGroupTransactions<R extends PoolGroupUnsignedResult>(
+  input: ExecutePoolGroupInput<R>,
+): Promise<Omit<R, 'transactions' | 'noncesUsed'> & PoolGroupExecuteResult> {
   const { operation, wallet, maxRebuilds = 3 } = input
   const landed: PoolGroupExecuteResult['transactions'] = []
   const hashes = () => landed.map((t) => t.hash)

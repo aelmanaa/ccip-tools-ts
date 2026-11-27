@@ -304,6 +304,23 @@ describe('readSolanaRemoteLaneFacts', () => {
       }),
     )
     assert.match(unsynced.back?.failsClosed ?? '', /GroupCcvsNotSynced/)
+    // a cap lowered after the FEE was written applies at once (`BpsFeeAboveGroupMax`)
+    const capped = await known(
+      lane({
+        cc: chainConfigData(LANE_LINKED_MARKER),
+        v2: chainConfigV2Data({ group: GROUP, sources: [1, 1, 1, 1] }),
+        extra: [[GCP, groupChainData({ maxBpsFee: 40, feeBps: 50 })]],
+      }),
+    )
+    assert.match(capped.back?.failsClosed ?? '', /BpsFeeAboveGroupMax: .* 50 bps, above .* 40 bps/)
+    const atCap = await known(
+      lane({
+        cc: chainConfigData(LANE_LINKED_MARKER),
+        v2: chainConfigV2Data({ group: GROUP, sources: [1, 1, 1, 1] }),
+        extra: [[GCP, groupChainData({ maxBpsFee: 50, feeBps: 50 })]],
+      }),
+    )
+    assert.equal(atCap.back?.failsClosed, undefined)
     assert.equal((await known(linked())).back?.failsClosed, undefined)
   })
 

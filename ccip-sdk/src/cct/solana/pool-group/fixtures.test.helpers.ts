@@ -179,6 +179,10 @@ export type GroupChainOpts = {
   securityGeneration?: number
   group?: PublicKey
   selector?: bigint
+  /** The cap the record mirrors (`max_bps_fee`, set). */
+  maxBpsFee?: number
+  /** The record's FEE BPS (finality tier). */
+  feeBps?: number
 }
 
 export function groupChainData(opts: GroupChainOpts = {}): Buffer {
@@ -190,6 +194,14 @@ export function groupChainData(opts: GroupChainOpts = {}): Buffer {
     v.drivenLanesPaused = !!opts.drivenLanesPaused
     v.securityGeneration = opts.securityGeneration ?? 0
     v.laneMode = { [opts.laneMode ?? 'off']: {} }
+    if (opts.maxBpsFee !== undefined)
+      Object.assign(v, { maxBpsFee: opts.maxBpsFee, maxBpsFeeSet: true })
+    if (opts.feeBps !== undefined)
+      Object.assign(
+        (v.policy as { fee: { tokenTransferFeeConfig: Record<string, unknown> } }).fee
+          .tokenTransferFeeConfig,
+        { finalityBpsFee: opts.feeBps, isEnabled: true },
+      )
     const policy = v.policy as {
       connection: Record<string, unknown>
       rateLimit: { outbound: Record<string, unknown> }

@@ -218,16 +218,27 @@ export async function readPoolGroupLaneStates(
   chain: SolanaChain,
   program: PublicKey,
   lanes: readonly PoolGroupLaneRequest[],
+  { overlay }: { overlay?: ReadonlyMap<string, AccountInfo<Buffer> | null> } = {},
 ): Promise<(PoolGroupLaneState | null | Unread)[]> {
+  // `overlay`: accounts as a simulated write leaves them, read in place of the chain's
+  const read = async (keys: PublicKey[]) => {
+    const infos = await getMultipleAccountsInfoPaged(chain.connection, keys)
+    return keys.map((k, i) => {
+      const o = overlay?.get(k.toBase58())
+      return o !== undefined ? o : infos[i]
+    })
+  }
   const keys = lanes.flatMap(({ mint, selector, v2 }) => [
     deriveTokenPoolChainConfigPda(program, selector, mint),
-    ...(v2 === undefined ? [deriveTokenPoolChainConfigV2Pda(program, selector, mint)] : []),
+    ...(v2 === undefined || overlay
+      ? [deriveTokenPoolChainConfigV2Pda(program, selector, mint)]
+      : []),
   ])
-  const accounts = await getMultipleAccountsInfoPaged(chain.connection, keys)
+  const accounts = await read(keys)
   let at = 0
   const states = lanes.map(({ mint, selector, v2 }) => {
     const cc = accounts[at++]
-    const v2Account = v2 === undefined ? accounts[at++] : v2
+    const v2Account = v2 === undefined || overlay ? accounts[at++] : v2
     return decodePoolGroupLaneBase(program, mint, selector, cc, v2Account)
   })
   const recordKeys = states.map((s) => (s && !isUnread(s) ? poolGroupLaneRecordKeys(s) : null))
@@ -238,10 +249,7 @@ export async function readPoolGroupLaneStates(
         addresses.set(a.toBase58(), a)
   if (!addresses.size) return states.map((s, i) => (isUnread(recordKeys[i]) ? recordKeys[i]! : s))
   const list = [...addresses.values()]
-  const [clock, ...infos] = await getMultipleAccountsInfoPaged(chain.connection, [
-    SYSVAR_CLOCK_PUBKEY,
-    ...list,
-  ])
+  const [clock, ...infos] = await read([SYSVAR_CLOCK_PUBKEY, ...list])
   const now = clockUnixTimestamp(clock)
   const byAddress = new Map(list.map((a, i) => [a.toBase58(), infos[i] ?? null]))
   return states.map((state, i) => {

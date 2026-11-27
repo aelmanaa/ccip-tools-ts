@@ -40,6 +40,7 @@ const PublicKey_default = () => Keypair.generate().publicKey.toBase58()
 const VersionedTransactionOf = (raw: Uint8Array) => VersionedTransactionClass.deserialize(raw)
 const PAYER = Keypair.generate().publicKey
 const silent = { debug() {}, info() {}, warn() {}, error() {} }
+const NO_LANES = { affectedLanes: [], goingLive: [], warnings: [] }
 
 /** An item of `bytes` instruction data touching `accounts` fresh writable accounts. */
 function item(
@@ -470,7 +471,7 @@ describe('executePoolGroupTransactions', () => {
         // chain state: what landed is done
         for (const t of tokens)
           if ([...c.sends].includes(t) && net.send(t, 1) !== 'lost') done.add(t)
-        return { transactions: tokens.filter((t) => !done.has(t)).map((t) => tx([t])) }
+        return { ...NO_LANES, transactions: tokens.filter((t) => !done.has(t)).map((t) => tx([t])) }
       },
     })
     return { result, c, builds: () => builds }
@@ -530,7 +531,7 @@ describe('executePoolGroupTransactions', () => {
         chain: c.chain,
         wallet,
         pollMs: 0,
-        build: async () => ({ transactions: [tx(['a']), other] }),
+        build: async () => ({ ...NO_LANES, transactions: [tx(['a']), other] }),
       }),
       /transaction 1 also needs/,
     )
@@ -598,7 +599,7 @@ describe('executePoolGroupTransactions', () => {
       chain: c.chain,
       wallet: reblock,
       pollMs: 0,
-      build: async () => ({ transactions: [tx(['a'])] }),
+      build: async () => ({ ...NO_LANES, transactions: [tx(['a'])] }),
     })
     assert.deepEqual(seen, [replaced])
   })
@@ -616,7 +617,7 @@ describe('executePoolGroupTransactions', () => {
         chain: c.chain,
         wallet,
         pollMs: 0,
-        build: async () => ({ transactions: [tx(['a']), withNonce] }),
+        build: async () => ({ ...NO_LANES, transactions: [tx(['a']), withNonce] }),
       }),
       (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'durableNonces',
     )

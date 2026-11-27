@@ -8,9 +8,20 @@
 import type { AddressLookupTableAccount, TransactionInstruction } from '@solana/web3.js'
 
 import type { UnsignedSolanaTx } from '../../../solana/types.ts'
-import type { MultiTokenPoolLaneFinding, MultiTokenPoolSnapshot } from '../../multi-token-pool.ts'
+import type { MultiTokenPoolInlineRemotePoolDrop } from '../../evm/pool-config-manager/contracts.ts'
+import type {
+  MultiTokenPoolExpectedSnapshot,
+  MultiTokenPoolLaneFinding,
+  MultiTokenPoolSnapshot,
+} from '../../multi-token-pool.ts'
+import type { SolanaExecuteParams, SolanaGenerateParams } from '../operation.ts'
 import type { SolanaDurableNonce } from '../serialize.ts'
-import type { PoolGroupLaneKey } from './types.ts'
+import type {
+  PoolGroupLaneKey,
+  PoolGroupProgramRef,
+  PoolGroupRef,
+  PoolGroupRoles,
+} from './types.ts'
 
 /** Who executes the transactions; sets byte, lock and instruction-placement defaults. */
 export type SolanaExecutor = 'wallet' | 'squads-v4'
@@ -159,8 +170,15 @@ export type PoolGroupUnsignedResult = {
       addresses: string[]
     }[]
   }
+  /**
+   * (mint, chain) lanes whose state the write changes, found by simulating it and reading back the
+   * accounts it writes (the lane accounts, chain records and policy records they resolve from).
+   */
+  affectedLanes: PoolGroupLaneKey[]
   /** (mint, chain) lanes this write makes live or materializable on an unpaused chain. */
-  goingLive?: PoolGroupLaneKey[]
+  goingLive: PoolGroupLaneKey[]
+  /** Warning findings on the affected lanes (errors refuse the write). */
+  warnings: MultiTokenPoolLaneFinding[]
   /** Lane-check findings on the lanes the write makes live (warnings; errors throw). */
   findings?: MultiTokenPoolLaneFinding[]
   /** Follow-up writes this one makes necessary. */
@@ -258,3 +276,141 @@ export type ToPoolGroupSquadsBatchResult = {
     stepIds: string[]
   }[]
 }
+
+/**
+ * The guard options of every pool-group write (A21): a write that drops remote pools a lane trusts
+ * (or turns off `allowLegacyPoolData` on a pool it keeps) is refused unless each drop is listed
+ * here, keyed by lane. They are sealed into the snapshot.
+ */
+export type PoolGroupGuardOptions = {
+  /**
+   * The drops the caller agrees to, by lane; in-flight inbound messages from a dropped pool revert.
+   * The error's `context.dropped` has this shape.
+   */
+  confirmDropped?: MultiTokenPoolInlineRemotePoolDrop[]
+}
+
+/** Fields every write on an existing pool group takes. */
+export type PoolGroupWriteParams = PoolGroupRef &
+  PoolGroupBatchOptions &
+  PoolGroupGuardOptions &
+  MultiTokenPoolExpectedSnapshot & {
+    /** The signer the instruction checks; defaults to `payer`. Pre-flighted against the decoded roles. */
+    authority?: string
+  }
+
+/**
+ * `create_group` (+ `set_group_roles` and `add_group_chain` for `initialChains`, packed after it).
+ * Refused when the PDA exists and someone else owns it: a group at that id may be a squatter's. When
+ * it exists and `authority` owns it (an earlier run landed its first transaction), only the missing
+ * `initialChains` are built.
+ */
+export type CreatePoolGroupParams = PoolGroupProgramRef &
+  PoolGroupBatchOptions & {
+    /** Defaults to a fresh random key, returned in the result. A caller-chosen id is warned about (it can be front-run). */
+    poolGroupId?: string
+    /** Cap on every BPS fee of the group, at most 10,000; defaults to 1,000. It can only be lowered later. */
+    maxBpsFee?: number
+    /** Defaults to `false` (closed: lane owners join with the group owner's signature). */
+    openMembership?: boolean
+    /** Minimum notice of a scheduled CCV change, in seconds, at most 30 days; defaults to 86,400. */
+    minCCVActivationDelay?: number | bigint
+    /** Unset roles default to `authority`; `null` leaves one unset (then nobody holds it; FEE then has no writer). */
+    initialRoles?: Partial<PoolGroupRoles>
+    /** Chains to add (chain records, a copy of the default, lanes off); at most 24. */
+    initialChains?: bigint[]
+    /** The creator, who becomes the owner and pays the rent; defaults to `payer`. */
+    authority?: string
+  }
+
+/** Result fields of `createPoolGroup`. */
+export type CreatePoolGroupResult = {
+  /** The `Group` PDA. */
+  poolGroupAddress: string
+  /** The id it was created with. */
+  poolGroupId: string
+}
+
+/** `set_group_roles`. Owner. Merged: omitted roles keep their holder; `null` clears one. */
+export type SetPoolGroupRolesParams = PoolGroupWriteParams & {
+  /** The roles to set. */
+  roles: Partial<PoolGroupRoles>
+}
+
+/** `set_group_settings`. Owner. Always writes `maxBpsFee` and `openMembership`: merged, snapshotted. */
+export type SetPoolGroupSettingsParams = PoolGroupWriteParams & {
+  /** The new fee cap; it can only go down, and not below a fee any chain record or the default charges. */
+  maxBpsFee?: number
+  /** Whether lane owners join without the owner's signature. */
+  openMembership?: boolean
+  /** Minimum notice of a scheduled CCV change, in seconds; a decrease applies after the current notice. */
+  minCCVActivationDelay?: number | bigint
+  /** `null` clears. The table must be active and frozen. */
+  hookLookupTable?: string | null
+}
+
+/** `transfer_group_ownership`. Owner. */
+export type TransferPoolGroupOwnershipParams = PoolGroupWriteParams & {
+  /** The proposed owner; it accepts with `acceptPoolGroupOwnership`. */
+  proposedOwner: string
+}
+
+/** `accept_group_ownership`. The proposed owner. Clears all roles, resets SECURITY; the result lists the follow-ups. */
+export type AcceptPoolGroupOwnershipParams = PoolGroupWriteParams
+
+/** Unsigned params of `createPoolGroup` (no `expectedSnapshot`: the group is new). */
+export type GenerateCreatePoolGroupParams = SolanaGenerateParams<
+  CreatePoolGroupParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `createPoolGroup`. */
+export type GenerateCreatePoolGroupResult = PoolGroupUnsignedResult & CreatePoolGroupResult
+/** Signed params of `createPoolGroup`. */
+export type ExecuteCreatePoolGroupParams = SolanaExecuteParams<CreatePoolGroupParams>
+/** Signed result of `createPoolGroup`. */
+export type ExecuteCreatePoolGroupResult = PoolGroupExecuteResult & CreatePoolGroupResult
+
+/** Unsigned params of `setPoolGroupRoles` (`set_group_roles`). */
+export type GenerateSetPoolGroupRolesParams = SolanaGenerateParams<
+  SetPoolGroupRolesParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupRoles`. */
+export type GenerateSetPoolGroupRolesResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupRoles`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupRolesParams = SolanaExecuteParams<SetPoolGroupRolesParams>
+/** Signed result of `setPoolGroupRoles`. */
+export type ExecuteSetPoolGroupRolesResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupSettings` (`set_group_settings`). */
+export type GenerateSetPoolGroupSettingsParams = SolanaGenerateParams<
+  SetPoolGroupSettingsParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupSettings`. */
+export type GenerateSetPoolGroupSettingsResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupSettings`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupSettingsParams = SolanaExecuteParams<SetPoolGroupSettingsParams>
+/** Signed result of `setPoolGroupSettings`. */
+export type ExecuteSetPoolGroupSettingsResult = PoolGroupExecuteResult
+
+/** Unsigned params of `transferPoolGroupOwnership` (`transfer_group_ownership`). */
+export type GenerateTransferPoolGroupOwnershipParams = SolanaGenerateParams<
+  TransferPoolGroupOwnershipParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `transferPoolGroupOwnership`. */
+export type GenerateTransferPoolGroupOwnershipResult = PoolGroupUnsignedResult
+/** Signed params of `transferPoolGroupOwnership`; durable nonces are refused here. */
+export type ExecuteTransferPoolGroupOwnershipParams =
+  SolanaExecuteParams<TransferPoolGroupOwnershipParams>
+/** Signed result of `transferPoolGroupOwnership`. */
+export type ExecuteTransferPoolGroupOwnershipResult = PoolGroupExecuteResult
+
+/** Unsigned params of `acceptPoolGroupOwnership` (`accept_group_ownership`). */
+export type GenerateAcceptPoolGroupOwnershipParams = SolanaGenerateParams<
+  AcceptPoolGroupOwnershipParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `acceptPoolGroupOwnership`. */
+export type GenerateAcceptPoolGroupOwnershipResult = PoolGroupUnsignedResult
+/** Signed params of `acceptPoolGroupOwnership`; durable nonces are refused here. */
+export type ExecuteAcceptPoolGroupOwnershipParams =
+  SolanaExecuteParams<AcceptPoolGroupOwnershipParams>
+/** Signed result of `acceptPoolGroupOwnership`. */
+export type ExecuteAcceptPoolGroupOwnershipResult = PoolGroupExecuteResult

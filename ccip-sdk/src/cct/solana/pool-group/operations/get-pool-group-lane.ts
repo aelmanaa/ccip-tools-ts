@@ -92,27 +92,9 @@ export class GetPoolGroupLanes extends SolanaQuery<
    */
   protected async read(chain: SolanaChain, ref: ParsedLanes): Promise<GetPoolGroupLaneResult[]> {
     await readPoolGroup(this.name, chain, ref)
-    const filters = [
-      memcmp(0, BorshAccountsCoder.accountDiscriminator('ChainConfigV2')),
-      memcmp(9, Uint8Array.of(2)),
-      ...(ref.selector !== undefined ? [memcmp(10, toLeArray(ref.selector, 8))] : []),
-    ]
-    const accounts = await listProgramAccounts(this.name, chain, ref.program, filters, {
-      param: 'connection',
+    const lanes = await listPoolGroupLaneRequests(this.name, chain, ref, {
       fix: 'listing lanes needs it; use an RPC that serves getProgramAccounts, or read each lane with getPoolGroupLane',
     })
-    const group = ref.group.toBase58()
-    const lanes: PoolGroupLaneRequest[] = []
-    for (const { pubkey, account } of accounts) {
-      const lane = decodePoolGroupChainConfigV2(account.data, pubkey.toBase58())
-      if (lane.ext?.poolGroupAddress !== group) continue
-      if (ref.kind && (ref.kind === 'driven') !== lane.ext.groupDriven) continue
-      lanes.push({
-        mint: parsePublicKey(this.name, 'mint', lane.mint),
-        selector: lane.remoteChainSelector,
-        v2: account,
-      })
-    }
     // a tail whose ChainConfig is gone is no lane: transfers read the ChainConfig first
     const out = await readPoolGroupLanes(this.name, chain, ref.program, lanes, {
       skipMissing: true,
@@ -123,4 +105,42 @@ export class GetPoolGroupLanes extends SolanaQuery<
         Number(a.remoteChainSelector - b.remoteChainSelector),
     )
   }
+}
+
+/**
+ * The linked and driven lanes of a pool group, from `getProgramAccounts` on `ChainConfigV2`
+ * (discriminator @0, version 2 @9, selector @10 when given): the tails naming this group, each with
+ * its `ChainConfigV2` in hand.
+ * @throws {@link CCTParamsInvalidError} (param `connection`, with `fix`) if the RPC refuses
+ *   `getProgramAccounts`
+ * @internal
+ */
+export async function listPoolGroupLaneRequests(
+  operation: string,
+  chain: SolanaChain,
+  ref: Pick<ParsedLanes, 'program' | 'group' | 'selector' | 'kind'>,
+  { fix }: { fix: string },
+): Promise<PoolGroupLaneRequest[]> {
+  const filters = [
+    memcmp(0, BorshAccountsCoder.accountDiscriminator('ChainConfigV2')),
+    memcmp(9, Uint8Array.of(2)),
+    ...(ref.selector !== undefined ? [memcmp(10, toLeArray(ref.selector, 8))] : []),
+  ]
+  const accounts = await listProgramAccounts(operation, chain, ref.program, filters, {
+    param: 'connection',
+    fix,
+  })
+  const group = ref.group.toBase58()
+  const lanes: PoolGroupLaneRequest[] = []
+  for (const { pubkey, account } of accounts) {
+    const lane = decodePoolGroupChainConfigV2(account.data, pubkey.toBase58())
+    if (lane.ext?.poolGroupAddress !== group) continue
+    if (ref.kind && (ref.kind === 'driven') !== lane.ext.groupDriven) continue
+    lanes.push({
+      mint: parsePublicKey(operation, 'mint', lane.mint),
+      selector: lane.remoteChainSelector,
+      v2: account,
+    })
+  }
+  return lanes
 }

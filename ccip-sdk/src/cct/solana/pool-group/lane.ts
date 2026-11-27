@@ -452,11 +452,23 @@ export function laneCcvSync(
 
 /**
  * Why every transfer on the lane reverts although it is not paused, if it does: SECURITY from a
- * named record of an older security generation than the group's (`PolicySecurityStale`), or a CCV
- * copy out of step with its record (`GroupCcvsNotSynced`). Both apply to sends and receives.
+ * named record of an older security generation than the group's (`PolicySecurityStale`), a CCV
+ * copy out of step with its record (`GroupCcvsNotSynced`), or FEE from a policy whose BPS fee is
+ * above the cap the chain record mirrors (`BpsFeeAboveGroupMax`, `resolve_lane_policy_with`,
+ * chainlink-ccip-solana 7558722 `base-token-pool/src/groups.rs:903-911`: a cap lowered after the
+ * fee was written applies at once). All apply to sends and receives.
  * @internal
  */
 export function laneFailsClosed(state: PoolGroupLaneState): string | undefined | Unread {
+  const fee = laneSectionsFor(state, 'fee')
+  if (isUnread(fee)) return fee
+  const gcp = state.groupChain?.record
+  if (fee && gcp?.maxBpsFeeSet) {
+    const { finalityBpsFee, fastFinalityBpsFee } = fee.fee.tokenTransferFeeConfig
+    const bps = Math.max(finalityBpsFee, fastFinalityBpsFee)
+    if (bps > gcp.maxBpsFee)
+      return `BpsFeeAboveGroupMax: the lane's FEE policy charges ${bps} bps, above the pool group's cap of ${gcp.maxBpsFee} bps`
+  }
   const source = state.ext?.poolGroupAddress ? state.ext.classSource.security : undefined
   if (source?.kind === 'policy') {
     const record = state.named.get(source.slot)
@@ -469,4 +481,19 @@ export function laneFailsClosed(state: PoolGroupLaneState): string | undefined |
   if (sync && !sync.synced)
     return "GroupCcvsNotSynced: the lane's CCV copy differs from its SECURITY record"
   return undefined
+}
+
+/** The finding code, record type and fix of a {@link laneFailsClosed} reason. @internal */
+export function laneFailsClosedFinding(reason: string): {
+  check: 'TRANSFER_FEE_ABOVE_CAP' | 'CCVS_NOT_SYNCED'
+  recordType: 'fee' | 'security'
+  fix: string
+} {
+  return reason.startsWith('BpsFeeAboveGroupMax')
+    ? {
+        check: 'TRANSFER_FEE_ABOVE_CAP',
+        recordType: 'fee',
+        fix: "lower the FEE policy's BPS fees to the cap",
+      }
+    : { check: 'CCVS_NOT_SYNCED', recordType: 'security', fix: 'sync the lane' }
 }
