@@ -9,6 +9,7 @@ import { ZeroAddress, getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
+import { attestedRemoteFacts } from './guard-facts.ts'
 import {
   type MultiTokenPoolGuardFacts,
   type MultiTokenPoolGuardOptions,
@@ -439,33 +440,40 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     assert.equal(judge(inlineLane(T1), { facts: unread }).factFailures[0]?.cause, cause)
   })
 
-  it('reports an attested remote fact as a warning', () => {
-    const attested: MultiTokenPoolRemoteLaneFacts = {
-      status: 'known',
-      readsLongData: true,
-      registryPool: RPOOL,
-      mapsBack: true,
-      attestation: {
-        remoteChainSelector: C1,
-        remoteToken: REMOTE_A,
-        remotePoolAddress: RPOOL,
-        acceptsLongPoolData: true,
-        attestedAt: 0n,
-        validUntil: 1n,
-        reason: 'ops read',
-      },
+  it('reports an attested remote fact as a warning, in the shape the reader builds', () => {
+    const attestation = {
+      remoteChainSelector: C1,
+      remoteToken: REMOTE_A,
+      remotePoolAddress: RPOOL,
+      acceptsLongPoolData: true,
+      attestedAt: 0n,
+      validUntil: 1n,
+      reason: 'ops read',
     }
-    const r = judge(inlineLane(T1), {
-      facts: goodFacts({
-        remoteLanes: new Map([
-          [guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 }), attested],
-        ]),
-      }),
-    })
-    assert.deepEqual(
-      r.findings.map((f) => [f.check, f.severity]),
-      [['REMOTE_ATTESTED', 'warning']],
-    )
+    const judged = (format: 'long' | 'legacy') => {
+      const changes = inlineLane(T1, { format })
+      const lane = multiTokenPoolAffectedLanes(
+        empty(),
+        applyMultiTokenPoolRecordChanges(empty(), changes),
+      )[0]!.after
+      return judge(changes, {
+        facts: goodFacts({
+          remoteLanes: new Map([
+            [
+              guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 }),
+              attestedRemoteFacts(lane, attestation),
+            ],
+          ]),
+        }),
+      }).findings.map((f) => [f.check, f.severity])
+    }
+    // a long lane names its source token in the data: the attestation suffices
+    assert.deepEqual(judged('long'), [['REMOTE_ATTESTED', 'warning']])
+    // a legacy lane relies on the reverse mapping, which an attestation does not read: fails closed
+    assert.deepEqual(judged('legacy'), [
+      ['REMOTE_LANE_MISMATCH', 'error'],
+      ['REMOTE_ATTESTED', 'warning'],
+    ])
   })
 
   it('refuses a policy lane whose provider answers no remote token', () => {

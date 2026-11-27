@@ -321,6 +321,24 @@ export async function remoteChainOf(
   }))
 }
 
+/**
+ * The remote facts an accepted attestation stands for. The reverse mapping needs a read: a legacy lane
+ * relies on it and fails closed without one, while a long lane names its source token in the data.
+ * @internal
+ */
+export function attestedRemoteFacts(
+  lane: Pick<ProjectedMultiTokenPoolLane, 'connection'>,
+  attestation: MultiTokenPoolRemoteAttestation,
+): MultiTokenPoolRemoteLaneFacts {
+  return {
+    status: 'known',
+    readsLongData: attestation.acceptsLongPoolData,
+    registryPool: attestation.remotePoolAddress,
+    mapsBack: lane.connection.poolDataFormat !== 'legacy',
+    attestation,
+  }
+}
+
 /** Checks an attestation against the attestation rules; returns why it is refused, or `undefined`. */
 export function attestationRefusal(
   a: MultiTokenPoolRemoteAttestation,
@@ -358,14 +376,7 @@ async function readRemoteLane(
     const refused = attestationRefusal(attestation, input)
     if (refused)
       return { status: 'unknown', reason: `the attestation for this lane is refused: ${refused}` }
-    return {
-      status: 'known',
-      readsLongData: attestation.acceptsLongPoolData,
-      registryPool: attestation.remotePoolAddress,
-      // the reverse mapping needs a read; legacy lanes fail closed without one
-      mapsBack: false,
-      attestation,
-    }
+    return attestedRemoteFacts(lane, attestation)
   }
   if (!trusted.length)
     return {
