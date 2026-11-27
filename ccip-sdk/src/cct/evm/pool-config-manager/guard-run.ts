@@ -336,7 +336,7 @@ export async function runMultiTokenPoolGuards(
   // hash, so a re-check of the proposal applies the same ones
   const expected = {
     ...input.expected,
-    [GUARD_OPTIONS_PATH]: guardOptionsOf(input),
+    [GUARD_OPTIONS_PATH]: guardOptionsOf(input, errorOperation),
     // the target pool is a serving pool the guard counted; a re-check of the proposal, which sees only
     // the PCM, needs the same one
     ...(input.poolAddress !== undefined && { [GUARD_POOL_PATH]: getAddress(input.poolAddress) }),
@@ -375,8 +375,15 @@ export const GUARD_OPTIONS_PATH = 'guard.options'
 /** The `expected` path the target pool is sealed under. @internal */
 export const GUARD_POOL_PATH = 'guard.poolAddress'
 
-/** The guard options a write was judged with, defaults dropped, in a stable shape. @internal */
-export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGuardOptions {
+/**
+ * The guard options a write was judged with, defaults dropped, in a stable shape; `operation` names
+ * the op in a refusal.
+ * @internal
+ */
+export function guardOptionsOf(
+  o: MultiTokenPoolGuardOptions,
+  operation = 'runMultiTokenPoolGuards',
+): MultiTokenPoolGuardOptions {
   return {
     ...(o.allowDroppingDefaultCCVs && { allowDroppingDefaultCCVs: true }),
     ...(o.maxTransferFeeBps !== undefined && { maxTransferFeeBps: o.maxTransferFeeBps }),
@@ -400,7 +407,7 @@ export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGua
     }),
     ...(o.confirmDropped?.length && {
       confirmDropped: sealConfirmDropped(
-        'guardOptionsOf',
+        operation,
         o.confirmDropped,
         (t) => getAddress(String(t)),
         guardLaneKey,
