@@ -919,13 +919,28 @@ export async function judgePoolGroupWrite(
       ? checkedLanes
       : checkedLanes.filter((l) => l.mode === 'changed')
   if (lanesToCheck.length) {
-    const checked = await checkLanesAfter(input, lanesToCheck, {
+    const found = await checkLanesAfter(input, lanesToCheck, {
       overlay: changed,
       instructions: input.instructions,
       payer: input.payer,
       ...(input.lookupTables && { lookupTables: input.lookupTables }),
     })
-    findings.push(...checked)
+    // a write that must never be blocked (an ownership accept, A22) reports what it changes
+    const checked =
+      (input.goingLiveSeverity ?? 'error') === 'warning'
+        ? found.map((f) =>
+            f.severity === 'error'
+              ? {
+                  ...f,
+                  severity: 'warning' as const,
+                  reason: `${f.reason} (reported: this write is never blocked)`,
+                }
+              : f,
+          )
+        : found
+    // a fact the judge already reports on the lane (a CCV copy out of step) is reported once
+    const own = new Set(findings.map((f) => `${laneKey(f)}|${f.check}`))
+    findings.push(...checked.filter((f) => !own.has(`${laneKey(f)}|${f.check}`)))
     inputs.push({ live: checked.map((f) => [laneKey(f), f.check, f.severity]) })
     const failing = checked.filter((f) => f.severity === 'error')
     if (failing.length && !input.reportFindings)
