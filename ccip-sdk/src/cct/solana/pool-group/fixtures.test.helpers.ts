@@ -217,6 +217,10 @@ export type GroupChainOpts = {
   remotePools?: string[]
   /** The record's RATE_LIMIT outbound capacity; defaults to 100. */
   outboundCapacity?: number
+  /** The record's RATE_LIMIT outbound rate; defaults to 1 (0 with capacity 0 is a stop). */
+  outboundRate?: number
+  /** The record's fast-finality outbound bucket; defaults to disabled. */
+  ftfOutbound?: { capacity: number; rate: number }
   /** A pending CCV set of the record's SECURITY. */
   pending?: { outbound: PublicKey[]; inbound: PublicKey[]; epoch: bigint; activatesAt: bigint }
   /** The record's SECURITY hooks. */
@@ -246,15 +250,21 @@ export function groupChainData(opts: GroupChainOpts = {}): Buffer {
       )
     const policy = v.policy as {
       connection: Record<string, unknown>
-      rateLimit: { outbound: Record<string, unknown> }
+      rateLimit: { outbound: Record<string, unknown>; ftfOutbound: Record<string, unknown> }
       security: { current: Record<string, unknown> }
     }
     // the record's RATE_LIMIT: capacity 100, rate 1
     Object.assign(policy.rateLimit.outbound, {
       enabled: true,
       capacity: bn(opts.outboundCapacity ?? 100),
-      rate: bn(1),
+      rate: bn(opts.outboundRate ?? 1),
     })
+    if (opts.ftfOutbound)
+      Object.assign(policy.rateLimit.ftfOutbound, {
+        enabled: true,
+        capacity: bn(opts.ftfOutbound.capacity),
+        rate: bn(opts.ftfOutbound.rate),
+      })
     policy.security.current.outbound = opts.ccvs ?? []
     if (opts.hook)
       Object.assign(policy.security, {

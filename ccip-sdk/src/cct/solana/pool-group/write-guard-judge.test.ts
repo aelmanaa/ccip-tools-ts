@@ -676,3 +676,34 @@ describe('S4 review: hook rules (M1) and Squads pauses (M3)', () => {
     )
   })
 })
+
+describe('fast-finality semantics (e6 B1, chainlink-ccip-solana 7558722 v2.rs consume_rate_limit_in_group)', () => {
+  it("re-enabling FTF on a lane stopped through the default bucket loosens it: scope 'loosened' judges it", async () => {
+    // RATE_LIMIT from the group default, FEE from a named policy; the write lowers the cap below it
+    const record = policyChainData(2, 0, { feeBps: 500 })
+    const stopped = groupChainData({ maxBpsFee: 1_000, outboundCapacity: 0, outboundRate: 0 })
+    const before = linked({ sources: [0, 2, 1, 0] }, stopped, record)
+    // FTF transfers fell back to the stopped default bucket; an enabled FTF bucket reopens them
+    const reopened = new Map([
+      [
+        GCP,
+        groupChainData({
+          maxBpsFee: 100,
+          outboundCapacity: 0,
+          outboundRate: 0,
+          ftfOutbound: { capacity: 50, rate: 1 },
+        }),
+      ],
+    ])
+    await assert.rejects(
+      judge(chainFor(before, reopened), { scope: 'loosened' }),
+      refusedWith('TRANSFER_FEE_ABOVE_CAP'),
+    )
+    // the same stop with FTF still disabled is a clamp: it builds
+    const same = new Map([
+      [GCP, groupChainData({ maxBpsFee: 100, outboundCapacity: 0, outboundRate: 0 })],
+    ])
+    const r = await judge(chainFor(before, same), { scope: 'loosened' })
+    assert.deepEqual(r.findings, [])
+  })
+})
