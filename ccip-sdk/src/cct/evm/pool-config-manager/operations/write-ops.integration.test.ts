@@ -220,4 +220,43 @@ describe('MTTP write ops, built read-only (Sepolia)', { skip, timeout: 600_000 }
         e instanceof CCTParamsInvalidError && e.context.param === 'profilesToSet[0].tokenAddress',
     )
   })
+
+  it('without a sender, simulates the store calls from the PoolConfigManager (A20)', async (t) => {
+    if (!deployed) return t.skip('v5v9 not deployed')
+    const unsigned = await cct.generateUnsignedApplyMultiTokenPoolTokenProfileUpdates({
+      poolAddress: CORE_POOL,
+      getChain,
+      profilesToUpdate: [{ tokenAddress: CORE_TOKEN, allowedFinality: { finalityDepth: 5 } }],
+    })
+    assert.equal(unsigned.simulatedFrom, 'pcm')
+    assert.equal(unsigned.transactions[0]!.from, undefined)
+    testLogger.info(`no-sender projectionVerified: ${unsigned.projectionVerified}`)
+  })
+
+  it('refuses an unknown policy and a rate limit policy of other decimals, naming the record type', async (t) => {
+    if (!deployed) return t.skip('v5v9 not deployed')
+    const assign = (recordType: 'fee' | 'rateLimit', policyName: string) =>
+      cct.generateUnsignedApplyMultiTokenPoolTokenPolicyUpdates({
+        ...core,
+        getChain,
+        recordType,
+        assignments: [{ tokenAddress: CORE_TOKEN, policyName }],
+      })
+    await assert.rejects(
+      assign('fee', 'no-such-policy'),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        e.context.param === 'assignments[0].policyName' &&
+        e.context.recordType === 'fee' &&
+        /PolicyNotFound/.test(e.message),
+    )
+    // sc6 is a 6-decimal rate limit policy; the core token has 18 decimals
+    await assert.rejects(
+      assign('rateLimit', 'sc6'),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        e.context.recordType === 'rateLimit' &&
+        /InvalidRateLimitPolicyDecimals/.test(e.message),
+    )
+  })
 })

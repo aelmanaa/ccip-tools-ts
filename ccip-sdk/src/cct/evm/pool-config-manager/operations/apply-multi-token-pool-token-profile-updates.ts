@@ -7,6 +7,7 @@
 
 import { ZeroAddress, getAddress, toBeHex } from 'ethers'
 
+import { CCIPTokenDecimalsUnavailableError } from '../../../../errors/index.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import {
   type LockOrBurnFlavor,
@@ -18,12 +19,14 @@ import { type FinalityAllowed, encodeFinality } from '../../../../extra-args.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import type { MultiTokenPoolLaneFinding } from '../../../multi-token-pool.ts'
 import {
-  type MultiTokenPoolContractType,
+  type MultiTokenPoolType,
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
+  isSupportedMultiTokenPoolType,
   poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
+import { isNotCcipContract } from '../../query.ts'
 import { validateAllowedFinality } from '../../token-pool/operations/set-allowed-finality-config.ts'
 import {
   validateAddress,
@@ -36,7 +39,11 @@ import {
 import { type MultiTokenPoolTokenProfileFields, decodeTokenProfile } from '../contracts.ts'
 import { multiTokenPoolSupportedChains } from '../projection.ts'
 import { readMultiTokenPoolRecordState } from '../record-state.ts'
-import { readPoolsServingPoolConfigManager, readRegistryEntry } from '../serving-pools.ts'
+import {
+  type PoolConfigManagerServingPools,
+  poolConfigManagerOf,
+  readPoolsServingPoolConfigManager,
+} from '../serving-pools.ts'
 import {
   type MultiTokenPoolWriteGuards,
   type PoolConfigManagerWrite,
@@ -66,7 +73,9 @@ export type MultiTokenPoolTokenProfile = {
 
 /**
  * A partial profile, for a registered token: omitted fields keep their on-chain value (the op reads
- * and merges); `null` clears a nullable field. `localDecimals` cannot change.
+ * and merges); `null` clears a nullable field. `localDecimals` cannot change. One exception: changing
+ * `lockOrBurnFlavor` without `lockOrBurnAddress` clears the address, since only `'burn-to-address'`
+ * and `'lock'` use one.
  */
 export type MultiTokenPoolTokenProfileUpdate = {
   /** The registered token to update. */
@@ -93,21 +102,24 @@ export type ApplyMultiTokenPoolTokenProfileUpdatesParams = PoolConfigManagerWrit
     profilesToUpdate?: MultiTokenPoolTokenProfileUpdate[]
     /**
      * Allow changing the flavor, `lockOrBurnAddress` or `additionalPoolDataProvider` of a token that
-     * has lanes (F1). Defaults to `false`. The lanes are judged again with the new profile either way.
+     * has lanes. Defaults to `false`. The lanes are judged again with the new profile either way.
      */
     allowLiveProfileChange?: boolean
     /**
      * Burn-to-address targets the caller confirms by repeating them: required for any target but
      * `0x000000000000000000000000000000000000dEaD`, code or no code (an EOA target turns every burn
-     * into a transfer while the destination still mints, F1).
+     * into a transfer while the destination still mints). The serving pool itself is refused.
      */
     confirmBurnAddress?: string[]
     /**
-     * The pool whose served flavors are checked (F13); defaults to `poolAddress`. Required with a
+     * The pool whose served flavors are checked; defaults to `poolAddress`. It must call this PoolConfigManager. Required with a
      * `poolConfigManager` target and a `'lock'` profile.
      */
     servingPool?: string
   }
+
+/** The factory UID provider's type (chainlink-ccip c950d9bc `FactoryTokenWithUIDPoolDataProvider.sol`). */
+const UID_PROVIDER_TYPE = 'FactoryTokenWithUIDPoolDataProvider'
 
 /** The conventional burn sink, exempt from `confirmBurnAddress`. */
 const DEAD = getAddress('0x000000000000000000000000000000000000dead')
@@ -116,7 +128,7 @@ const DEAD = getAddress('0x000000000000000000000000000000000000dead')
  * Flavors each multi-token pool type refuses (`_isSupportedFlavor`): `BurnMintMultiTokenPool`
  * serves every flavor but `'lock'` (chainlink-ccip c950d9bc `BurnMintMultiTokenPool.sol:33-36`).
  */
-const UNSERVED_FLAVORS: Partial<Record<MultiTokenPoolContractType, readonly LockOrBurnFlavor[]>> = {
+const UNSERVED_FLAVORS: Partial<Record<MultiTokenPoolType, readonly LockOrBurnFlavor[]>> = {
   BurnMintMultiTokenPool: ['lock'],
 }
 
@@ -133,7 +145,7 @@ type ProfileChange = {
 /**
  * Registers, updates and deregisters tokens.
  * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), a profile guard
- *   refuses (F1, F13, decimals, burn target, removal with config left, a set of a registered token or
+ *   refuses (live change, served flavor, decimals, burn target, removal with config left, a set of a registered token or
  *   an update of an unregistered one), `sender` lacks the gate, or a lane guard refuses
  * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager or a
  *   multi-token pool
@@ -166,16 +178,17 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
     if (params.servingPool !== undefined)
       validateAddress(this.name, 'servingPool', params.servingPool)
 
-    const once = (list: { tokenAddress: string }[], name: string, seen = new Set<string>()) =>
-      list.forEach((p, i) => {
-        const token = getAddress(p.tokenAddress)
-        if (seen.has(token))
+    const once = (tokens: string[], name: string, seen: Map<string, string>, field = '') =>
+      tokens.forEach((t, i) => {
+        const token = getAddress(t)
+        const first = seen.get(token)
+        if (first !== undefined)
           throw new CCTParamsInvalidError(
             this.name,
-            `${name}[${i}].tokenAddress`,
-            `${token} appears twice in profilesToSet and profilesToUpdate: the result would depend on order; give each token once`,
+            `${name}[${i}]${field}`,
+            `${token} is also at ${first}: the result would depend on order; give each token once`,
           )
-        seen.add(token)
+        seen.set(token, `${name}[${i}]`)
       })
     Array.from(profilesToSet, (p, i) =>
       this.#validateProfile(params, p, `profilesToSet[${i}]`, true),
@@ -183,9 +196,21 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
     Array.from(profilesToUpdate, (p, i) =>
       this.#validateProfile(params, p, `profilesToUpdate[${i}]`, false),
     )
-    const seen = new Set<string>()
-    once(profilesToSet, 'profilesToSet', seen)
-    once(profilesToUpdate, 'profilesToUpdate', seen)
+    // removal runs first, so a token may be removed and set again; within each side, once
+    once(tokensToRemove, 'tokensToRemove', new Map())
+    const seen = new Map<string, string>()
+    once(
+      profilesToSet.map((p) => p.tokenAddress),
+      'profilesToSet',
+      seen,
+      '.tokenAddress',
+    )
+    once(
+      profilesToUpdate.map((p) => p.tokenAddress),
+      'profilesToUpdate',
+      seen,
+      '.tokenAddress',
+    )
     const removed = new Set(tokensToRemove.map((t) => getAddress(t)))
     profilesToUpdate.forEach((p, i) => {
       if (removed.has(getAddress(p.tokenAddress)))
@@ -205,8 +230,9 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
     at: string,
     full: boolean,
   ): void {
-    validateAddress(this.name, `${at}.tokenAddress`, p?.tokenAddress)
-    const profile = p!
+    if (p === undefined) throw new CCTParamsInvalidError(this.name, at, 'must be a profile object')
+    validateAddress(this.name, `${at}.tokenAddress`, p.tokenAddress)
+    const profile = p
     if (full || profile.lockOrBurnFlavor !== undefined)
       validateOneOf(
         this.name,
@@ -235,7 +261,7 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
         )
       if (v !== undefined && v !== null) validateAddress(this.name, `${at}.${field}`, v)
     }
-    if (!full && Object.keys(profile).length === 1)
+    if (!full && Object.values(profile).filter((v: unknown) => v !== undefined).length === 1)
       throw new CCTParamsInvalidError(
         this.name,
         at,
@@ -253,7 +279,7 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
       this.#checkBurnTarget(params, target, at)
   }
 
-  /** F1: a burn target other than `0x…dEaD` must be repeated in `confirmBurnAddress`. */
+  /** A burn target other than `0x…dEaD` must be repeated in `confirmBurnAddress`. */
   #checkBurnTarget(
     params: ApplyMultiTokenPoolTokenProfileUpdatesParams,
     target: string,
@@ -264,14 +290,14 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
       throw new CCTParamsInvalidError(
         this.name,
         `${at}.lockOrBurnAddress`,
-        'is address(0): OpenZeppelin ERC-20s revert transfers to it, so every send would revert; use 0x…dEaD',
+        'is address(0): OpenZeppelin ERC-20s revert transfers to it, so every send would revert; use 0x000000000000000000000000000000000000dEaD',
       )
     if (t !== DEAD && !params.confirmBurnAddress?.some((c) => getAddress(c) === t))
       throw new CCTParamsInvalidError(
         this.name,
         'confirmBurnAddress',
-        `burning to ${t} must be confirmed: an EOA or contract target receives every burnt token while the destination still mints. Repeat it in confirmBurnAddress, or use 0x000000000000000000000000000000000000dEaD`,
-        { context: { target: t } },
+        `${at}.lockOrBurnAddress burns to ${t}, which must be confirmed: an EOA or contract target receives every burnt token while the destination still mints. Repeat it in confirmBurnAddress, or use 0x000000000000000000000000000000000000dEaD`,
+        { context: { target: t, profile: at } },
       )
   }
 
@@ -309,17 +335,23 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
           `${token} is not registered`,
         )
       const records = state.tokens.find((t) => getAddress(t.tokenAddress) === token)
-      const left = records
-        ? LANE_RECORD_TYPES.filter(
-            (type) => records.policies[type] !== null || records.inline[type].length,
-          )
+      const policies = records
+        ? LANE_RECORD_TYPES.filter((type) => records.policies[type] !== null)
         : []
-      if (left.length)
+      const inline = records ? LANE_RECORD_TYPES.filter((type) => records.inline[type].length) : []
+      if (policies.length || inline.length)
         throw new CCTParamsInvalidError(
           this.name,
           `tokensToRemove[${i}]`,
-          `${token} still has ${left.join(', ')} config (a policy or inline records): clear it first, or the stores revert (TokenHasConfig)`,
-          { context: { recordTypes: left } },
+          `${token} still has config, so the stores revert (TokenHasConfig): ${[
+            ...(policies.length
+              ? [
+                  `clear its ${policies.join(', ')} policies with applyMultiTokenPoolTokenPolicyUpdates({ recordType, assignments: [{ tokenAddress, policyName: null }] })`,
+                ]
+              : []),
+            ...(inline.length ? [`remove its inline ${inline.join(', ')} records`] : []),
+          ].join(', and ')}, then deregister it`,
+          { context: { policies, inline } },
         )
     })
 
@@ -333,8 +365,22 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
           `profilesToSet[${i}].tokenAddress`,
           `${token} is registered: update it with profilesToUpdate, or deregister it in tokensToRemove first`,
         )
-      // decimals: the token's own, which the connection store checks on registration
-      const decimals = (await chain.getTokenInfo(token)).decimals
+      // decimals: the token's own, which the connection store checks on registration; a token
+      // without decimals() takes the given ones, as the store's try/catch does
+      const read = await chain.getTokenInfo(token).then(
+        (info) => info.decimals,
+        (err: unknown) => {
+          if (!(err instanceof CCIPTokenDecimalsUnavailableError)) throw err
+          return undefined
+        },
+      )
+      if (read === undefined && p.localDecimals === undefined)
+        throw new CCTParamsInvalidError(
+          this.name,
+          `profilesToSet[${i}].localDecimals`,
+          `is required: ${token} has no decimals() to default from`,
+        )
+      const decimals = read ?? p.localDecimals!
       if (p.localDecimals !== undefined && p.localDecimals !== decimals)
         throw new CCTParamsInvalidError(
           this.name,
@@ -395,13 +441,21 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
 
     for (const c of changes) this.#checkProfile(c)
     this.#checkLiveChanges(params, changes, state)
+    await this.#checkServingPool(chain, params, { address, version, blockTag })
     await this.#checkServedFlavors(chain, params, changes)
-    const warnings = await this.#uidMigrationWarnings(chain, params, changes, {
-      address,
+    // the pools serving this PCM for the changed tokens, and their registry entries
+    const serving = await readPoolsServingPoolConfigManager(chain, {
+      poolConfigManager: address,
       version,
-      blockTag,
       tokenAdminRegistry: staticConfig.tokenAdminRegistry,
+      tokens: changes.map((c) => c.next.tokenAddress),
+      ...((params.poolAddress ?? params.servingPool) !== undefined && {
+        targetPool: (params.poolAddress ?? params.servingPool)!,
+      }),
+      blockTag,
     })
+    this.#checkBurnTargetsNotServing(params, changes, serving.serving)
+    await this.#checkProviders(chain, changes, serving, blockTag)
 
     const iface = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version)
     const data = iface.encodeFunctionData('applyTokenProfileUpdates', [
@@ -417,7 +471,7 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
     ])
     // the values the write replaces: each touched token's stored profile
     const expected = Object.fromEntries(tokens.map((t) => [`profiles.${t}`, stored.get(t)]))
-    return { data, expected, ...(warnings.length && { warnings }) }
+    return { data, expected }
   }
 
   /** The store's flavor and address rules, refused before the eth_call names them. */
@@ -438,7 +492,7 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
       )
   }
 
-  /** F1: a flavor, address or provider change on a token with lanes needs `allowLiveProfileChange`. */
+  /** A flavor, address or provider change on a token with lanes needs `allowLiveProfileChange`. */
   #checkLiveChanges(
     params: ApplyMultiTokenPoolTokenProfileUpdatesParams,
     changes: readonly ProfileChange[],
@@ -455,13 +509,13 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
         throw new CCTParamsInvalidError(
           this.name,
           'allowLiveProfileChange',
-          `${param} changes ${changed.join(', ')} of ${next.tokenAddress}, which has lanes to ${lanes.join(', ')}: in-flight transfers were sent under the old profile. Pause the token first, or pass allowLiveProfileChange: true`,
+          `${param} changes ${changed.join(', ')} of ${next.tokenAddress}, which has lanes to ${lanes.join(', ')}: in-flight transfers were sent under the old profile. Pause the token and let in-flight transfers settle, then pass allowLiveProfileChange: true`,
           { context: { tokenAddress: next.tokenAddress, fields: changed, chains: lanes } },
         )
     }
   }
 
-  /** F13: a flavor the serving pool does not serve makes every send revert. */
+  /** A flavor the serving pool does not serve makes every send revert. */
   async #checkServedFlavors(
     chain: EVMChain,
     params: ApplyMultiTokenPoolTokenProfileUpdatesParams,
@@ -479,7 +533,7 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
         `is required to check ${at[0]!.param}'s '${at[0]!.next.lockOrBurnFlavor}' flavor: name the pool that serves the token (not the registry's pool, which can lag during a migration)`,
       )
     const [type] = await chain.typeAndVersion(pool)
-    const unserved = UNSERVED_FLAVORS[type as MultiTokenPoolContractType]
+    const unserved = isSupportedMultiTokenPoolType(type) ? UNSERVED_FLAVORS[type] : undefined
     for (const c of at)
       if (!unserved || unserved.includes(c.next.lockOrBurnFlavor))
         throw new CCTParamsInvalidError(
@@ -487,61 +541,107 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
           `${c.param}.lockOrBurnFlavor`,
           unserved
             ? `'${c.next.lockOrBurnFlavor}' is not served by ${type} ${pool}: every send would revert (UnsupportedLockOrBurnFlavor)`
-            : `cannot tell whether ${type} ${pool} serves '${c.next.lockOrBurnFlavor}', so it is refused`,
+            : `cannot tell whether ${type} ${pool} serves '${c.next.lockOrBurnFlavor}', so it is refused: servingPool must be the multi-token pool that serves the token (one of MULTI_TOKEN_POOL_TYPES)`,
+        )
+  }
+
+  /** A `servingPool` must call this PoolConfigManager: another pool proves nothing about it. */
+  async #checkServingPool(
+    chain: EVMChain,
+    { servingPool }: ApplyMultiTokenPoolTokenProfileUpdatesParams,
+    { address, version, blockTag }: PoolConfigManagerWriteContext,
+  ): Promise<void> {
+    if (servingPool === undefined) return
+    const pcm = await poolConfigManagerOf(chain, servingPool, version, blockTag)
+    if (pcm !== getAddress(address))
+      throw new CCTParamsInvalidError(
+        this.name,
+        'servingPool',
+        `${servingPool} ${pcm ? `calls PoolConfigManager ${pcm}` : 'is not a multi-token pool'}, not ${getAddress(address)}: name the multi-token pool that serves these tokens`,
+      )
+  }
+
+  /** A pool refuses to burn to itself (`InvalidBurnAddress`), which the stores cannot see. */
+  #checkBurnTargetsNotServing(
+    params: ApplyMultiTokenPoolTokenProfileUpdatesParams,
+    changes: readonly ProfileChange[],
+    serving: readonly string[],
+  ): void {
+    const pools = new Set(
+      [...serving, params.poolAddress, params.servingPool]
+        .filter((p): p is string => p !== undefined)
+        .map((p) => getAddress(p)),
+    )
+    for (const { param, next } of changes)
+      if (
+        next.lockOrBurnFlavor === 'burn-to-address' &&
+        next.lockOrBurnAddress &&
+        pools.has(next.lockOrBurnAddress)
+      )
+        throw new CCTParamsInvalidError(
+          this.name,
+          `${param}.lockOrBurnAddress`,
+          `is ${next.lockOrBurnAddress}, a pool serving this PoolConfigManager: a pool refuses to burn to itself (InvalidBurnAddress), so every send would revert; use 0x000000000000000000000000000000000000dEaD`,
         )
   }
 
   /**
-   * The UID stand-in until the SDK reads pool migration history: a token whose provider is set or changed
-   * gets `UID_MIGRATION_UNCHECKED` when the registry names a pool other than the pools serving this PCM
-   * for it, or an admin transfer is pending; such a history may have minted tokens a UID provider now
-   * refuses. Never passes silently when the reads can tell.
+   * A provider set or changed by the write: it must have code (the store reverts `ProviderHasNoCode`),
+   * and a factory UID provider is refused while the token's registry shows a pool history the SDK
+   * cannot yet check: the registry serves it from a pool not serving this PCM, or an admin transfer is
+   * pending. Such a history may have released tokens the UID provider now refuses. It passes when the
+   * registry shows none.
    */
-  async #uidMigrationWarnings(
+  async #checkProviders(
     chain: EVMChain,
-    params: ApplyMultiTokenPoolTokenProfileUpdatesParams,
     changes: readonly ProfileChange[],
-    ctx: PoolConfigManagerWriteContext & { tokenAdminRegistry: string },
-  ): Promise<MultiTokenPoolLaneFinding[]> {
-    const providerChanged = changes.filter(
+    serving: PoolConfigManagerServingPools,
+    blockTag: number,
+  ): Promise<void> {
+    const set = changes.filter(
       (c) =>
         c.next.additionalPoolDataProvider !== null &&
         c.next.additionalPoolDataProvider !== (c.current?.additionalPoolDataProvider ?? null),
     )
-    if (!providerChanged.length) return []
-    const tokens = providerChanged.map((c) => c.next.tokenAddress)
-    const { serving } = await readPoolsServingPoolConfigManager(chain, {
-      poolConfigManager: ctx.address,
-      version: ctx.version,
-      tokenAdminRegistry: ctx.tokenAdminRegistry,
-      tokens,
-      blockTag: ctx.blockTag,
-    })
-    const ours = new Set([
-      ...serving,
-      ...(params.poolAddress ? [getAddress(params.poolAddress)] : []),
-      ...(params.servingPool ? [getAddress(params.servingPool)] : []),
-    ])
-    const warnings: MultiTokenPoolLaneFinding[] = []
-    for (const token of tokens) {
-      const entry = await readRegistryEntry(chain, ctx.tokenAdminRegistry, token)
-      const pool = entry?.tokenPool ? getAddress(entry.tokenPool) : null
-      const reasons = [
-        ...(pool !== null && !ours.has(pool) ? [`the registry serves it from ${pool}`] : []),
+    for (const { param, next } of set) {
+      const provider = next.additionalPoolDataProvider!
+      if ((await chain.provider.getCode(provider, blockTag)) === '0x')
+        throw new CCTParamsInvalidError(
+          this.name,
+          `${param}.additionalPoolDataProvider`,
+          `${provider} has no code: the store refuses it (ProviderHasNoCode)`,
+        )
+      const [type] = await chain.typeAndVersion(provider).catch((err: unknown) => {
+        if (isNotCcipContract(err)) return ['']
+        throw err
+      })
+      if (type !== UID_PROVIDER_TYPE) continue
+      const entry = serving.entries.get(next.tokenAddress)
+      const diverged = serving.diverged.find((d) => d.token === next.tokenAddress)
+      const history = [
+        ...(diverged
+          ? [
+              `the registry serves it from ${diverged.pool}, which does not use this PoolConfigManager`,
+            ]
+          : []),
         ...(entry?.pendingAdministrator
           ? [`an admin transfer to ${entry.pendingAdministrator} is pending`]
           : []),
       ]
-      if (reasons.length)
-        warnings.push({
-          check: 'UID_MIGRATION_UNCHECKED',
-          severity: 'warning',
-          tokenAddress: token,
-          // about the token, not one lane
-          remoteChainSelector: 0n,
-          reason: `${reasons.join(', and ')}: the token may have a pool history the new provider does not account for; the SDK does not check pool migration history yet, so review it before relying on the UID`,
-        })
+      if (!history.length) continue
+      const finding: MultiTokenPoolLaneFinding = {
+        check: 'UID_MIGRATION_UNCHECKED',
+        severity: 'error',
+        tokenAddress: next.tokenAddress,
+        remoteChainSelector: 0n,
+        reason: `${history.join(', and ')}: another pool may have released this token without the unique-ID (UID) data the provider requires, which the SDK cannot check yet. Finish the migration (point the registry at a pool serving this PoolConfigManager, settle the admin transfer) before setting a UID provider`,
+      }
+      throw new CCTParamsInvalidError(
+        this.name,
+        'guards',
+        `${param} sets a UID provider on ${next.tokenAddress}: ${finding.reason}`,
+        { context: { findings: [finding] } },
+      )
     }
-    return warnings
   }
 }

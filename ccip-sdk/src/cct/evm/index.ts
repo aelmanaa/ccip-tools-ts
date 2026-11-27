@@ -1517,7 +1517,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * The pool owner is the only permitted caller; when `sender` is supplied it is checked against
    * `owner()` before calldata is returned.
    *
-   * @throws {@link CCTContractTypeInvalidError} if the pool's reported type is not supported
+   * @throws {@link CCTContractTypeInvalidError} if the pool's reported type is not supported; on a
+   * multi-token pool, the reason names `applyMultiTokenPoolTokenProfileUpdates`
    * @throws {@link CCTOperationUnsupportedError} on a pre-v2.0.0 pool
    * @throws {@link CCTParamsInvalidError} if a param is invalid, `poolAddress` is zero, or `sender`
    * is supplied and is not the pool owner
@@ -1549,7 +1550,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTContractTypeInvalidError} if the pool's reported type is not supported
+   * @throws {@link CCTContractTypeInvalidError} if the pool's reported type is not supported; on a
+   * multi-token pool, the reason names `applyMultiTokenPoolTokenProfileUpdates`
    * @throws {@link CCTOperationUnsupportedError} on a pre-v2.0.0 pool
    * @throws {@link CCTParamsInvalidError} if a param is invalid, `sender` differs from the wallet,
    * or the wallet is not the pool owner
@@ -5308,21 +5310,26 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * call. The profile guards, beyond the lane guard every PCM write runs:
    * - decimals are the token's own on registration and never change while registered;
    * - a flavor, `lockOrBurnAddress` or provider change on a token with lanes needs
-   *   `allowLiveProfileChange` (F1), and its lanes are judged again with the new profile: the remote
+   *   `allowLiveProfileChange`, and its lanes are judged again with the new profile: the remote
    *   token's provider must accept what the lane sends, and the new provider what arrives;
-   * - a `'burn-to-address'` target other than `0x…dEaD` must be repeated in `confirmBurnAddress`;
-   *   `address(0)` is refused;
-   * - a flavor the serving pool does not serve (`'lock'` on `BurnMintMultiTokenPool`) is refused (F13);
+   * - a `'burn-to-address'` target other than `0x000000000000000000000000000000000000dEaD` must be
+   *   repeated in `confirmBurnAddress`; `address(0)` and a pool serving this PoolConfigManager are
+   *   refused;
+   * - a flavor the serving pool does not serve (`'lock'` on `BurnMintMultiTokenPool`) is refused;
+   *   `servingPool` must call this PoolConfigManager;
+   * - a provider must have code;
+   * - a factory UID provider is refused while the token's registry shows a pool history: it serves the
+   *   token from a pool not serving this PoolConfigManager, or an admin transfer is pending
+   *   (`UID_MIGRATION_UNCHECKED`, an error finding whose `remoteChainSelector` is `0n`: it is about
+   *   the token). It passes when the registry shows none;
    * - a token is deregistered only with no policy and no inline record left.
-   *
-   * The SDK does not read a token's pool migration history yet: setting a provider on a token the
-   * registry serves from another pool, or with an admin transfer pending, returns a
-   * `UID_MIGRATION_UNCHECKED` warning (its `remoteChainSelector` is `0n`: it is about the token).
    *
    * Gate: `CONFIG_ROLE` or `TOKEN_MANAGER_ROLE` (`PoolConfigManager.applyTokenProfileUpdates`).
    *
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), a profile guard or a
-   * lane guard refuses, or `sender` holds neither gate role; `context.param` names the field
+   * lane guard refuses, `sender` holds neither gate role, or the write reverts when simulated;
+   * `context.param` names the field, or for a lane-guard refusal is `guards` (with
+   * `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`)
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5355,28 +5362,33 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
 
   /**
    * Signs and submits `applyTokenProfileUpdates` with `opts.wallet`: registers, updates and
-   * deregisters tokens on a PoolConfigManager. `sender` defaults to the wallet, so the gate always
-   * runs; the state is re-read right before sending. Use
+   * deregisters tokens on a PoolConfigManager. `sender` defaults to the wallet and, when supplied,
+   * must equal it, so the gate always runs; the state is re-read right before sending. Use
    * {@link generateUnsignedApplyMultiTokenPoolTokenProfileUpdates} for multisig or offline signing.
    * @remarks Removals run first, as on chain, so a token can be deregistered and re-registered in one
    * call. The profile guards, beyond the lane guard every PCM write runs:
    * - decimals are the token's own on registration and never change while registered;
    * - a flavor, `lockOrBurnAddress` or provider change on a token with lanes needs
-   *   `allowLiveProfileChange` (F1), and its lanes are judged again with the new profile: the remote
+   *   `allowLiveProfileChange`, and its lanes are judged again with the new profile: the remote
    *   token's provider must accept what the lane sends, and the new provider what arrives;
-   * - a `'burn-to-address'` target other than `0x…dEaD` must be repeated in `confirmBurnAddress`;
-   *   `address(0)` is refused;
-   * - a flavor the serving pool does not serve (`'lock'` on `BurnMintMultiTokenPool`) is refused (F13);
+   * - a `'burn-to-address'` target other than `0x000000000000000000000000000000000000dEaD` must be
+   *   repeated in `confirmBurnAddress`; `address(0)` and a pool serving this PoolConfigManager are
+   *   refused;
+   * - a flavor the serving pool does not serve (`'lock'` on `BurnMintMultiTokenPool`) is refused;
+   *   `servingPool` must call this PoolConfigManager;
+   * - a provider must have code;
+   * - a factory UID provider is refused while the token's registry shows a pool history: it serves the
+   *   token from a pool not serving this PoolConfigManager, or an admin transfer is pending
+   *   (`UID_MIGRATION_UNCHECKED`, an error finding whose `remoteChainSelector` is `0n`: it is about
+   *   the token). It passes when the registry shows none;
    * - a token is deregistered only with no policy and no inline record left.
-   *
-   * The SDK does not read a token's pool migration history yet: setting a provider on a token the
-   * registry serves from another pool, or with an admin transfer pending, returns a
-   * `UID_MIGRATION_UNCHECKED` warning (its `remoteChainSelector` is `0n`: it is about the token).
    *
    * Gate: `CONFIG_ROLE` or `TOKEN_MANAGER_ROLE` (`PoolConfigManager.applyTokenProfileUpdates`).
    *
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), a profile guard or a
-   * lane guard refuses, or `sender` holds neither gate role; `context.param` names the field
+   * lane guard refuses, `sender` holds neither gate role, or the write reverts when simulated;
+   * `context.param` names the field, or for a lane-guard refusal is `guards` (with
+   * `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`)
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5384,7 +5396,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
    * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -5415,7 +5430,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * `sender` is optional (multisig and offline signing); when given, the gate is pre-flighted and
    * the write is simulated from it.
    *
-   * Gate, from `PoolConfigManager._checkTokenRoles` (chainlink-ccip c950d9bc): `CONFIG_ROLE`,
+   * Gate, from `PoolConfigManager._checkTokenRoles`: `CONFIG_ROLE`,
    * `TOKEN_MANAGER_ROLE`, or the record type's own role:
    *
    * | `recordType` | role |
@@ -5429,7 +5444,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
    * and holds none of the gate's roles, the write opens a lane `confirmOpening` does not list, or a
-   * guard refuses the state after the write; `reason` names the fix and `context.recordType` is set
+   * guard refuses the state after the write, or the write reverts when simulated; `reason` names the
+   * fix and `context.recordType` is set; a lane-guard refusal's param is `guards` (with
+   * `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`)
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5465,11 +5482,11 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * data and the release, no two tokens share a remote token, the hook authorizes the serving pools,
    * and every open lane has all its records. A lane the write closes needs `confirmClosing`; with
    * `confirmOpening`, a lane it opens beyond the list is refused. `null` clears an assignment.
-   * `sender` defaults to the wallet, so the gate always runs; the state is re-read right before
-   * sending. Use {@link generateUnsignedApplyMultiTokenPoolTokenPolicyUpdates} for multisig or
+   * `sender` defaults to the wallet and, when supplied, must equal it, so the gate always runs; the
+   * state is re-read right before sending. Use {@link generateUnsignedApplyMultiTokenPoolTokenPolicyUpdates} for multisig or
    * offline signing.
    *
-   * Gate, from `PoolConfigManager._checkTokenRoles` (chainlink-ccip c950d9bc): `CONFIG_ROLE`,
+   * Gate, from `PoolConfigManager._checkTokenRoles`: `CONFIG_ROLE`,
    * `TOKEN_MANAGER_ROLE`, or the record type's own role:
    *
    * | `recordType` | role |
@@ -5483,7 +5500,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
    * and holds none of the gate's roles, the write opens a lane `confirmOpening` does not list, or a
-   * guard refuses the state after the write; `reason` names the fix and `context.recordType` is set
+   * guard refuses the state after the write, or the write reverts when simulated; `reason` names the
+   * fix and `context.recordType` is set; a lane-guard refusal's param is `guards` (with
+   * `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`)
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5491,7 +5510,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
    * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
+   * before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -5860,6 +5882,8 @@ export type * from './multi-token-pool/operations/index.ts'
 export type * from './pool-config-manager/operations/index.ts'
 // the shared shapes of every PoolConfigManager write
 export type {
+  MultiTokenPoolGuardOptions,
+  MultiTokenPoolSimulatedFrom,
   MultiTokenPoolTransactionResult,
   MultiTokenPoolUnsignedTx,
   MultiTokenPoolWriteGuards,
