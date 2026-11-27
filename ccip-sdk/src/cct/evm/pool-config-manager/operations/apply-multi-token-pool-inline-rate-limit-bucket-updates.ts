@@ -24,7 +24,7 @@ import {
   validateOneOf,
   validateUint64,
 } from '../../validate.ts'
-import { MESSAGE_DIRECTIONS, laneKey, rateLimitBucketOf } from '../projection.ts'
+import { MESSAGE_DIRECTIONS, inlineRecordOf, laneKey, rateLimitBucketOf } from '../projection.ts'
 import type { InlineRateLimitBucketUpdate } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -89,10 +89,7 @@ export class ApplyMultiTokenPoolInlineRateLimitBucketUpdates extends PoolConfigM
     { updates }: ApplyMultiTokenPoolInlineRateLimitBucketUpdatesParams,
     { version, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
-    const recordOf = (u: InlineRateLimitBucketUpdate) =>
-      state.tokens
-        .find((t) => getAddress(t.tokenAddress) === getAddress(u.tokenAddress))
-        ?.inline.rateLimit.find((r) => r.remoteChainSelector === u.remoteChainSelector)
+    const recordOf = (u: InlineRateLimitBucketUpdate) => inlineRecordOf(state, 'rateLimit', u)
     updates.forEach((u, i) => {
       if (!recordOf(u))
         throw new CCTParamsInvalidError(

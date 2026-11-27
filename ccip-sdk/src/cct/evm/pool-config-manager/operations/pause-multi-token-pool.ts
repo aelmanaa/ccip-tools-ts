@@ -25,6 +25,7 @@ import {
   validateUint64,
 } from '../../validate.ts'
 import { readChainPauseFlags } from '../contracts.ts'
+import { tokenRecordsOf } from '../projection.ts'
 import { type PauseDirection, PAUSE_DIRECTIONS } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -145,7 +146,7 @@ abstract class PauseWriteOperation<
         : this.scope === 'tokens'
           ? Object.fromEntries(
               params.tokenAddresses!.map((t) => {
-                const token = state.tokens.find((r) => getAddress(r.tokenAddress) === t)
+                const token = tokenRecordsOf(state, t)
                 return [
                   `pauses.token.${t}`,
                   {

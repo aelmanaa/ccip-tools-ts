@@ -55,6 +55,7 @@ import {
   multiTokenPoolSupportedChains,
   policyKey,
   resolveMultiTokenPoolLanes,
+  tokenRecordsOf,
 } from './projection.ts'
 
 // the guard defaults and pool-data sizes are family-neutral: they live in the shared module, re-exported
@@ -659,9 +660,7 @@ function policyBlastRadius(
   type: LaneRecordType,
 ): string {
   if (lane.levels[type] !== 'policy-chain' && lane.levels[type] !== 'policy-default') return ''
-  const token = state.tokens.find(
-    (t) => getAddress(t.tokenAddress) === getAddress(lane.tokenAddress),
-  )
+  const token = tokenRecordsOf(state, lane.tokenAddress)
   const name = token?.policies[type]
   if (!name) return ''
   const word = policyKey(name, 'policyName')

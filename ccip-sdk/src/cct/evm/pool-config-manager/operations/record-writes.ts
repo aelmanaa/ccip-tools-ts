@@ -33,7 +33,14 @@ import {
   validateLaneKeys,
   validatePolicyRecordKey,
 } from '../contracts.ts'
-import { type MultiTokenPoolRecordState, laneKey, policyKey, recordKey } from '../projection.ts'
+import {
+  type MultiTokenPoolRecordState,
+  inlineRecordOf,
+  laneKey,
+  policyKey,
+  recordKey,
+  tokenRecordsOf,
+} from '../projection.ts'
 import type { PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -215,10 +222,8 @@ export function checkInlineRecordWrite(
   type: LaneRecordType,
   { remove = [], set = [] }: InlineRecordWrite,
 ): void {
-  const tokenOf = (t: string) =>
-    state.tokens.find((r) => getAddress(r.tokenAddress) === getAddress(t))
   remove.forEach((l, i) => {
-    const records = tokenOf(l.tokenAddress)?.inline[type] ?? []
+    const records = tokenRecordsOf(state, l.tokenAddress)?.inline[type] ?? []
     if (!records.some((r) => r.remoteChainSelector === l.remoteChainSelector))
       throw new CCTParamsInvalidError(
         operation,
@@ -228,7 +233,7 @@ export function checkInlineRecordWrite(
       )
   })
   set.forEach((l, i) => {
-    if (!tokenOf(l.tokenAddress))
+    if (!tokenRecordsOf(state, l.tokenAddress))
       throw new CCTParamsInvalidError(
         operation,
         `set[${i}].tokenAddress`,
@@ -410,12 +415,7 @@ export abstract class InlineRecordWriteOperation<
       ],
     )
     // the values the write replaces: each touched lane's inline record (absent: `null`)
-    const current = (l: MultiTokenPoolLaneKey) =>
-      (
-        state.tokens.find((t) => getAddress(t.tokenAddress) === getAddress(l.tokenAddress))?.inline[
-          this.recordType
-        ] as readonly MultiTokenPoolLaneKey[] | undefined
-      )?.find((r) => r.remoteChainSelector === l.remoteChainSelector) ?? null
+    const current = (l: MultiTokenPoolLaneKey) => inlineRecordOf(state, this.recordType, l) ?? null
     const expected = Object.fromEntries(
       [...(params.remove ?? []), ...(params.set ?? [])].map((l) => [
         `inline.${this.recordType}.${laneKey(l.tokenAddress, l.remoteChainSelector)}`,
