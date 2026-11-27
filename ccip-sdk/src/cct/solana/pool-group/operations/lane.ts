@@ -32,8 +32,9 @@ import { orThrow } from './common.ts'
 const deriveV2 = (state: PoolGroupLaneState): PublicKey =>
   deriveTokenPoolChainConfigV2Pda(state.program, state.selector, state.mint)
 
-/** Each class's source, with the named records' policy accounts and ids. */
-async function classSources(
+/** Each class's source, with the named records' policy accounts and ids. @internal */
+export async function classSources(
+  operation: string,
   chain: SolanaChain,
   state: PoolGroupLaneState,
 ): Promise<Record<PoolGroupPolicyClass, PoolGroupClassSource> | null> {
@@ -49,7 +50,7 @@ async function classSources(
       decodePoolGroupIdlAccount('policy', account.data, policy.toBase58())
     if (!decoded)
       throw new CCTParamsInvalidError(
-        'getPoolGroupLane',
+        operation,
         'tokenAddress',
         `the lane's policy ${policy.toBase58()} does not exist`,
       )
@@ -73,21 +74,30 @@ async function classSources(
   return out
 }
 
+/** What `observe_lane_group` returns: what a lane applies per class, as the program resolves it. @internal */
+export type LaneGroupObservation = Awaited<
+  ReturnType<
+    ReturnType<ReturnType<typeof createPoolGroupProgram>['methods']['observeLaneGroup']>['view']
+  >
+>
+
 /**
- * The lane's buckets as of now, from simulating `observe_lane_group` with its group and named
- * records; `undefined` when the program refuses the view (it is not a pool-groups program).
+ * Simulates `observe_lane_group` with the lane's group and named records: the effective fee config,
+ * pauses and buckets as of now under the configs the lane applies. `undefined` when the program
+ * refuses the view (it is not a pool-groups program).
+ * @internal
  */
-async function observeBuckets(
+export async function observeLane(
   chain: SolanaChain,
   state: PoolGroupLaneState,
-): Promise<GetPoolGroupLaneResult['rateLimits']> {
+): Promise<LaneGroupObservation | undefined> {
   const program = createPoolGroupProgram(chain, state.program)
   const remaining = [
     ...(state.groupChain ? [state.groupChain.address] : []),
     ...[...state.named.values()].map((n) => n.address),
   ].map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }))
   try {
-    const view = await program.methods
+    return await program.methods
       .observeLaneGroup({
         remoteChainSelector: new BN(state.selector.toString()),
         mint: state.mint,
@@ -103,19 +113,28 @@ async function observeBuckets(
       })
       .remainingAccounts(remaining)
       .view()
-    return {
-      inbound: toBigInt(view.inboundRateLimit.tokens),
-      outbound: toBigInt(view.outboundRateLimit.tokens),
-      ...(view.ftfInboundRateLimit && {
-        fastFinalityInbound: toBigInt(view.ftfInboundRateLimit.tokens),
-      }),
-      ...(view.ftfOutboundRateLimit && {
-        fastFinalityOutbound: toBigInt(view.ftfOutboundRateLimit.tokens),
-      }),
-    }
   } catch (err) {
     if (isSimulationFailure(err)) return undefined
     throw err
+  }
+}
+
+/** The lane's buckets as of now, from {@link observeLane}. */
+async function observeBuckets(
+  chain: SolanaChain,
+  state: PoolGroupLaneState,
+): Promise<GetPoolGroupLaneResult['rateLimits']> {
+  const view = await observeLane(chain, state)
+  if (!view) return undefined
+  return {
+    inbound: toBigInt(view.inboundRateLimit.tokens),
+    outbound: toBigInt(view.outboundRateLimit.tokens),
+    ...(view.ftfInboundRateLimit && {
+      fastFinalityInbound: toBigInt(view.ftfInboundRateLimit.tokens),
+    }),
+    ...(view.ftfOutboundRateLimit && {
+      fastFinalityOutbound: toBigInt(view.ftfOutboundRateLimit.tokens),
+    }),
   }
 }
 
@@ -152,7 +171,7 @@ export async function readPoolGroupLane(
     remoteChainSelector: selector,
     kind: state.kind,
     poolGroupAddress: ext?.poolGroupAddress ?? null,
-    classSource: await classSources(chain, state),
+    classSource: await classSources(operation, chain, state),
     ...pauses,
     poolDataFormat: orThrow(laneFormat(state), where),
     uid: ext?.uid ?? null,
