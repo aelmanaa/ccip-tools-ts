@@ -63,6 +63,7 @@ export class ApplyMultiTokenPoolConnectionPolicyConfigUpdates extends PolicyReco
       )
   }
 
+  /** Validates `openToAllPolicyTokens` once, then the record lists. */
   protected override prepare(
     params: ApplyMultiTokenPoolConnectionPolicyConfigUpdatesParams,
   ): ApplyMultiTokenPoolConnectionPolicyConfigUpdatesParams {
