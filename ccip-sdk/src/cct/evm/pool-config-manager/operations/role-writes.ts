@@ -7,7 +7,7 @@
  * @packageDocumentation
  */
 
-import { ZeroAddress, getAddress } from 'ethers'
+import { type Result, ZeroAddress, getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
@@ -34,6 +34,7 @@ import {
   readPoolConfigManagerAdmin,
 } from '../contracts.ts'
 import {
+  type PoolConfigManagerFacts,
   type PoolConfigManagerWrite,
   type PoolConfigManagerWriteContext,
   type PoolConfigManagerWriteParams,
@@ -94,12 +95,47 @@ const targetParam = (t: PoolConfigManagerTarget) =>
   t.poolConfigManager !== undefined ? 'poolConfigManager' : 'poolAddress'
 
 /** The admin state a write seals (what it replaces), as plain values. */
-const adminExpected = (a: PoolConfigManagerAdminState) => ({
+const adminExpected = (a: PoolConfigManagerAdminState): PoolConfigManagerFacts => ({
   'admin.defaultAdmin': a.defaultAdmin,
   'admin.pending': a.pending,
   'admin.delay': a.delay,
   'admin.pendingDelay': a.pendingDelay,
 })
+
+/** The admin state back from the facts {@link adminExpected} sealed. */
+const adminOf = (facts: PoolConfigManagerFacts) =>
+  ({
+    defaultAdmin: facts['admin.defaultAdmin'],
+    pending: facts['admin.pending'],
+    delay: facts['admin.delay'],
+    pendingDelay: facts['admin.pendingDelay'],
+  }) as Omit<PoolConfigManagerAdminState, 'delayIncreaseWait'>
+
+/** The path a role-membership fact is sealed at. */
+const rolePath = (role: PoolConfigManagerRole, account: string) => `roles.${role}.${account}`
+
+/** The grantable role a calldata role id names. */
+function roleOfId(operation: string, id: unknown): PoolConfigManagerGrantableRole {
+  const role = GRANTABLE_ROLES.find((r) => poolConfigManagerRoleId(r) === String(id).toLowerCase())
+  if (!role)
+    throw new CCTParamsInvalidError(
+      operation,
+      'transaction',
+      `names role id ${String(id)}, which is not a grantable PoolConfigManager role`,
+    )
+  return role
+}
+
+/** A renounce's account must be the executing account (OZ checks `callerConfirmation == msg.sender`). */
+function renouncedBy(operation: string, account: unknown, sender: string): string {
+  if (getAddress(String(account)) !== getAddress(sender))
+    throw new CCTParamsInvalidError(
+      operation,
+      'sender',
+      `must be ${getAddress(String(account))}, the account the renounce names (OZ requires the caller to confirm itself)`,
+    )
+  return getAddress(sender)
+}
 
 /** The shared base: record-free, its function from the op map. */
 abstract class RoleWriteOperation<
@@ -121,12 +157,55 @@ abstract class RoleWriteOperation<
     )
   }
 
-  /** The PCM's admin state at the build block. */
-  protected admin(
+  /** The PCM's admin state at the build block, as the facts it seals. */
+  protected async adminFacts(
     chain: EVMChain,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
-  ): Promise<PoolConfigManagerAdminState> {
-    return readPoolConfigManagerAdmin(poolConfigManagerContract(chain, address, version), blockTag)
+    {
+      address,
+      version,
+      blockTag,
+    }: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
+  ): Promise<PoolConfigManagerFacts> {
+    return adminExpected(
+      await readPoolConfigManagerAdmin(
+        poolConfigManagerContract(chain, address, version),
+        blockTag,
+      ),
+    )
+  }
+
+  /** Whether `account` holds `role` at the build block, as the fact it seals. */
+  protected async roleFact(
+    chain: EVMChain,
+    role: PoolConfigManagerRole,
+    account: string,
+    {
+      address,
+      version,
+      blockTag,
+    }: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
+  ): Promise<PoolConfigManagerFacts> {
+    const pcm = poolConfigManagerContract(chain, address, version)
+    const held = (await readPoolConfigManagerRolesHeld(pcm, account, [role], blockTag)).length > 0
+    return { [rolePath(role, getAddress(account))]: held }
+  }
+}
+
+/** An admin-lifecycle write: judged on, and sealing, the PCM's admin state. */
+abstract class AdminWriteOperation<
+  P extends PoolConfigManagerWriteParams,
+> extends RoleWriteOperation<P> {
+  protected override readFacts(
+    chain: EVMChain,
+    _params: P,
+    ctx: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
+  ): Promise<PoolConfigManagerFacts> {
+    return this.adminFacts(chain, ctx)
+  }
+
+  /** A write that takes no argument but the target. */
+  override paramsFromCalldata(_args: Result, target: PoolConfigManagerTarget, sender: string): P {
+    return { ...target, sender } as P
   }
 }
 
@@ -147,13 +226,33 @@ abstract class RoleGrantOperation extends RoleWriteOperation<GrantMultiTokenPool
     return ['DEFAULT_ADMIN_ROLE']
   }
 
-  protected async encode(
+  protected override readFacts(
     chain: EVMChain,
     { role, account }: GrantMultiTokenPoolRoleParams,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
-  ): Promise<PoolConfigManagerWrite> {
-    const pcm = poolConfigManagerContract(chain, address, version)
-    const held = (await readPoolConfigManagerRolesHeld(pcm, account, [role], blockTag)).length > 0
+    ctx: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
+  ): Promise<PoolConfigManagerFacts> {
+    return this.roleFact(chain, role, account, ctx)
+  }
+
+  override paramsFromCalldata(
+    args: Result,
+    target: PoolConfigManagerTarget,
+    sender: string,
+  ): GrantMultiTokenPoolRoleParams {
+    return {
+      ...target,
+      sender,
+      role: roleOfId(this.name, args[0]),
+      account: getAddress(String(args[1])),
+    }
+  }
+
+  protected encode(
+    _chain: EVMChain,
+    { role, account }: GrantMultiTokenPoolRoleParams,
+    { address, version, facts }: PoolConfigManagerWriteContext,
+  ): PoolConfigManagerWrite {
+    const held = facts[rolePath(role, account)] === true
     // as main's token role ops: a write that changes nothing is refused
     if (held === this.grants)
       throw new CCTParamsInvalidError(
@@ -163,10 +262,7 @@ abstract class RoleGrantOperation extends RoleWriteOperation<GrantMultiTokenPool
           ? `already holds ${role} on PoolConfigManager ${address}; granting it again changes nothing`
           : `does not hold ${role} on PoolConfigManager ${address}; revoking it changes nothing`,
       )
-    return {
-      data: this.calldata(version, [poolConfigManagerRoleId(role), account]),
-      expected: { [`roles.${role}.${account}`]: held },
-    }
+    return { data: this.calldata(version, [poolConfigManagerRoleId(role), account]) }
   }
 }
 
@@ -214,16 +310,33 @@ export class RenounceMultiTokenPoolRole extends RoleWriteOperation<RenounceMulti
     return [role]
   }
 
+  // the holder's membership, read (the gate pre-flights it too)
+  protected override readFacts(
+    chain: EVMChain,
+    { role, sender }: RenounceMultiTokenPoolRoleParams,
+    ctx: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
+  ): Promise<PoolConfigManagerFacts> {
+    return this.roleFact(chain, role, sender, ctx)
+  }
+
+  override paramsFromCalldata(
+    args: Result,
+    target: PoolConfigManagerTarget,
+    sender: string,
+  ): RenounceMultiTokenPoolRoleParams {
+    return {
+      ...target,
+      role: roleOfId(this.name, args[0]),
+      sender: renouncedBy(this.name, args[1], sender),
+    }
+  }
+
   protected encode(
     _chain: EVMChain,
     { role, sender }: RenounceMultiTokenPoolRoleParams,
     { version }: PoolConfigManagerWriteContext,
   ): PoolConfigManagerWrite {
-    const account = getAddress(sender)
-    return {
-      data: this.calldata(version, [poolConfigManagerRoleId(role), account]),
-      expected: { [`roles.${role}.${account}`]: true },
-    }
+    return { data: this.calldata(version, [poolConfigManagerRoleId(role), getAddress(sender)]) }
   }
 }
 
@@ -235,7 +348,7 @@ export class RenounceMultiTokenPoolRole extends RoleWriteOperation<RenounceMulti
  *   `confirmPermanentFreeze` is not `true` (before any RPC), `sender` is not the default admin, no
  *   renounce is scheduled, or its delay has not passed
  */
-export class RenounceMultiTokenPoolDefaultAdmin extends RoleWriteOperation<RenounceMultiTokenPoolDefaultAdminParams> {
+export class RenounceMultiTokenPoolDefaultAdmin extends AdminWriteOperation<RenounceMultiTokenPoolDefaultAdminParams> {
   readonly name = 'renounceMultiTokenPoolDefaultAdmin'
 
   /** Requires `sender` and `confirmPermanentFreeze: true`, before any RPC. */
@@ -257,15 +370,32 @@ export class RenounceMultiTokenPoolDefaultAdmin extends RoleWriteOperation<Renou
     return ['DEFAULT_ADMIN_ROLE']
   }
 
+  /** The calldata proves the intent, so a re-check confirms the freeze. */
+  override paramsFromCalldata(
+    args: Result,
+    target: PoolConfigManagerTarget,
+    sender: string,
+  ): RenounceMultiTokenPoolDefaultAdminParams {
+    if (String(args[0]) !== poolConfigManagerRoleId('DEFAULT_ADMIN_ROLE'))
+      throw new CCTParamsInvalidError(
+        this.name,
+        'transaction',
+        `renounces ${roleOfId(this.name, args[0])}, not the default admin: check it as renounceMultiTokenPoolRole`,
+      )
+    return {
+      ...target,
+      sender: renouncedBy(this.name, args[1], sender),
+      confirmPermanentFreeze: true,
+    }
+  }
+
   protected async encode(
     chain: EVMChain,
     params: RenounceMultiTokenPoolDefaultAdminParams,
     ctx: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
-    const [admin, block] = await Promise.all([
-      this.admin(chain, ctx),
-      chain.provider.getBlock(ctx.blockTag),
-    ])
+    const admin = adminOf(ctx.facts)
+    const block = await chain.provider.getBlock(ctx.blockTag)
     const at = targetParam(params)
     if (admin.pending.schedule === 0n || admin.pending.newAdmin !== ZeroAddress)
       throw new CCTParamsInvalidError(
@@ -287,7 +417,6 @@ export class RenounceMultiTokenPoolDefaultAdmin extends RoleWriteOperation<Renou
         poolConfigManagerRoleId('DEFAULT_ADMIN_ROLE'),
         getAddress(params.sender),
       ]),
-      expected: adminExpected(admin),
     }
   }
 }
@@ -298,7 +427,7 @@ export class RenounceMultiTokenPoolDefaultAdmin extends RoleWriteOperation<Renou
  * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), or `sender` is not the
  *   default admin
  */
-export class BeginMultiTokenPoolDefaultAdminTransfer extends RoleWriteOperation<BeginMultiTokenPoolDefaultAdminTransferParams> {
+export class BeginMultiTokenPoolDefaultAdminTransfer extends AdminWriteOperation<BeginMultiTokenPoolDefaultAdminTransferParams> {
   readonly name = 'beginMultiTokenPoolDefaultAdminTransfer'
 
   /** Validates `newAdmin` (zero allowed: a renounce), before any RPC. */
@@ -314,15 +443,20 @@ export class BeginMultiTokenPoolDefaultAdminTransfer extends RoleWriteOperation<
     return ['DEFAULT_ADMIN_ROLE']
   }
 
-  protected async encode(
-    chain: EVMChain,
+  override paramsFromCalldata(
+    args: Result,
+    target: PoolConfigManagerTarget,
+    sender: string,
+  ): BeginMultiTokenPoolDefaultAdminTransferParams {
+    return { ...target, sender, newAdmin: getAddress(String(args[0])) }
+  }
+
+  protected encode(
+    _chain: EVMChain,
     { newAdmin }: BeginMultiTokenPoolDefaultAdminTransferParams,
     ctx: PoolConfigManagerWriteContext,
-  ): Promise<PoolConfigManagerWrite> {
-    return {
-      data: this.calldata(ctx.version, [newAdmin]),
-      expected: adminExpected(await this.admin(chain, ctx)),
-    }
+  ): PoolConfigManagerWrite {
+    return { data: this.calldata(ctx.version, [newAdmin]) }
   }
 }
 
@@ -333,7 +467,7 @@ export class BeginMultiTokenPoolDefaultAdminTransfer extends RoleWriteOperation<
  * @throws {@link CCTParamsInvalidError} if no transfer is pending, it is a renounce, or `sender` is
  *   not the pending admin
  */
-export class AcceptMultiTokenPoolDefaultAdminTransfer extends RoleWriteOperation<AcceptMultiTokenPoolDefaultAdminTransferParams> {
+export class AcceptMultiTokenPoolDefaultAdminTransfer extends AdminWriteOperation<AcceptMultiTokenPoolDefaultAdminTransferParams> {
   readonly name = 'acceptMultiTokenPoolDefaultAdminTransfer'
 
   // the gate is not a role: the pending admin, checked in `encode` (with or without a sender)
@@ -343,12 +477,12 @@ export class AcceptMultiTokenPoolDefaultAdminTransfer extends RoleWriteOperation
 
   protected override async preflight(): Promise<void> {}
 
-  protected async encode(
-    chain: EVMChain,
+  protected encode(
+    _chain: EVMChain,
     params: AcceptMultiTokenPoolDefaultAdminTransferParams,
     ctx: PoolConfigManagerWriteContext,
-  ): Promise<PoolConfigManagerWrite> {
-    const admin = await this.admin(chain, ctx)
+  ): PoolConfigManagerWrite {
+    const admin = adminOf(ctx.facts)
     assertDefaultAdminTransferAcceptable(
       this.name,
       targetParam(params),
@@ -356,7 +490,7 @@ export class AcceptMultiTokenPoolDefaultAdminTransfer extends RoleWriteOperation
       params.sender,
       'renounceMultiTokenPoolDefaultAdmin',
     )
-    return { data: this.calldata(ctx.version, []), expected: adminExpected(admin) }
+    return { data: this.calldata(ctx.version, []) }
   }
 }
 
@@ -364,21 +498,20 @@ export class AcceptMultiTokenPoolDefaultAdminTransfer extends RoleWriteOperation
  * Cancels a scheduled default admin transfer (or renounce).
  * @throws {@link CCTParamsInvalidError} if none is scheduled, or `sender` is not the default admin
  */
-export class CancelMultiTokenPoolDefaultAdminTransfer extends RoleWriteOperation<CancelMultiTokenPoolDefaultAdminTransferParams> {
+export class CancelMultiTokenPoolDefaultAdminTransfer extends AdminWriteOperation<CancelMultiTokenPoolDefaultAdminTransferParams> {
   readonly name = 'cancelMultiTokenPoolDefaultAdminTransfer'
 
   protected gate(): readonly PoolConfigManagerRole[] {
     return ['DEFAULT_ADMIN_ROLE']
   }
 
-  protected async encode(
-    chain: EVMChain,
+  protected encode(
+    _chain: EVMChain,
     params: CancelMultiTokenPoolDefaultAdminTransferParams,
     ctx: PoolConfigManagerWriteContext,
-  ): Promise<PoolConfigManagerWrite> {
-    const admin = await this.admin(chain, ctx)
-    assertDefaultAdminTransferPending(this.name, targetParam(params), admin.pending)
-    return { data: this.calldata(ctx.version, []), expected: adminExpected(admin) }
+  ): PoolConfigManagerWrite {
+    assertDefaultAdminTransferPending(this.name, targetParam(params), adminOf(ctx.facts).pending)
+    return { data: this.calldata(ctx.version, []) }
   }
 }
 
@@ -388,7 +521,7 @@ export class CancelMultiTokenPoolDefaultAdminTransfer extends RoleWriteOperation
  * @throws {@link CCTParamsInvalidError} if `newDelay` is not a uint48 (before any RPC), or `sender` is
  *   not the default admin
  */
-export class ChangeMultiTokenPoolDefaultAdminDelay extends RoleWriteOperation<ChangeMultiTokenPoolDefaultAdminDelayParams> {
+export class ChangeMultiTokenPoolDefaultAdminDelay extends AdminWriteOperation<ChangeMultiTokenPoolDefaultAdminDelayParams> {
   readonly name = 'changeMultiTokenPoolDefaultAdminDelay'
 
   /** Validates `newDelay` (seconds, a uint48), before any RPC. */
@@ -404,15 +537,20 @@ export class ChangeMultiTokenPoolDefaultAdminDelay extends RoleWriteOperation<Ch
     return ['DEFAULT_ADMIN_ROLE']
   }
 
-  protected async encode(
-    chain: EVMChain,
+  override paramsFromCalldata(
+    args: Result,
+    target: PoolConfigManagerTarget,
+    sender: string,
+  ): ChangeMultiTokenPoolDefaultAdminDelayParams {
+    return { ...target, sender, newDelay: Number(args[0]) }
+  }
+
+  protected encode(
+    _chain: EVMChain,
     { newDelay }: ChangeMultiTokenPoolDefaultAdminDelayParams,
     ctx: PoolConfigManagerWriteContext,
-  ): Promise<PoolConfigManagerWrite> {
-    return {
-      data: this.calldata(ctx.version, [newDelay]),
-      expected: adminExpected(await this.admin(chain, ctx)),
-    }
+  ): PoolConfigManagerWrite {
+    return { data: this.calldata(ctx.version, [newDelay]) }
   }
 }
 
@@ -420,25 +558,24 @@ export class ChangeMultiTokenPoolDefaultAdminDelay extends RoleWriteOperation<Ch
  * Rolls back a scheduled default admin delay change.
  * @throws {@link CCTParamsInvalidError} if none is scheduled, or `sender` is not the default admin
  */
-export class RollbackMultiTokenPoolDefaultAdminDelay extends RoleWriteOperation<RollbackMultiTokenPoolDefaultAdminDelayParams> {
+export class RollbackMultiTokenPoolDefaultAdminDelay extends AdminWriteOperation<RollbackMultiTokenPoolDefaultAdminDelayParams> {
   readonly name = 'rollbackMultiTokenPoolDefaultAdminDelay'
 
   protected gate(): readonly PoolConfigManagerRole[] {
     return ['DEFAULT_ADMIN_ROLE']
   }
 
-  protected async encode(
-    chain: EVMChain,
+  protected encode(
+    _chain: EVMChain,
     params: RollbackMultiTokenPoolDefaultAdminDelayParams,
     ctx: PoolConfigManagerWriteContext,
-  ): Promise<PoolConfigManagerWrite> {
-    const admin = await this.admin(chain, ctx)
-    if (admin.pendingDelay.schedule === 0n)
+  ): PoolConfigManagerWrite {
+    if (adminOf(ctx.facts).pendingDelay.schedule === 0n)
       throw new CCTParamsInvalidError(
         this.name,
         targetParam(params),
         'has no pending default-admin delay change to roll back',
       )
-    return { data: this.calldata(ctx.version, []), expected: adminExpected(admin) }
+    return { data: this.calldata(ctx.version, []) }
   }
 }

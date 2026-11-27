@@ -5,7 +5,7 @@
  * @packageDocumentation
  */
 
-import { isAddress, keccak256 } from 'ethers'
+import { getAddress, isAddress, keccak256 } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
@@ -27,6 +27,19 @@ import {
   snapshotChanges,
 } from '../guard-run.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from '../guards.ts'
+import type { PoolConfigManagerWriteOperation } from '../write-operation.ts'
+import {
+  AcceptMultiTokenPoolDefaultAdminTransfer,
+  BeginMultiTokenPoolDefaultAdminTransfer,
+  CancelMultiTokenPoolDefaultAdminTransfer,
+  ChangeMultiTokenPoolDefaultAdminDelay,
+  GrantMultiTokenPoolRole,
+  RenounceMultiTokenPoolDefaultAdmin,
+  RenounceMultiTokenPoolRole,
+  RevokeMultiTokenPoolRole,
+  RollbackMultiTokenPoolDefaultAdminDelay,
+} from './role-writes.ts'
+import { WithdrawMultiTokenPoolFeeTokens } from './withdraw-multi-token-pool-fee-tokens.ts'
 
 /**
  * Parameters for `checkMultiTokenPoolSnapshot`: re-reads the state, and re-runs the full post-state
@@ -40,6 +53,28 @@ export type CheckMultiTokenPoolSnapshotParams = MultiTokenPoolRemoteCheckOptions
   /** The account that will execute (the Safe or timelock). */
   sender: string
 }
+
+/**
+ * Every record-free PCM write (roles, the default admin, fee withdrawal), by op name. Their sealed
+ * facts lie outside every lane, so the guard's input hash never covers them: each is re-checked by
+ * its own op ({@link PoolConfigManagerWriteOperation.recheck}). A unit test keeps this list equal to
+ * the record-free PCM functions.
+ * @internal
+ */
+export const RECORD_FREE_OPS: ReadonlyMap<string, PoolConfigManagerWriteOperation<never>> = new Map(
+  [
+    new GrantMultiTokenPoolRole(),
+    new RevokeMultiTokenPoolRole(),
+    new RenounceMultiTokenPoolRole(),
+    new RenounceMultiTokenPoolDefaultAdmin(),
+    new BeginMultiTokenPoolDefaultAdminTransfer(),
+    new AcceptMultiTokenPoolDefaultAdminTransfer(),
+    new CancelMultiTokenPoolDefaultAdminTransfer(),
+    new ChangeMultiTokenPoolDefaultAdminDelay(),
+    new RollbackMultiTokenPoolDefaultAdminDelay(),
+    new WithdrawMultiTokenPoolFeeTokens(),
+  ].map((op) => [op.name, op as unknown as PoolConfigManagerWriteOperation<never>]),
+)
 
 /**
  * Re-checks a pending multi-token pool proposal.
@@ -109,6 +144,29 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
         `snapshot.expected.${GUARD_POOL_PATH}`,
         'is not an address',
       )
+    // a record-free write seals chain facts no lane covers: its own op re-reads them
+    const op = RECORD_FREE_OPS.get(snapshot.operation)
+    if (op) {
+      const recheck = await op.recheck(chain, {
+        data: tx.data as string,
+        target: typeof pool === 'string' ? { poolAddress: pool } : { poolConfigManager: address },
+        sender,
+        snapshot,
+      })
+      if (recheck) {
+        // the PCM the pool calls now must be the one the proposal calls
+        if (typeof pool === 'string' && recheck.ok) {
+          const now = await resolvePoolConfigManagerTarget(chain, { poolAddress: pool })
+          if (getAddress(now.address) !== getAddress(address))
+            return {
+              ok: false,
+              changed: [{ path: 'pool.poolConfigManager', expected: address, actual: now.address }],
+              findings: [],
+            }
+        }
+        return recheck
+      }
+    }
     const result = await runMultiTokenPoolGuards({
       ...options,
       chain,

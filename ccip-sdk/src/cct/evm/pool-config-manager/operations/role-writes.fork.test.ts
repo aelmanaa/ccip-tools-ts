@@ -27,6 +27,7 @@ import { findBalancesSlot } from '../../../../evm/gas.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { EVMTokenManager } from '../../index.ts'
+import { noteMinedBlock } from '../../mined-block.ts'
 import { mined as minedOn } from './fork.test.helpers.ts'
 
 /** A port the OS reports free right now (the fork binds it immediately after). */
@@ -102,6 +103,75 @@ describe('MTTP role, admin and fee writes (Sepolia fork)', { skip, timeout: 600_
     (await cct.getMultiTokenPoolRoles({ ...target, accounts: [account] }))[0]!.roles
   const refused = (param: string, pattern: RegExp) => (e: unknown) =>
     e instanceof CCTParamsInvalidError && e.context.param === param && pattern.test(e.message)
+  /**
+   * Moves the fork's clock past `seconds` and mines, then records the new head: ethers caches the
+   * block number, and a build pinned to the block before the warp would judge the old time.
+   */
+  const warp = async (seconds: number) => {
+    await provider.send('evm_increaseTime', [seconds])
+    await provider.send('evm_mine', [])
+    noteMinedBlock(chain, Number(await provider.send('eth_blockNumber', [])))
+  }
+
+  it('the snapshot check re-reads what a role or admin proposal sealed (E7 B1)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const adminWallet = await wallet(admin)
+    // a grant proposal, then the role granted another way: the check reports the role
+    const grant = { ...target, role: 'PAUSER_ROLE', account: ALICE } as const
+    const proposal = await cct.generateUnsignedGrantMultiTokenPoolRole({ ...grant, sender: admin })
+    const fresh = await cct.checkMultiTokenPoolSnapshot({
+      snapshot: proposal.snapshot,
+      transaction: proposal,
+      sender: admin,
+    })
+    assert.deepEqual([fresh.ok, fresh.changed], [true, []])
+    await mined(cct.grantMultiTokenPoolRole({ ...grant, wallet: adminWallet }))
+    const stale = await cct.checkMultiTokenPoolSnapshot({
+      snapshot: proposal.snapshot,
+      transaction: proposal,
+      sender: admin,
+    })
+    assert.equal(stale.ok, false)
+    assert.deepEqual(
+      stale.changed.map((c) => c.path),
+      [`roles.PAUSER_ROLE.${ALICE}`],
+    )
+    await mined(cct.revokeMultiTokenPoolRole({ ...grant, wallet: adminWallet }))
+
+    // the review's replay: a matured renounce proposal, cancelled, then a renounce scheduled again
+    const { defaultAdminDelay } = await cct.getPoolConfigManagerState(target)
+    const begin = () =>
+      mined(
+        cct.beginMultiTokenPoolDefaultAdminTransfer({
+          ...target,
+          newAdmin: ZeroAddress,
+          wallet: adminWallet,
+        }),
+      )
+    await begin()
+    await warp(defaultAdminDelay + 1)
+    const renounce = await cct.generateUnsignedRenounceMultiTokenPoolDefaultAdmin({
+      ...target,
+      sender: admin,
+      confirmPermanentFreeze: true,
+    })
+    await mined(cct.cancelMultiTokenPoolDefaultAdminTransfer({ ...target, wallet: adminWallet }))
+    await warp(1)
+    await begin()
+    await warp(defaultAdminDelay + 1)
+    const replay = await cct.checkMultiTokenPoolSnapshot({
+      snapshot: renounce.snapshot,
+      transaction: renounce,
+      sender: admin,
+    })
+    assert.equal(replay.ok, false)
+    assert.deepEqual(
+      replay.changed.map((c) => c.path),
+      ['admin.pending'],
+    )
+    await mined(cct.cancelMultiTokenPoolDefaultAdminTransfer({ ...target, wallet: adminWallet }))
+    assert.equal((await cct.getPoolConfigManagerState(target)).defaultAdmin, admin)
+  })
 
   it('grants, revokes and renounces a role, refusing the writes that change nothing', async (t) => {
     if (!deployed) return t.skip('mttp-core not deployed')

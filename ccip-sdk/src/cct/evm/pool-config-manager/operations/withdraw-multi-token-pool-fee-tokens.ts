@@ -5,10 +5,11 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
+import { type Result, getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import FACTORY_BURN_MINT_ERC20_V1_5_1_ABI from '../../artifacts/abi/V1_5_1/factory-burn-mint-erc20.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
@@ -17,10 +18,12 @@ import {
   resolveMultiTokenPool,
 } from '../../multi-token-pool/contracts.ts'
 import type { EVMExecuteParams } from '../../operation.ts'
+import { getTypedContract } from '../../query.ts'
 import { validateArray, validateNonZeroAddress } from '../../validate.ts'
 import {
   type MultiTokenPoolTransactionResult,
   type MultiTokenPoolUnsignedTx,
+  type PoolConfigManagerFacts,
   type PoolConfigManagerWrite,
   type PoolConfigManagerWriteContext,
   PoolConfigManagerWriteOperation,
@@ -97,6 +100,41 @@ export class WithdrawMultiTokenPoolFeeTokens extends PoolConfigManagerWriteOpera
   // a withdrawal changes no stored record
   protected override changesRecords(): boolean {
     return false
+  }
+
+  /**
+   * What the withdrawal moves, sealed: the PCM the pool calls, and each fee token's balance at the
+   * pool (the whole of it is withdrawn).
+   */
+  protected override async readFacts(
+    chain: EVMChain,
+    { poolAddress, feeTokens }: Parsed,
+    { address, blockTag }: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
+  ): Promise<PoolConfigManagerFacts> {
+    const pool = getAddress(poolAddress)
+    const balances = await Promise.all(
+      feeTokens.map((t) =>
+        getTypedContract(chain, t, FACTORY_BURN_MINT_ERC20_V1_5_1_ABI).balanceOf(pool, {
+          blockTag,
+        }),
+      ),
+    )
+    return {
+      'pool.poolConfigManager': getAddress(address),
+      ...Object.fromEntries(
+        feeTokens.map((t, i) => [`balances.${getAddress(t)}`, BigInt(balances[i]!)]),
+      ),
+    }
+  }
+
+  /** The pool, tokens and recipient are all in the calldata. */
+  override paramsFromCalldata(args: Result, _target: unknown, sender: string): Parsed {
+    return {
+      poolAddress: getAddress(String(args[0])),
+      feeTokens: (args[1] as string[]).map((t) => getAddress(t)),
+      recipient: getAddress(String(args[2])),
+      sender,
+    }
   }
 
   protected encode(

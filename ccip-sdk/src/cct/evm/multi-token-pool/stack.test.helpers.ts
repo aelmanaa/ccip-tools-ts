@@ -77,6 +77,10 @@ export const AUX_IFACE = new Interface([
   'function getTokenFactory() view returns (address)',
   'function getAdditionalPoolData(address localToken, uint64 remoteChainSelector, bytes4 finality, bytes extraArgs) view returns (bytes)',
 ])
+/** The ERC20 view a fee withdrawal reads (a token in `others`, answered through `state.views`). */
+export const ERC20_IFACE = new Interface([
+  'function balanceOf(address account) view returns (uint256)',
+])
 /**
  * The writes a simulation sends (the PCM's role, admin and withdrawal writes): served by
  * `state.writes` (a throw reverts), else they succeed.
@@ -358,11 +362,15 @@ export function stackChain(state: StackState = defaultStack()) {
         })
       // auxiliary contracts (hooks, providers): every answer comes from `state.views`
       if (state.others[addr])
-        return answer(AUX_IFACE, data, (name, args) => {
-          const view = state.views[name]
-          if (!view) throw callException()
-          return view(args, addr)
-        })
+        return answer(
+          AUX_IFACE.getFunction(data.slice(0, 10)) ? AUX_IFACE : ERC20_IFACE,
+          data,
+          (name, args) => {
+            const view = state.views[name]
+            if (!view) throw callException()
+            return view(args, addr)
+          },
+        )
       throw callException()
     },
     getStorage: async (address: string, slot: bigint) => {
@@ -386,7 +394,7 @@ export function stackChain(state: StackState = defaultStack()) {
     },
     // no eth_simulateV1: the projection is not cross-checked
     send: async (method: string) => {
-      throw Object.assign(new Error(`the method ${method} does not exist`), { code: -32601 })
+      throw makeError(`the method ${method} does not exist`, 'UNSUPPORTED_OPERATION')
     },
   }
   const chain = {
