@@ -6,16 +6,16 @@
  */
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { laneFamilyOf } from '../../../remote-address.ts'
-import { readContractTypeOrNull } from '../../query.ts'
 import { validateBoolean } from '../../validate.ts'
 import { policyKey } from '../projection.ts'
 import type { ConnectionPolicyRecord, PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
 import type { MultiTokenPoolWriteGuards, PoolConfigManagerWriteParams } from '../write-operation.ts'
-import { SAME_ADDRESS_PROVIDER_TYPE } from './apply-multi-token-pool-remote-token-address-provider-updates.ts'
-import { type RecordWriteContext, PolicyRecordWriteOperation } from './record-writes.ts'
+import {
+  type RecordWriteContext,
+  PolicyRecordWriteOperation,
+  sameAddressProviderConflicts,
+} from './record-writes.ts'
 
 /** Parameters of `applyMultiTokenPoolConnectionPolicyConfigUpdates`. */
 export type ApplyMultiTokenPoolConnectionPolicyConfigUpdatesParams = PoolConfigManagerWriteParams &
@@ -81,14 +81,11 @@ export class ApplyMultiTokenPoolConnectionPolicyConfigUpdates extends PolicyReco
     { state }: RecordWriteContext,
   ): Promise<void> {
     for (const [i, r] of recordsToSet.entries()) {
-      if (laneFamilyOf(r.remoteChainSelector) === ChainFamily.EVM) continue
       const word = policyKey(r.policyName, 'policyName')
-      const provider = state.policies.remoteTokenAddressProviders.find(
-        (p) => policyKey(p.policyName, 'policyName') === word,
-      )?.provider
-      if (!provider) continue
-      const type = await readContractTypeOrNull(chain, provider)
-      if (type === SAME_ADDRESS_PROVIDER_TYPE)
+      const conflicts = await sameAddressProviderConflicts(chain, state, word, {
+        chains: [r.remoteChainSelector],
+      })
+      if (conflicts.length)
         throw new CCTParamsInvalidError(
           this.name,
           `recordsToSet[${i}].remoteChainSelector`,

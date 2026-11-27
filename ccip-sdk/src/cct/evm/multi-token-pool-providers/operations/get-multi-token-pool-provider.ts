@@ -16,6 +16,8 @@ import {
   ANY_FINALITY_CONFIG,
   MULTI_TOKEN_POOL_PROVIDER_TYPES,
   MultiTokenPoolVersion,
+  SAME_ADDRESS_PROVIDER_TYPE,
+  UID_PROVIDER_TYPE,
   assertMultiTokenPoolAuxContract,
   getMultiTokenPoolInterface,
   sameAddressProviderContract,
@@ -50,7 +52,7 @@ export type GetMultiTokenPoolProviderResult = {
 }
 
 const UID_PROVIDER_INTERFACE = getMultiTokenPoolInterface(
-  'FactoryTokenWithUIDPoolDataProvider',
+  UID_PROVIDER_TYPE,
   MultiTokenPoolVersion.V2_1_0_DEV,
 )
 
@@ -85,7 +87,7 @@ export class GetMultiTokenPoolProvider extends EVMQuery<
       provider,
       MULTI_TOKEN_POOL_PROVIDER_TYPES,
     )
-    if (type === 'SameAddressRemoteTokenAddressProvider') {
+    if (type === SAME_ADDRESS_PROVIDER_TYPE) {
       if (tokenAddress === undefined) return { type }
       if (remoteChainSelector === undefined)
         throw new CCTParamsInvalidError(

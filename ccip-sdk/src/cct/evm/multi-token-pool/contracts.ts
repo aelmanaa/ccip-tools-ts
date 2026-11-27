@@ -85,6 +85,20 @@ export const POLICY_STORE_TYPES = [
 /** A policy store contract type. */
 export type PolicyStoreType = (typeof POLICY_STORE_TYPES)[number]
 
+/** The PCM's static-config field holding each store's address. @internal */
+const POLICY_STORE_FIELDS = {
+  ConnectionPolicyStore: 'connectionPolicyStore',
+  FeePolicyStore: 'feePolicyStore',
+  SecurityPolicyStore: 'securityPolicyStore',
+} as const satisfies Record<PolicyStoreType, string>
+
+/** The three stores behind a PCM, in {@link POLICY_STORE_TYPES} order, as `[type, address]`. @internal */
+export function policyStoresOf(
+  stores: Record<(typeof POLICY_STORE_FIELDS)[PolicyStoreType], string>,
+): (readonly [PolicyStoreType, string])[] {
+  return POLICY_STORE_TYPES.map((type) => [type, stores[POLICY_STORE_FIELDS[type]]] as const)
+}
+
 /** The two hook contract types a security record can name. */
 export const MULTI_TOKEN_POOL_HOOKS_TYPES = [
   'MultiTokenPoolHooks',
@@ -93,10 +107,14 @@ export const MULTI_TOKEN_POOL_HOOKS_TYPES = [
 /** A multi-token pool hook contract type. */
 export type MultiTokenPoolHooksType = (typeof MULTI_TOKEN_POOL_HOOKS_TYPES)[number]
 
+/** The provider that answers the local token's own address (chainlink-ccip c950d9bc). */
+export const SAME_ADDRESS_PROVIDER_TYPE = 'SameAddressRemoteTokenAddressProvider'
+/** The factory UID pool data provider (chainlink-ccip c950d9bc `FactoryTokenWithUIDPoolDataProvider.sol`). */
+export const UID_PROVIDER_TYPE = 'FactoryTokenWithUIDPoolDataProvider'
 /** The two provider contract types. */
 export const MULTI_TOKEN_POOL_PROVIDER_TYPES = [
-  'SameAddressRemoteTokenAddressProvider',
-  'FactoryTokenWithUIDPoolDataProvider',
+  SAME_ADDRESS_PROVIDER_TYPE,
+  UID_PROVIDER_TYPE,
 ] as const
 /** A provider contract type. */
 export type MultiTokenPoolProviderType = (typeof MULTI_TOKEN_POOL_PROVIDER_TYPES)[number]
@@ -183,7 +201,7 @@ const OPERATIONS = {
   deployPoolConfigManager: { contracts: ['PoolConfigManager'], function: 'constructor' },
   deployMultiTokenPool: { contracts: ['BurnMintMultiTokenPool'], function: 'constructor' },
   deployMultiTokenPoolProvider: {
-    contracts: ['SameAddressRemoteTokenAddressProvider', 'FactoryTokenWithUIDPoolDataProvider'],
+    contracts: MULTI_TOKEN_POOL_PROVIDER_TYPES,
     function: 'constructor',
   },
   deployMultiTokenPoolHooks: {

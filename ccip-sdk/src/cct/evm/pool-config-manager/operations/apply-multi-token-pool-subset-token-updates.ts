@@ -18,7 +18,7 @@ import {
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateAddress, validateArray } from '../../validate.ts'
 import { encodePolicyName, validatePolicyRecordKey } from '../contracts.ts'
-import { policyKey, recordKey, subsetKey } from '../projection.ts'
+import { policyKey, recordKey, subsetKey, tokenRecordsOf } from '../projection.ts'
 import type { PolicyRecordKey } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -122,8 +122,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
           `connection policy ${e.policyName} has no record for chain ${e.remoteChainSelector} (PolicyRecordNotFound): set it with applyMultiTokenPoolConnectionPolicyConfigUpdates first`,
           { context },
         )
-      const assigned = state.tokens.find((t) => getAddress(t.tokenAddress) === token)?.policies
-        .connection
+      const assigned = tokenRecordsOf(state, token)?.policies.connection
       if (!assigned || policyKey(assigned, 'policyName') !== policyKey(e.policyName, 'policyName'))
         throw new CCTParamsInvalidError(
           this.name,

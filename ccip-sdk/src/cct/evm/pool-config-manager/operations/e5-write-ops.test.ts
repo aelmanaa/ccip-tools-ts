@@ -9,8 +9,10 @@ import { describe, it } from 'node:test'
 import { encodeBytes32String, getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../../chain.ts'
+import type { EVMChain } from '../../../../evm/index.ts'
 import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { SAME_ADDRESS_PROVIDER_TYPE, UID_PROVIDER_TYPE } from '../../multi-token-pool/contracts.ts'
 import { POOL, stackChain } from '../../multi-token-pool/stack.test.helpers.ts'
 import type { MultiTokenPoolRecordState } from '../projection.ts'
 import { ApplyMultiTokenPoolConnectionPolicyConfigUpdates } from './apply-multi-token-pool-connection-policy-config-updates.ts'
@@ -19,7 +21,11 @@ import { ApplyMultiTokenPoolInlineRemotePoolConfigUpdates } from './apply-multi-
 import { ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates } from './apply-multi-token-pool-remote-pool-policy-config-updates.ts'
 import { ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates } from './apply-multi-token-pool-remote-token-address-provider-updates.ts'
 import { ApplyMultiTokenPoolSubsetTokenUpdates } from './apply-multi-token-pool-subset-token-updates.ts'
-import { checkInlineRecordWrite, checkPolicyRecordWrite } from './record-writes.ts'
+import {
+  checkInlineRecordWrite,
+  checkPolicyRecordWrite,
+  sameAddressProviderConflicts,
+} from './record-writes.ts'
 
 const T = getAddress('0x' + 'a1'.repeat(20))
 const REMOTE = getAddress('0x' + 'b2'.repeat(20))
@@ -295,5 +301,43 @@ describe('record-write state checks (cct/evm pool-config-manager)', () => {
     checkInlineRecordWrite(op, s, 'remotePool', {
       remove: [{ tokenAddress: T, remoteChainSelector: FUJI }],
     })
+  })
+
+  it('checks the same-address provider invariant from both sides with one rule', async () => {
+    const SOLANA_DEVNET = 16423721717087811551n
+    const PROVIDER = getAddress('0x' + 'c3'.repeat(20))
+    const typed = (type: string) =>
+      ({
+        typeAndVersion: async () => [type, '2.1.0-dev', `${type} 2.1.0-dev`],
+      }) as unknown as EVMChain
+    const word = encodeBytes32String('p').toLowerCase()
+    const s = state()
+    // a record added: against the stored provider
+    s.policies.remoteTokenAddressProviders = [{ policyName: 'p', provider: PROVIDER }] as never
+    const same = typed(SAME_ADDRESS_PROVIDER_TYPE)
+    assert.deepEqual(
+      await sameAddressProviderConflicts(same, s, word, { chains: [SOLANA_DEVNET] }),
+      [SOLANA_DEVNET],
+    )
+    assert.deepEqual(await sameAddressProviderConflicts(same, s, word, { chains: [FUJI] }), [])
+    assert.deepEqual(
+      await sameAddressProviderConflicts(typed(UID_PROVIDER_TYPE), s, word, {
+        chains: [SOLANA_DEVNET],
+      }),
+      [],
+    )
+    // a provider set: against the stored records
+    s.policies.connection.push({
+      policyName: 'p',
+      remoteChainSelector: SOLANA_DEVNET,
+      onlySubsetTokens: false,
+      subsetTokens: [],
+    } as never)
+    assert.deepEqual(await sameAddressProviderConflicts(same, s, word, { provider: PROVIDER }), [
+      SOLANA_DEVNET,
+    ])
+    // no provider anywhere: nothing to judge, no RPC
+    s.policies.remoteTokenAddressProviders = []
+    assert.deepEqual(await sameAddressProviderConflicts({} as EVMChain, s, word, {}), [])
   })
 })

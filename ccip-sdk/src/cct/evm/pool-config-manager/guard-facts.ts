@@ -12,6 +12,7 @@ import {
   CCIPContractNotRouterError,
   CCIPTokenPoolChainConfigNotFoundError,
 } from '../../../errors/index.ts'
+import { getErrorData } from '../../../evm/errors.ts'
 import { EVMChain } from '../../../evm/index.ts'
 import { decodeLaneConnection, decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
@@ -30,6 +31,7 @@ import {
   uidProviderContract,
 } from '../multi-token-pool/contracts.ts'
 import { isMissingFunction, isNotCcipContract, readContractTypeOrNull } from '../query.ts'
+import { decodeError } from '../simulate.ts'
 import { toAbiLaneKey } from './contracts.ts'
 import {
   type MultiTokenPoolGuardFactRequests,
@@ -246,8 +248,9 @@ async function readProviderData({
           if (!isMissingFunction(err)) throw err
           out.refused.set(
             key,
+            // the provider's own custom errors are not in its typed ABI: decode against every known one
             isError(err, 'CALL_EXCEPTION')
-              ? (err.revert?.name ?? err.shortMessage)
+              ? (decodeError(getErrorData(err) ?? '0x').errorName ?? err.shortMessage)
               : 'it has no getAdditionalPoolData',
           )
           return undefined
