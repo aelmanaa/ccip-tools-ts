@@ -364,6 +364,25 @@ export type MultiTokenPoolLaneDirections = MultiTokenPoolLaneKey & {
   directions: TransferDirection[]
 }
 
+/** Flags a write may turn off on a lane's trusted pools, confirmed in `confirmDropped`. */
+export const DROPPABLE_REMOTE_POOL_FLAGS = [
+  'trustPolicyRemotePools',
+  'allowLegacyPoolData',
+] as const
+
+/** What a write drops from a lane's trusted remote pools, confirmed by repeating it. */
+export type MultiTokenPoolInlineRemotePoolDrop = {
+  /** The lane. */
+  lane: MultiTokenPoolLaneKey
+  /** Remote pools the lane no longer trusts after the write. */
+  remotePools?: string[]
+  /**
+   * Flags the write turns off: `allowLegacyPoolData` on any pool the lane keeps;
+   * `trustPolicyRemotePools` (its dropped policy pools are listed in `remotePools` too).
+   */
+  flags?: (typeof DROPPABLE_REMOTE_POOL_FLAGS)[number][]
+}
+
 /** Lanes or tokens per PCM batch view call (every batch view chunks by it). */
 export const LANE_BATCH_SIZE = 100
 

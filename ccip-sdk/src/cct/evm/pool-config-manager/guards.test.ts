@@ -662,9 +662,37 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       ).errors,
       ['UID_MISMATCH'],
     )
-    // what the remote sends cannot be read: said, never passed silently
-    const unread = run({}, {})
-    assert.deepEqual(unread.errors, [])
-    assert.ok(unread.findings.some((f) => f.check === 'UID_MISMATCH' && f.severity === 'warning'))
+    // what the remote sends cannot be read: a fact failure, never a pass
+    assert.deepEqual(
+      run({}, {}).factFailures.map((f) => f.status),
+      ['unknown'],
+    )
+    assert.deepEqual(
+      run({ remoteSideUnread: 'unknown variant' }, {}).factFailures.map((f) => f.reason),
+      ['unknown variant'],
+    )
+  })
+
+  it('refuses legacy data from a remote pool this lane does not accept it from', () => {
+    const lane = guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 })
+    const withRemote = (pools: { address: string; allowLegacyPoolData: boolean }[]) =>
+      judge(inlineLane(T1, { pools }), {
+        facts: goodFacts({
+          remoteLanes: new Map([
+            [lane, { ...knownRemote(), remoteSendsLegacy: true } as MultiTokenPoolRemoteLaneFacts],
+          ]),
+        }),
+      }).errors
+    assert.deepEqual(withRemote([{ address: RPOOL, allowLegacyPoolData: false }]), [
+      'POOL_DATA_FORMAT_MISMATCH',
+    ])
+    assert.deepEqual(withRemote([{ address: RPOOL, allowLegacyPoolData: true }]), [])
+  })
+
+  it('refuses a lane that trusts no remote pool as a finding that names the fix, not an unread fact', () => {
+    const r = judge(inlineLane(T1, { pools: [] }))
+    assert.deepEqual(r.errors, ['NO_REMOTE_POOL'])
+    assert.match(r.findings[0]!.reason, /trusts no remote pool[\s\S]*add the remote pool/)
+    assert.deepEqual(r.factFailures, [])
   })
 })

@@ -13,12 +13,19 @@ import { ZeroAddress, getAddress } from 'ethers'
 import type { LaneRecordType, RateLimiterState, TransferDirection } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { canonicalJson } from '../../canonical.ts'
+import { CCTParamsInvalidError } from '../../errors.ts'
 import {
   type MultiTokenPoolLaneFinding,
   type MultiTokenPoolRemoteAttestation,
   type MultiTokenPoolRemoteFact,
+  DEFAULT_MAX_TRANSFER_FEE_BPS,
+  DEFAULT_MIN_DEST_GAS_OVERHEAD,
+  HOOK_DEST_GAS_OVERHEAD,
+  LEGACY_POOL_DATA_BYTES,
+  longPoolDataBytes,
   sortFindings,
 } from '../../multi-token-pool.ts'
+import { parseUniqueRemoteAddresses } from '../../remote-address.ts'
 import {
   validateArray,
   validateBoolean,
@@ -27,11 +34,14 @@ import {
   validateUint64,
 } from '../validate.ts'
 import {
+  type MultiTokenPoolInlineRemotePoolDrop,
   type MultiTokenPoolLaneDirections,
   type MultiTokenPoolLaneKey,
+  DROPPABLE_REMOTE_POOL_FLAGS,
   validateLaneKeys,
 } from './contracts.ts'
 import {
+  type MultiTokenPoolRecordChange,
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
   laneKey,
@@ -40,32 +50,53 @@ import {
   policyKey,
   resolveMultiTokenPoolLanes,
 } from './projection.ts'
-import type { MultiTokenPoolWriteGuards } from './write-operation.ts'
 
-/** Default {@link MultiTokenPoolGuardOptions.maxTransferFeeBps} (the token fee cap). @internal */
-export const DEFAULT_MAX_TRANSFER_FEE_BPS = 1_000
-/** Default {@link MultiTokenPoolGuardOptions.minDestGasOverhead} (destination gas). @internal */
-export const DEFAULT_MIN_DEST_GAS_OVERHEAD = 200_000
-/** Gas a resolved hook adds to the default minimum destination gas. @internal */
-export const HOOK_DEST_GAS_OVERHEAD = 100_000
-/** Long pool data without additional data: decimals, source token and two offsets/lengths. @internal */
-export const LONG_POOL_DATA_BYTES = 192
-/** Legacy pool data: the decimals word. @internal */
-export const LEGACY_POOL_DATA_BYTES = 32
+// the guard defaults and pool-data sizes are family-neutral: they live in the shared module, re-exported
+// here so EVM importers keep their path
+export {
+  DEFAULT_MAX_TRANSFER_FEE_BPS,
+  DEFAULT_MIN_DEST_GAS_OVERHEAD,
+  HOOK_DEST_GAS_OVERHEAD,
+  LEGACY_POOL_DATA_BYTES,
+  LONG_POOL_DATA_BYTES,
+  longPoolDataBytes,
+} from '../../multi-token-pool.ts'
 
-/** The guard options a write takes (thresholds and confirmations, never switches). @internal */
-export type MultiTokenPoolGuardOptions = Pick<
-  MultiTokenPoolWriteGuards,
-  | 'allowDroppingDefaultCCVs'
-  | 'maxTransferFeeBps'
-  | 'minDestGasOverhead'
-  | 'confirmClosing'
-  | 'confirmOpening'
-  | 'migrationWindowChains'
->
+/**
+ * The guard thresholds and confirmations of a lane-affecting write (never switches that skip a rule);
+ * part of `MultiTokenPoolWriteGuards`.
+ */
+export type MultiTokenPoolGuardOptions = {
+  /** Accept non-empty CCV lists without the default-CCV placeholder `address(0)`. Defaults to `false`. */
+  allowDroppingDefaultCCVs?: boolean
+  /** Highest resolved transfer fee in bps on any affected lane, both tiers. Defaults to 1,000. */
+  maxTransferFeeBps?: number
+  /** Lowest resolved `destGasOverhead`. Defaults to 200,000, plus 100,000 when a hook resolves. */
+  minDestGasOverhead?: number
+  /** Lanes the caller agrees this write closes (connection gone after the write). */
+  confirmClosing?: MultiTokenPoolLaneKey[]
+  /**
+   * Lanes, per direction, the caller agrees this write opens: refused when a lane it opens goes
+   * live in a direction not listed. A planner passes its planned lanes.
+   */
+  confirmOpening?: MultiTokenPoolLaneDirections[]
+  /**
+   * Remote pools (and flags) the caller agrees this write drops from a lane's trusted pools: refused
+   * when it drops one not listed, since in-flight inbound messages from a dropped pool revert.
+   */
+  confirmDropped?: MultiTokenPoolInlineRemotePoolDrop[]
+  /**
+   * Remote chains where a lane may accept legacy pool data from a remote multi-token pool: only for
+   * a migration window.
+   */
+  migrationWindowChains?: bigint[]
+}
 
 // the family-neutral remote fact and the lane directions; re-exported so importers keep their path
-export type { MultiTokenPoolLaneDirections } from './contracts.ts'
+export type {
+  MultiTokenPoolInlineRemotePoolDrop,
+  MultiTokenPoolLaneDirections,
+} from './contracts.ts'
 export type { MultiTokenPoolRemoteFact } from '../../multi-token-pool.ts'
 
 /** What the remote side of one lane does. @internal */
@@ -96,6 +127,10 @@ export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   remoteSendsData?: string
   /** Set when the remote provider refuses to produce data for its own token. */
   remoteProviderRefused?: string
+  /** Whether the remote side sends legacy pool data (no source token) toward this chain. */
+  remoteSendsLegacy?: boolean
+  /** Set when what the remote side sends and accepts cannot be read: the rules never pass on it. */
+  remoteSideUnread?: string
   /** Whether the remote token has code on the remote chain (read when the registry names no pool). */
   remoteTokenHasCode?: boolean
   /** The remote pool's outbound bucket toward this chain (read for the lane check), `null` when disabled. */
@@ -238,11 +273,6 @@ export function requiredMultiTokenPoolGuardFacts(
       remoteChainSelector,
     })),
   }
-}
-
-/** Bytes of long pool data with `extra` bytes of additional data (ABI-padded to 32). @internal */
-export function longPoolDataBytes(extra: number): number {
-  return LONG_POOL_DATA_BYTES + Math.ceil(extra / 32) * 32
 }
 
 /** A rule's failure to read a fact: the framework throws it as `CCTParamsInvalidError`. @internal */
@@ -455,6 +485,17 @@ export function evaluateMultiTokenPoolGuards({
     }
 
     // remote side: the registry's pool, its pool data format, and the reverse mapping
+    // a lane that trusts no remote pool accepts nothing inbound, and its remote side cannot be
+    // located to check: allowed on chain, refused here (the SDK never opens what it cannot check)
+    if (!c.remotePools.length) {
+      add(
+        'NO_REMOTE_POOL',
+        'error',
+        'the lane trusts no remote pool: an empty list is allowed on chain, but the SDK refuses a lane that trusts no remote pool, since nothing inbound is accepted and its remote side cannot be checked; add the remote pool (applyMultiTokenPoolInlineRemotePoolConfigUpdates, or a remote pool policy record)',
+        'remotePool',
+      )
+      continue
+    }
     const remote = facts.remoteLanes.get(guardLaneKey(key))
     if (!remote || remote.status !== 'known') {
       factFailures.push({
@@ -567,12 +608,28 @@ export function evaluateMultiTokenPoolGuards({
         `${remote.remoteProviderRefused}: sends from the remote side revert there`,
         'connection',
       )
-    else if (hasProvider && remote.remoteSendsData === undefined)
+    // what the remote sends and accepts could not be read: fail closed, never pass
+    if (
+      remote.remoteSideUnread !== undefined ||
+      (hasProvider && remote.remoteSendsData === undefined)
+    )
+      factFailures.push({
+        ...key,
+        scope: 'remote',
+        status: 'unknown',
+        reason:
+          remote.remoteSideUnread ??
+          "the additional pool data the remote side sends cannot be read, so this token's provider cannot be checked against it",
+      })
+    // legacy data names no source token: the lane must trust the sending pool with allowLegacyPoolData
+    // (chainlink-ccip c950d9bc ConnectionPolicyStore._checkPoolData, LegacyPoolDataNotAllowed)
+    const sender = c.remotePools.find((p) => p.address === remote.registryPool)
+    if (remote.remoteSendsLegacy && sender && !sender.allowLegacyPoolData)
       add(
-        'UID_MISMATCH',
-        'warning',
-        "the additional pool data the remote side sends cannot be read, so this token's provider was not checked against it",
-        'connection',
+        'POOL_DATA_FORMAT_MISMATCH',
+        'error',
+        `remote pool ${remote.registryPool} sends legacy pool data, which this lane refuses from it (LegacyPoolDataNotAllowed): every inbound release reverts here; set allowLegacyPoolData on that remote pool, or have the remote side send long data`,
+        'remotePool',
       )
     if (remote.uid != null && c.poolDataFormat === 'long') {
       const data = facts.additionalPoolData?.get(guardLaneKey(key))
@@ -622,7 +679,12 @@ export function multiTokenPoolChainLanes(
   return resolveMultiTokenPoolLanes(state, lanes)
 }
 
-const DIRECTIONS = ['outbound', 'inbound'] as const
+/** Both transfer directions, outbound first. @internal */
+export const TRANSFER_DIRECTIONS = [
+  'outbound',
+  'inbound',
+] as const satisfies readonly TransferDirection[]
+const DIRECTIONS = TRANSFER_DIRECTIONS
 
 /**
  * Validates guard options before any RPC: a write's own params (`prefix` empty) or the options a
@@ -652,6 +714,41 @@ export function validateMultiTokenPoolGuardOptions(
       Array.from(directions, (d, j) =>
         validateOneOf(operation, at(`confirmOpening[${i}].directions[${j}]`), d, DIRECTIONS),
       )
+    })
+  }
+  if (o.confirmDropped !== undefined) {
+    validateArray(operation, at('confirmDropped'), o.confirmDropped)
+    const seen = new Map<string, string>()
+    Array.from(o.confirmDropped, (d, i) => {
+      const entry = at(`confirmDropped[${i}]`)
+      const { lane, remotePools, flags } = (d ?? {}) as Record<string, unknown>
+      if (lane === undefined)
+        throw new CCTParamsInvalidError(
+          operation,
+          `${entry}.lane`,
+          'is required: the lane the write drops pools from',
+        )
+      validateLaneKeys(operation, `${entry}.lane`, [lane], 1)
+      const key = guardLaneKey(lane as MultiTokenPoolLaneKey)
+      const first = seen.get(key)
+      if (first !== undefined)
+        throw new CCTParamsInvalidError(operation, entry, `repeats ${first}: give each lane once`)
+      seen.set(key, entry)
+      if (remotePools !== undefined) {
+        validateArray(operation, `${entry}.remotePools`, remotePools)
+        parseUniqueRemoteAddresses(
+          operation,
+          `${entry}.remotePools`,
+          remotePools,
+          (lane as MultiTokenPoolLaneKey).remoteChainSelector,
+        )
+      }
+      if (flags !== undefined) {
+        validateArray(operation, `${entry}.flags`, flags)
+        Array.from(flags, (f, j) =>
+          validateOneOf(operation, `${entry}.flags[${j}]`, f, DROPPABLE_REMOTE_POOL_FLAGS),
+        )
+      }
     })
   }
   if (o.migrationWindowChains !== undefined) {
@@ -698,4 +795,84 @@ export function multiTokenPoolLaneTransitions(
     if (newly.length) goingLive.push(entry(after, newly))
   }
   return { opened, goingLive }
+}
+
+/**
+ * What a write drops from each lane's trusted remote pools: pools trusted before and not after, and
+ * `allowLegacyPoolData` turned off on a pool kept. Lanes closed or opened by the write are not
+ * drops (`confirmClosing` and `confirmOpening` cover them). Addresses are canonical spellings.
+ * @internal
+ */
+export function multiTokenPoolDroppedPools(
+  lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
+): { lane: MultiTokenPoolLaneKey; remotePools: string[]; flags: 'allowLegacyPoolData'[] }[] {
+  return lanes
+    .filter(
+      ({ before, after }) => before.connection.hasConnection && after.connection.hasConnection,
+    )
+    .map(({ before, after }) => {
+      const kept = new Map(
+        after.connection.remotePools.map((p) => [p.address, p.allowLegacyPoolData]),
+      )
+      const remotePools = before.connection.remotePools
+        .filter((p) => !kept.has(p.address))
+        .map((p) => p.address)
+      const legacyOff = before.connection.remotePools.some(
+        (p) => p.allowLegacyPoolData && kept.get(p.address) === false,
+      )
+      return {
+        lane: { tokenAddress: after.tokenAddress, remoteChainSelector: after.remoteChainSelector },
+        remotePools,
+        flags: legacyOff ? (['allowLegacyPoolData'] as const).slice() : [],
+      }
+    })
+    .filter((d) => d.remotePools.length || d.flags.length)
+}
+
+/** The record types the PCM's post-write `_checkLane` requires (each store's `checkLaneRecords`). */
+const PCM_CHECKED_RECORD_TYPES = [
+  'remotePool',
+  'fee',
+  'destOverhead',
+  'rateLimit',
+  'security',
+] as const
+
+/**
+ * The PoolConfigManager's own post-write lane check (`_checkLane`), on the projection: every lane an
+ * inline connection sets or a subset adds must resolve a record of each type the three stores check
+ * (chainlink-ccip c950d9bc `PoolConfigManager.sol:852`; it runs even while `onlySubsetTokens` is
+ * false). Returns a `RECORD_MISSING` error per missing record, so no RPC or `eth_simulateV1` is needed.
+ * @internal
+ */
+export function multiTokenPoolPcmLaneCheck(
+  after: MultiTokenPoolRecordState,
+  changes: readonly MultiTokenPoolRecordChange[],
+): MultiTokenPoolLaneFinding[] {
+  const keys = new Map<string, MultiTokenPoolLaneKey>()
+  for (const c of changes) {
+    if (c.kind === 'setInline' && c.type === 'connection')
+      keys.set(guardLaneKey(c.record), {
+        tokenAddress: c.record.tokenAddress,
+        remoteChainSelector: c.record.remoteChainSelector,
+      })
+    if (c.kind === 'updateSubsetTokens')
+      for (const t of c.add ?? [])
+        keys.set(guardLaneKey({ tokenAddress: t, remoteChainSelector: c.remoteChainSelector }), {
+          tokenAddress: getAddress(t),
+          remoteChainSelector: c.remoteChainSelector,
+        })
+  }
+  return resolveMultiTokenPoolLanes(after, [...keys.values()]).flatMap((lane) =>
+    PCM_CHECKED_RECORD_TYPES.filter((type) => lane.levels[type] === 'none').map(
+      (type): MultiTokenPoolLaneFinding => ({
+        check: 'RECORD_MISSING',
+        severity: 'error',
+        tokenAddress: lane.tokenAddress,
+        remoteChainSelector: lane.remoteChainSelector,
+        recordType: type,
+        reason: `the lane resolves no ${type} record, and the PoolConfigManager checks every record after this write (_checkLane), so it reverts: write the ${type} record first (inline or through a policy)`,
+      }),
+    ),
+  )
 }

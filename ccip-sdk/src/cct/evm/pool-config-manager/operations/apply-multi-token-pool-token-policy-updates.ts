@@ -21,8 +21,10 @@ import {
   poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
 import { validateAddress, validateArray, validateOneOf } from '../../validate.ts'
-import { type PolicyName, encodePolicyName } from '../contracts.ts'
+import { type PolicyName, decodeTokenProfile, encodePolicyName } from '../contracts.ts'
 import { decodeTokenPolicies } from '../decode.ts'
+import { policyKey } from '../projection.ts'
+import { readMultiTokenPoolRecordState } from '../record-state.ts'
 import {
   type MultiTokenPoolWriteGuards,
   type PoolConfigManagerWrite,
@@ -42,7 +44,7 @@ export type MultiTokenPoolTokenPolicyAssignment = {
 /** Parameters of `applyMultiTokenPoolTokenPolicyUpdates`. */
 export type ApplyMultiTokenPoolTokenPolicyUpdatesParams = PoolConfigManagerWriteParams &
   MultiTokenPoolWriteGuards & {
-    /** The record type whose policy the assignments set: one of `LANE_RECORD_TYPES`. */
+    /** The record type whose policy the assignments set (a `LaneRecordType`). */
     recordType: LaneRecordType
     /** The assignments, at least one; each token at most once. */
     assignments: MultiTokenPoolTokenPolicyAssignment[]
@@ -119,19 +121,77 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
           : encodePolicyName(this.name, `assignments[${i}].policyName`, a.policyName),
       ]),
     ])
+    const pcm = poolConfigManagerContract(chain, address, version)
+    const [configs, lists, { state }] = await Promise.all([
+      pcm.getTokenConfigBatch(tokens, { blockTag }),
+      pcm.getPolicyNames({ blockTag }),
+      readMultiTokenPoolRecordState(chain, address, version, { tokenAddresses: tokens, blockTag }),
+    ])
+    const names = new Set(
+      ((lists[LANE_RECORD_TYPES.indexOf(recordType)] ?? []) as string[]).map((w) =>
+        w.toLowerCase(),
+      ),
+    )
+    const context = { recordType }
+    const current = await Promise.all(
+      assignments.map(async (a, i) => {
+        const at = `assignments[${i}]`
+        const token = tokens[i]!
+        const raw = resultToObject(configs[i]!)
+        const profile = decodeTokenProfile(token, raw, address)
+        const old = decodeTokenPolicies(raw)[recordType]
+        // the stores' own refusals, named before the eth_call would
+        if (!profile.isRegistered)
+          throw new CCTParamsInvalidError(
+            this.name,
+            `${at}.tokenAddress`,
+            `${token} is not registered (LocalTokenNotRegistered): register it with applyMultiTokenPoolTokenProfileUpdates first`,
+            { context },
+          )
+        if (a.policyName !== null) {
+          const word = encodePolicyName(this.name, `${at}.policyName`, a.policyName).toLowerCase()
+          if (!names.has(word))
+            throw new CCTParamsInvalidError(
+              this.name,
+              `${at}.policyName`,
+              `no ${recordType} policy ${a.policyName} exists (PolicyNotFound): create it with its records first`,
+              { context },
+            )
+          if (recordType === 'rateLimit') {
+            // a policy's rate limits are raw amounts in token units: its decimals must be the token's
+            const [, decimals] = await pcm.getRateLimitPolicy(word, { blockTag })
+            if (Number(decimals) !== profile.localDecimals)
+              throw new CCTParamsInvalidError(
+                this.name,
+                `${at}.policyName`,
+                `rate limit policy ${a.policyName} has ${Number(decimals)} decimals, but ${token} has ${profile.localDecimals} (InvalidRateLimitPolicyDecimals): use a policy made for ${profile.localDecimals}-decimal tokens`,
+                { context },
+              )
+          }
+        }
+        if (recordType === 'connection' && old !== null) {
+          const next = a.policyName === null ? null : policyKey(a.policyName, 'policyName')
+          const oldKey = policyKey(old, 'policyName')
+          const subsets = state.policies.connection
+            .filter(
+              (r) =>
+                policyKey(r.policyName, 'policyName') === oldKey &&
+                r.subsetTokens.some((t) => getAddress(t) === token),
+            )
+            .map((r) => r.remoteChainSelector)
+          if (next !== oldKey && subsets.length)
+            throw new CCTParamsInvalidError(
+              this.name,
+              `${at}.policyName`,
+              `${token} is still in the subset list of connection policy ${old} on ${subsets.join(', ')} (TokenHasConfig): remove it from those subsets first`,
+              { context: { ...context, subsets } },
+            )
+        }
+        return [`policies.${recordType}.${token}`, old] as const
+      }),
+    )
     // the values the write replaces: each token's current assignment of this type
-    const configs = await poolConfigManagerContract(chain, address, version).getTokenConfigBatch(
-      tokens,
-      {
-        blockTag,
-      },
-    )
-    const expected = Object.fromEntries(
-      tokens.map((t, i) => [
-        `policies.${recordType}.${t}`,
-        decodeTokenPolicies(resultToObject(configs[i]!))[recordType],
-      ]),
-    )
+    const expected = Object.fromEntries(current)
     return { data, expected }
   }
 }

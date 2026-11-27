@@ -77,6 +77,11 @@ export const AUX_IFACE = new Interface([
   'function getTokenFactory() view returns (address)',
   'function getAdditionalPoolData(address localToken, uint64 remoteChainSelector, bytes4 finality, bytes extraArgs) view returns (bytes)',
 ])
+/** The TokenAdminRegistry view the registry reads use. */
+export const TAR_IFACE = new Interface([
+  'function getTokenConfig(address token) view returns ((address administrator, address pendingAdministrator, address tokenPool))',
+])
+
 export const STORE_IFACE = new Interface([
   'error InvalidRequestedFinality(bytes4 requestedFinality, bytes4 allowedFinality)',
   'error LocalTokenNotRegistered(address localToken)',
@@ -300,6 +305,13 @@ export function stackChain(state: StackState = defaultStack()) {
             default:
               throw callException()
           }
+        })
+      // the TokenAdminRegistry: `tarPools`, administered by OWNER
+      if (addr === TAR)
+        return answer(TAR_IFACE, data, (name, args) => {
+          if (name !== 'getTokenConfig') throw callException()
+          const pool = state.tarPools[getAddress(String(args[0]))]
+          return [[pool ? OWNER : ZeroAddress, ZeroAddress, pool ?? ZeroAddress]]
         })
       // auxiliary contracts (hooks, providers): every answer comes from `state.views`
       if (state.others[addr])

@@ -203,7 +203,7 @@ const OPERATIONS = {
       fee: 'applyTokenFeePolicyUpdates',
       destOverhead: 'applyTokenDestOverheadPolicyUpdates',
       security: 'applyTokenSecurityPolicyUpdates',
-    },
+    } satisfies Record<LaneRecordType, string>,
   },
   applyMultiTokenPoolInlineConnectionConfigUpdates: {
     contracts: ['PoolConfigManager'],

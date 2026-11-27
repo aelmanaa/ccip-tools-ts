@@ -27,6 +27,7 @@ import { validateArray, validateOneOf } from '../../validate.ts'
 import { decodeTokenProfile, resolvePoolConfigManagerTarget } from '../contracts.ts'
 import { readMultiTokenPoolGuardFacts } from '../guard-facts.ts'
 import {
+  TRANSFER_DIRECTIONS,
   evaluateMultiTokenPoolGuards,
   guardLaneKey,
   multiTokenPoolChainLanes,
@@ -42,7 +43,7 @@ import {
   validateLaneParams,
 } from './get-multi-token-pool-lane.ts'
 
-const DIRECTIONS = ['outbound', 'inbound'] as const
+const DIRECTIONS = TRANSFER_DIRECTIONS
 
 /**
  * Runs the lane check on one lane, locally and on the remote side.

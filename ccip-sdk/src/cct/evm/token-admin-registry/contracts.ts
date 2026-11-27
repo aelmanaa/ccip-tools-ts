@@ -163,8 +163,14 @@ export async function readTokenAdminRegistryConfig(
   chain: EVMChain,
   registry: string,
   token: string,
+  { blockTag }: { blockTag?: number } = {},
 ): Promise<TokenAdminRegistryConfig> {
-  const config = resultToObject(await tokenAdminRegistry(chain, registry).getTokenConfig(token))
+  const config = resultToObject(
+    await tokenAdminRegistry(chain, registry).getTokenConfig(
+      token,
+      blockTag === undefined ? {} : { blockTag },
+    ),
+  )
   return {
     administrator: getAddress(config.administrator),
     pendingAdministrator: getAddress(config.pendingAdministrator),

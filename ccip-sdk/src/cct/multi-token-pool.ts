@@ -252,7 +252,8 @@ export type MultiTokenPoolLane = {
  * - `REMOTE_TOKEN_SHARED`: another local token resolves the same remote token on that chain.
  * - `NO_REMOTE_POOL`: the remote registry names no pool for the remote token (or the lane trusts no
  *   remote pool): a send burns here and nothing releases it there.
- * - `POOL_DATA_FORMAT_MISMATCH`: the lane sends long pool data to a remote pool that reads only legacy.
+ * - `POOL_DATA_FORMAT_MISMATCH`: the lane sends long pool data to a remote pool that reads only legacy,
+ *   or a remote pool sends legacy data this lane does not accept from it.
  * - `LEGACY_RECEIVE_FROM_MULTI_TOKEN_POOL`: the lane accepts legacy pool data, which names no source
  *   token, from a remote multi-token pool.
  * - `DEST_BYTES_OVERHEAD_TOO_LOW` / `DEST_GAS_OVERHEAD_TOO_LOW`: the destination overheads cannot carry
@@ -262,7 +263,8 @@ export type MultiTokenPoolLane = {
  * - `INBOUND_BELOW_REMOTE_OUTBOUND`: the inbound rate limit is below the remote outbound one.
  * - `DEFAULT_CCVS_DROPPED`: a CCV list without the default placeholder drops the ramps' default CCVs.
  * - `HOOK_CALLER_MISSING`: the lane's hook does not authorize a serving pool.
- * - `UID_MISMATCH`: the token's additional pool data does not pair with the remote token's.
+ * - `UID_MISMATCH`: the additional pool data does not pair: a provider on one side refuses what the
+ *   other sends (legacy receive sends none), or a provider refuses to produce data for its token.
  * - `POOL_CANNOT_MINT_BURN`: the pool lacks mint or burn on the token.
  * - `REMOTE_LANE_MISMATCH`: the remote side does not point back at this lane, or its registry's pool
  *   is not among the trusted ones.
@@ -275,6 +277,9 @@ export type MultiTokenPoolLane = {
  *   entry where one applies.
  * - `CCVS_NOT_SYNCED`, `LANE_NOT_ADMITTED`, `ACCOUNT_LOCKS_EXCEEDED`: Solana pool-group lane states.
  * - `REMOTE_ATTESTED`: a remote fact came from an attestation, not a read (a warning).
+ * - `UID_MIGRATION_UNCHECKED`: a factory UID provider is set on a token whose registry shows a pool
+ *   history (another pool serves it, or an admin transfer is pending) that the SDK cannot check yet;
+ *   the write is refused. It is about the token: its `remoteChainSelector` is `0n`.
  */
 export const MULTI_TOKEN_POOL_LANE_CHECKS = [
   'TOKEN_NOT_REGISTERED',
@@ -326,7 +331,7 @@ export type MultiTokenPoolFinding<C extends string> = {
 export type MultiTokenPoolLaneFinding = MultiTokenPoolFinding<MultiTokenPoolLaneCheck> & {
   /** Local token of the lane. */
   tokenAddress: string
-  /** Remote chain of the lane. */
+  /** Remote chain of the lane; `0n` when the finding is about the token, not one lane. */
   remoteChainSelector: bigint
   /** The record type involved, when one is. */
   recordType?: LaneRecordType
@@ -430,8 +435,8 @@ export type MultiTokenPoolTransferQuote = {
   /** Amount the receiver gets: `amount - feeDeducted`. */
   netAmount: bigint
   /**
-   * Whether a fee record resolves. Always `true` in a returned quote: a lane without one makes the
-   * quote throw, since a send would revert.
+   * Whether a fee record resolves: `true` on EVM; on Solana `false` for a legacy lane without a fee
+   * record (the send falls back to the FeeQuoter); a long lane without one throws.
    */
   hasFeeRecord: boolean
 }
@@ -794,4 +799,20 @@ export type MultiTokenPoolExecutedStep = MultiTokenPoolPlanStep<string> & {
   contractAddress?: string
   /** Accounts the step created, by name (e.g. `poolGroupAddress`, `poolGroupId`, `lookupTableAddress`). */
   created?: Record<string, string>
+}
+
+/** Default `maxTransferFeeBps` of the post-state guards (the token fee cap, both tiers). @internal */
+export const DEFAULT_MAX_TRANSFER_FEE_BPS = 1_000
+/** Default `minDestGasOverhead` of the post-state guards (destination gas). @internal */
+export const DEFAULT_MIN_DEST_GAS_OVERHEAD = 200_000
+/** Gas a resolved hook adds to the default minimum destination gas. @internal */
+export const HOOK_DEST_GAS_OVERHEAD = 100_000
+/** Long pool data without additional data: decimals, source token and two offsets/lengths. @internal */
+export const LONG_POOL_DATA_BYTES = 192
+/** Legacy pool data: the decimals word. @internal */
+export const LEGACY_POOL_DATA_BYTES = 32
+
+/** Bytes of long pool data with `extra` bytes of additional data (ABI-padded to 32). @internal */
+export function longPoolDataBytes(extra: number): number {
+  return LONG_POOL_DATA_BYTES + Math.ceil(extra / 32) * 32
 }
