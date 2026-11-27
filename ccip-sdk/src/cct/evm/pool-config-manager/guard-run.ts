@@ -121,6 +121,8 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   errorContext?: Record<string, unknown>
   /** The op's own state read at `blockTag`, so a build reads the state once. */
   stateRead?: MultiTokenPoolRecordStateRead
+  /** A move of a sealed value the op accepts (a balance that only grew): never reported. */
+  tolerate?: (change: CCTStateChange) => boolean
 }
 
 /** What a guarded write reports (the fields of `MultiTokenPoolUnsignedTx`). @internal */
@@ -335,11 +337,16 @@ export async function runMultiTokenPoolGuards(
     ...(input.poolAddress !== undefined && { [GUARD_POOL_PATH]: getAddress(input.poolAddress) }),
   }
   if (input.expectedSnapshot)
-    assertSnapshotHolds(operation, input.expectedSnapshot, {
-      calldataHash: keccak256(data),
-      guardInputsHash,
-      expected,
-    })
+    assertSnapshotHolds(
+      operation,
+      input.expectedSnapshot,
+      {
+        calldataHash: keccak256(data),
+        guardInputsHash,
+        expected,
+      },
+      input.tolerate,
+    )
   const snapshot = sealMultiTokenPoolSnapshot({
     observedAt: BigInt(blockNumber),
     operation,
@@ -549,6 +556,7 @@ function hashGuardInputs(
 export function snapshotChanges(
   snapshot: MultiTokenPoolSnapshot,
   current: { guardInputsHash: string; expected: Record<string, unknown> },
+  tolerate?: (change: CCTStateChange) => boolean,
 ): CCTStateChange[] {
   const changed: CCTStateChange[] = []
   const paths = new Set([...Object.keys(snapshot.expected), ...Object.keys(current.expected)])
@@ -561,7 +569,7 @@ export function snapshotChanges(
       expected: snapshot.guardInputsHash,
       actual: current.guardInputsHash,
     })
-  return changed
+  return tolerate ? changed.filter((c) => !tolerate(c)) : changed
 }
 
 /**
@@ -574,6 +582,7 @@ export function assertSnapshotHolds(
   operation: string,
   snapshot: MultiTokenPoolSnapshot,
   current: { calldataHash: string; guardInputsHash: string; expected: Record<string, unknown> },
+  tolerate?: (change: CCTStateChange) => boolean,
 ): void {
   if (snapshot.operation !== operation)
     throw new CCTParamsInvalidError(
@@ -587,7 +596,7 @@ export function assertSnapshotHolds(
       'expectedSnapshot',
       'covers other calldata: pass the snapshot built with these exact params',
     )
-  const changed = snapshotChanges(snapshot, current)
+  const changed = snapshotChanges(snapshot, current, tolerate)
   if (changed.length)
     throw new CCTStateChangedError(
       operation,

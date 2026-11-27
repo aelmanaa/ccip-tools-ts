@@ -134,7 +134,8 @@ const CASES: Case[] = [
       s.pcm.roles.FEE_COLLECTOR_ROLE = [OWNER]
       feeToken(s, 5n)
     },
-    move: (s) => feeToken(s, 9n),
+    // a balance that fell (another withdrawal ran): what the proposal sends moved
+    move: (s) => feeToken(s, 2n),
     path: /^balances\./,
   },
 ]
@@ -195,4 +196,10 @@ describe('snapshot check of record-free PCM writes', () => {
       assert.ok(Object.keys(built.snapshot.expected).some((p) => c.path.test(p)))
     })
   }
+
+  it('withdrawMultiTokenPoolFeeTokens: fees that came in since do not make the proposal stale (E7 N2)', async () => {
+    const c = CASES.find((x) => x.op === 'withdrawMultiTokenPoolFeeTokens')!
+    const grown = await buildAndCheck({ ...c, move: (s) => feeToken(s, 9n) }, true)
+    assert.deepEqual([grown.ok, grown.changed], [true, []])
+  })
 })

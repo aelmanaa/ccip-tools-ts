@@ -8,7 +8,7 @@
 import { type Interface, type Result, getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
+import { type CCTStateChange, CCTParamsInvalidError } from '../../../errors.ts'
 import FACTORY_BURN_MINT_ERC20_V1_5_1_ABI from '../../artifacts/abi/V1_5_1/factory-burn-mint-erc20.ts'
 import {
   type PoolConfigManagerRole,
@@ -109,7 +109,7 @@ export class WithdrawMultiTokenPoolFeeTokens extends PoolConfigManagerWriteOpera
 
   /**
    * What the withdrawal moves, sealed: the PCM the pool calls, and each fee token's balance at the
-   * pool (the whole of it is withdrawn).
+   * pool (the whole of it is withdrawn); a balance that grows later does not move the proposal.
    */
   protected override async readFacts(
     chain: EVMChain,
@@ -130,6 +130,20 @@ export class WithdrawMultiTokenPoolFeeTokens extends PoolConfigManagerWriteOpera
         feeTokens.map((t, i) => [`balances.${getAddress(t)}`, BigInt(balances[i]!)]),
       ),
     }
+  }
+
+  /**
+   * Fees only add up: a balance that grew since the build still withdraws its whole amount, so only
+   * a decrease (or a token gone from the facts) moves the proposal.
+   */
+  protected override tolerated({ path, expected, actual }: CCTStateChange): boolean {
+    // a balance is a bigint when built, a decimal string once a snapshot was serialized
+    const amount = (v: unknown) =>
+      typeof v === 'bigint' ? v : typeof v === 'string' && /^\d+$/.test(v) ? BigInt(v) : undefined
+    const [before, now] = [amount(expected), amount(actual)]
+    return (
+      path.startsWith('balances.') && before !== undefined && now !== undefined && now >= before
+    )
   }
 
   /** The pool, tokens and recipient are all in the calldata. */

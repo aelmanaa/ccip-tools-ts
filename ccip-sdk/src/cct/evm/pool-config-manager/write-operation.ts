@@ -50,7 +50,12 @@ export type { MultiTokenPoolGuardOptions } from './guards.ts'
 import type { Result, TransactionReceipt } from 'ethers'
 
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
-import { CCTDataDecodeError, CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
+import {
+  type CCTStateChange,
+  CCTDataDecodeError,
+  CCTParamsInvalidError,
+  CCTStateChangedError,
+} from '../../errors.ts'
 import { latestBlock, noteMinedBlock } from '../mined-block.ts'
 import {
   type DecodedMultiTokenPoolWrite,
@@ -239,6 +244,15 @@ export abstract class PoolConfigManagerWriteOperation<
   }
 
   /**
+   * Whether a move of a sealed value leaves the proposal valid (a balance that only grew, for a
+   * withdrawal of the whole balance): such a move is never reported, on the snapshot check, the
+   * rebuild before a send, or a caller's `expectedSnapshot`. Defaults to none.
+   */
+  protected tolerated(_change: CCTStateChange): boolean {
+    return false
+  }
+
+  /**
    * This op's params recovered from its own calldata, for the snapshot check; `undefined` when the
    * op is not re-checked by {@link recheck} (a record write: its guard re-reads the records).
    * @param args - The decoded calldata.
@@ -312,10 +326,11 @@ export abstract class PoolConfigManagerWriteOperation<
     const moved = snapshotChanges(
       { ...snapshot, expected: sealed },
       { guardInputsHash: snapshot.guardInputsHash, expected: facts },
+      (c) => this.tolerated(c),
     )
     if (moved.length) return { ok: false, changed: moved, findings: [] }
     const rebuilt = await this.generate(chain, { ...raw, sender })
-    const changed = snapshotChanges(snapshot, rebuilt.snapshot)
+    const changed = snapshotChanges(snapshot, rebuilt.snapshot, (c) => this.tolerated(c))
     if (rebuilt.snapshot.calldataHash !== snapshot.calldataHash)
       changed.unshift({
         path: 'calldataHash',
@@ -415,6 +430,7 @@ export abstract class PoolConfigManagerWriteOperation<
       ...(params.sender !== undefined && { sender: params.sender }),
       expected,
       ...(context && { errorContext: context }),
+      tolerate: (c) => this.tolerated(c),
       ...writeGuardsOf(params),
     })
     return {
@@ -461,7 +477,7 @@ export abstract class PoolConfigManagerWriteOperation<
         : { ...params, sender, expectedSnapshot: undefined },
     )
     if (!params.expectedSnapshot) {
-      const changed = snapshotChanges(first.snapshot, unsigned.snapshot)
+      const changed = snapshotChanges(first.snapshot, unsigned.snapshot, (c) => this.tolerated(c))
       if (first.snapshot.calldataHash !== unsigned.snapshot.calldataHash)
         changed.unshift({
           path: 'calldataHash',
