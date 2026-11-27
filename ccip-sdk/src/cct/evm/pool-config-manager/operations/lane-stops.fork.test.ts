@@ -19,7 +19,7 @@ import { reachableRpcEndpoint, rpcEndpoint } from '../../../../../../scripts/tes
 import type { ChainGetter } from '../../../../chain.ts'
 import { forkProvider, withForkRetry } from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
+import { CCTParamsInvalidError, CCTStateChangedError } from '../../../errors.ts'
 import type { RateLimitConfig } from '../../../rate-limit.ts'
 import { EVMTokenManager } from '../../index.ts'
 import { ApplyMultiTokenPoolInlineRateLimitBucketUpdates } from './apply-multi-token-pool-inline-rate-limit-bucket-updates.ts'
@@ -380,6 +380,56 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
         getChain,
         restore: stopped.snapshot,
       }),
+    )
+  })
+
+  it('a state move between the build and the send raises CCTStateChangedError (R1 m1)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: POLICY_TOKEN, remoteChainSelector: FUJI }]
+    const wallet = await signer(CORE_CONFIG)
+    const clamp = async () => {
+      const policy = await cct.getMultiTokenPoolRateLimitPolicy({
+        poolAddress: CORE_POOL,
+        policyName: 'core-pol',
+      })
+      const inbound = policy.records.find((r) => r.remoteChainSelector === FUJI)!.rateLimits.inbound
+      assert.ok(inbound.enabled)
+      await mined(
+        new ApplyMultiTokenPoolRateLimitPolicyBucketUpdates().execute(chain, {
+          poolAddress: CORE_POOL,
+          wallet,
+          updates: [
+            {
+              policyName: 'core-pol',
+              remoteChainSelector: FUJI,
+              direction: 'inbound',
+              fastFinality: false,
+              config: { enabled: true, capacity: inbound.capacity - 1n, rate: inbound.rate },
+            },
+          ],
+        }),
+      )
+    }
+    // the policy moves right after the first build: the stop copies inbound, so the rebuilt
+    // calldata differs, and the send is refused as a state change, not as a bad param
+    class RacingStop extends StopMultiTokenPoolLanes {
+      #builds = 0
+      override async generate(...args: Parameters<StopMultiTokenPoolLanes['generate']>) {
+        const unsigned = await super.generate(...args)
+        if (this.#builds++ === 0) await clamp()
+        return unsigned
+      }
+    }
+    await assert.rejects(
+      new RacingStop().execute(chain, {
+        poolAddress: CORE_POOL,
+        lanes,
+        direction: 'outbound',
+        wallet,
+      }),
+      (e: unknown) =>
+        e instanceof CCTStateChangedError &&
+        (e.context.changed as { path: string }[]).some((c) => c.path === 'calldataHash'),
     )
   })
 })

@@ -29,7 +29,11 @@ import {
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from './contracts.ts'
-import { type MultiTokenPoolSimulatedFrom, runMultiTokenPoolGuards } from './guard-run.ts'
+import {
+  type MultiTokenPoolSimulatedFrom,
+  runMultiTokenPoolGuards,
+  snapshotChanges,
+} from './guard-run.ts'
 import {
   type MultiTokenPoolRecordStateRead,
   readMultiTokenPoolRecordState,
@@ -37,6 +41,7 @@ import {
 
 export type { MultiTokenPoolSimulatedFrom } from './guard-run.ts'
 export type { MultiTokenPoolGuardOptions } from './guards.ts'
+import { CCTStateChangedError } from '../../errors.ts'
 import { latestBlock, noteMinedBlock } from '../mined-block.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
@@ -227,11 +232,29 @@ export abstract class PoolConfigManagerWriteOperation<
   ): Promise<MultiTokenPoolTransactionResult> {
     const sender = await this.resolveWalletSender(params.wallet, params.sender)
     const first = await this.generate(chain, { ...params, sender })
-    const unsigned = await this.generate(chain, {
-      ...params,
-      sender,
-      expectedSnapshot: params.expectedSnapshot ?? first.snapshot,
-    })
+    // the rebuild right before sending: with the caller's snapshot it must hold; without one, any
+    // move since the first build (the state-derived calldata included) is a state change
+    const unsigned = await this.generate(
+      chain,
+      params.expectedSnapshot
+        ? { ...params, sender }
+        : { ...params, sender, expectedSnapshot: undefined },
+    )
+    if (!params.expectedSnapshot) {
+      const changed = snapshotChanges(first.snapshot, unsigned.snapshot)
+      if (first.snapshot.calldataHash !== unsigned.snapshot.calldataHash)
+        changed.unshift({
+          path: 'calldataHash',
+          expected: first.snapshot.calldataHash,
+          actual: unsigned.snapshot.calldataHash,
+        })
+      if (changed.length)
+        throw new CCTStateChangedError(
+          this.name,
+          `${changed.map((c) => c.path).join(', ')} moved between the build and the send`,
+          { context: { ...this.errorContext(params as unknown as Parsed), changed } },
+        )
+    }
     const { response, receipt } = await submit(chain, params.wallet, unsigned, this.name)
     // the next read or build on this provider never pins before this write (ethers' block cache)
     noteMinedBlock(chain, receipt.blockNumber)
