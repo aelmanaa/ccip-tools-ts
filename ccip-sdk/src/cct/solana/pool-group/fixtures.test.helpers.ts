@@ -118,7 +118,7 @@ export function clockData(now = NOW): Buffer {
 export function chainConfigData(
   marker?: Buffer,
   pools: Buffer[] = [hex(EVM_POOL)],
-  token = pad32(EVM_TOKEN),
+  token: Buffer = pad32(EVM_TOKEN),
 ): Buffer {
   const body = encodeType('ChainConfig', (v) => {
     const base = v.base as {

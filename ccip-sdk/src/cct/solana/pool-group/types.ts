@@ -6,7 +6,11 @@
 
 import type { TokenTransferFeeConfig } from '../../../chain.ts'
 import type { FinalityAllowed, FinalityRequested } from '../../../extra-args.ts'
-import type { MultiTokenPoolDirection, PoolDataFormat } from '../../multi-token-pool.ts'
+import type {
+  MultiTokenPoolDirection,
+  MultiTokenPoolSnapshot,
+  PoolDataFormat,
+} from '../../multi-token-pool.ts'
 import type { RateLimitConfig } from '../../rate-limit.ts'
 
 /**
@@ -585,6 +589,11 @@ export type GetPoolGroupRequiredCCVsResult = {
    * answer may still be the same, for example when both tiers are equal or no threshold is set.
    */
   finalityApplied: boolean
+}
+/** Params of `checkPoolGroupSnapshot`. */
+export type CheckPoolGroupSnapshotParams = PoolGroupRef & {
+  /** The snapshot a pool-group op returned with the proposal. */
+  snapshot: MultiTokenPoolSnapshot
 }
 /** Params of `getTokenPoolGlobalConfig`. */
 export type GetTokenPoolGlobalConfigParams = PoolGroupProgramRef

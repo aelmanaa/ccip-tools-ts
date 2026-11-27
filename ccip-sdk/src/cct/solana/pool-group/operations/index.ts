@@ -7,3 +7,9 @@ export { GetPoolGroupLane, GetPoolGroupLanes } from './get-pool-group-lane.ts'
 export { GetPoolGroupHooks, GetPoolGroupListEntries, HasPoolGroupListEntry } from './hooks.ts'
 export { GetTokenPoolGlobalConfig } from './get-token-pool-global-config.ts'
 export { GetPoolGroupRequiredCCVs } from './get-pool-group-required-ccvs.ts'
+export {
+  CheckMultiTokenPoolLane,
+  CheckPoolGroupSnapshot,
+  GetMultiTokenPoolLane,
+  GetMultiTokenPoolTransferQuote,
+} from './multi-token-pool.ts'

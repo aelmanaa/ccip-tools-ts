@@ -10,6 +10,15 @@ import type { ChainContext } from '../../chain.ts'
 import { ChainFamily } from '../../networks.ts'
 import type { SolanaChain } from '../../solana/index.ts'
 import type { UnsignedSolanaTx } from '../../solana/types.ts'
+import type {
+  CheckMultiTokenPoolLaneParams,
+  GetMultiTokenPoolTransferQuoteParams,
+  MultiTokenPoolLane,
+  MultiTokenPoolLaneCheckResult,
+  MultiTokenPoolLaneParams,
+  MultiTokenPoolSnapshotCheck,
+  MultiTokenPoolTransferQuote,
+} from '../multi-token-pool.ts'
 import { TokenManager } from '../token-manager.ts'
 import {
   type ExecuteOnboardTokenParams,
@@ -20,6 +29,10 @@ import {
   OnboardToken,
 } from './onboarding/onboard-token.ts'
 import {
+  CheckMultiTokenPoolLane,
+  CheckPoolGroupSnapshot,
+  GetMultiTokenPoolLane,
+  GetMultiTokenPoolTransferQuote,
   GetPoolGroup,
   GetPoolGroupChain,
   GetPoolGroupFeatures,
@@ -35,6 +48,7 @@ import {
   HasPoolGroupListEntry,
 } from './pool-group/operations/index.ts'
 import type {
+  CheckPoolGroupSnapshotParams,
   GetPoolGroupChainParams,
   GetPoolGroupChainResult,
   GetPoolGroupFeaturesParams,
@@ -339,6 +353,10 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
 
   // Pool groups (reads)
   readonly #getPoolGroupFeatures = new GetPoolGroupFeatures()
+  readonly #checkPoolGroupSnapshot = new CheckPoolGroupSnapshot()
+  readonly #getMultiTokenPoolLane = new GetMultiTokenPoolLane()
+  readonly #checkMultiTokenPoolLane = new CheckMultiTokenPoolLane()
+  readonly #getMultiTokenPoolTransferQuote = new GetMultiTokenPoolTransferQuote()
   readonly #getPoolGroup = new GetPoolGroup()
   readonly #getPoolGroupChain = new GetPoolGroupChain()
   readonly #getPoolGroupPolicy = new GetPoolGroupPolicy()
@@ -3470,6 +3488,84 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
     opts: GetPoolGroupRequiredCCVsParams,
   ): Promise<GetPoolGroupRequiredCCVsResult> {
     return this.#getPoolGroupRequiredCCVs.query(this.chain, opts)
+  }
+
+  /**
+   * Re-reads the values a snapshot recorded and reports which moved.
+   * @remarks Run it right before a Squads proposal executes; the program cannot compare on chain.
+   * The snapshot's op re-reads its state and re-runs its guard; no Solana op builds snapshots yet,
+   * so every snapshot is refused until the first pool-group write op lands.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), or the snapshot was
+   *   not built by a Solana pool-group op
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.checkPoolGroupSnapshot({ poolGroupId, snapshot })
+   * ```
+   */
+  checkPoolGroupSnapshot(opts: CheckPoolGroupSnapshotParams): Promise<MultiTokenPoolSnapshotCheck> {
+    return this.#checkPoolGroupSnapshot.query(this.chain, opts)
+  }
+
+  /**
+   * Reads the family-neutral view of one lane (same params and result as on EVM).
+   * @remarks Read-only: needs no wallet and builds no transaction. `poolAddress` is the pool
+   * program; omitted, the program of the mint's existing pool. Buckets and the fee config are what
+   * the program applies (`observe_lane_group`); a standard lane of a program without pool groups is
+   * read through core.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), or the mint has no
+   *   pool
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCTOperationUnsupportedError} if the program refuses `observe_lane_group` on a
+   *   linked or driven lane
+   * @example
+   * ```ts
+   * const result = await cct.getMultiTokenPoolLane({ tokenAddress: mint, remoteChainSelector })
+   * ```
+   */
+  getMultiTokenPoolLane(opts: MultiTokenPoolLaneParams): Promise<MultiTokenPoolLane> {
+    return this.#getMultiTokenPoolLane.query(this.chain, opts)
+  }
+
+  /**
+   * Runs the lane checks the router does not: kind, admission, pauses, CCV sync, long-data fee
+   * floor, 32-byte EVM token bytes, the remote pool's long-data acceptance (F14), account-lock
+   * budget, and mint authority.
+   * @remarks Fails closed on an unread, unattested remote. The EVM side of a lane is read with
+   * `getChain`'s chain (registry, pool type, lane back, decimals).
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCIPError} (transient) when a remote read fails
+   * @example
+   * ```ts
+   * const result = await cct.checkMultiTokenPoolLane({ tokenAddress: mint, remoteChainSelector, getChain })
+   * ```
+   */
+  checkMultiTokenPoolLane(
+    opts: CheckMultiTokenPoolLaneParams,
+  ): Promise<MultiTokenPoolLaneCheckResult> {
+    return this.#checkMultiTokenPoolLane.query(this.chain, opts)
+  }
+
+  /**
+   * Quotes a transfer by simulating `get_pool_fee` with the lane's pool group records, with the
+   * token fee and net amount.
+   * @remarks Read-only: needs no wallet and builds no transaction. On Solana a legacy lane without a
+   * pool fee record still sends (the router quotes the FeeQuoter's token defaults): the quote then
+   * has `hasFeeRecord: false`, no token fee and zero pool overheads. A long lane needs the record.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the lane does not
+   *   exist or allow the finality, or it sends long data without a fee record
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCTOperationUnsupportedError} if the program refuses the simulation
+   * @example
+   * ```ts
+   * const result = await cct.getMultiTokenPoolTransferQuote({ tokenAddress: mint, remoteChainSelector, amount: 1_000n })
+   * ```
+   */
+  getMultiTokenPoolTransferQuote(
+    opts: GetMultiTokenPoolTransferQuoteParams,
+  ): Promise<MultiTokenPoolTransferQuote> {
+    return this.#getMultiTokenPoolTransferQuote.query(this.chain, opts)
   }
 }
 
