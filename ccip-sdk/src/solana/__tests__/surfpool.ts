@@ -6,6 +6,7 @@
  * block, on a port of their own.
  */
 import { type ChildProcess, execSync, spawn } from 'node:child_process'
+import { createServer } from 'node:net'
 
 import { Connection, SYSVAR_RENT_PUBKEY } from '@solana/web3.js'
 
@@ -209,9 +210,15 @@ export async function startFork({
   port,
 }: {
   upstreamUrl: string
-  port: number
+  /** Preferred RPC port (the websocket takes the next one); a taken pair falls back to a free one. */
+  port?: number
 }): Promise<{ surfpool: SurfpoolInstance; connection: Connection }> {
-  const surfpool = createSurfpoolInstance({ rpcUrl: upstreamUrl, port })
+  // several sessions run forks on one machine: a fixed port collides
+  const free = port !== undefined && (await portFree(port)) && (await portFree(port + 1))
+  const surfpool = createSurfpoolInstance({
+    rpcUrl: upstreamUrl,
+    port: free ? port : await freePortPair(),
+  })
   await surfpool.start()
   const connection = new Connection(`http://${surfpool.host}:${surfpool.port}`, {
     commitment: 'confirmed',
@@ -221,11 +228,40 @@ export async function startFork({
   return { surfpool, connection }
 }
 
-/** Closes the fork's websocket, then stops Surfpool; see {@link closeWebSocket}. */
+/** Whether `port` can be bound on 127.0.0.1 right now. */
+function portFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createServer()
+    server.once('error', () => resolve(false))
+    server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)))
+  })
+}
+
+/** A port the OS reports free whose successor is free too (RPC and websocket). */
+async function freePortPair(): Promise<number> {
+  for (;;) {
+    const server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    await new Promise((resolve) => server.close(resolve))
+    const port = typeof address === 'object' && address ? address.port : 0
+    if (port && port < 65_535 && (await portFree(port + 1))) return port
+  }
+}
+
+/** How long a stop waits for web3.js confirmation polls still in flight to settle. */
+const SETTLE_MS = 1_500
+
+/**
+ * Closes the fork's websocket, then stops Surfpool; see {@link closeWebSocket}. A web3.js
+ * `confirmTransaction` can leave one block-height poll in flight after it resolves: the stop waits
+ * for it first, so no fetch fails after the suite ended.
+ */
 export async function stopFork(fork: {
   surfpool?: SurfpoolInstance
   connection?: Connection
 }): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, SETTLE_MS))
   closeWebSocket(fork.connection)
   await fork.surfpool?.stop()
 }
