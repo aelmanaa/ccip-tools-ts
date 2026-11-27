@@ -253,6 +253,16 @@ describe('lane stops (cct/evm pool-config-manager)', () => {
         }),
         refusedAt('lanes[0]', /changed since the stop/),
       )
+      // another pool's stop of the same token is refused (M39)
+      await assert.rejects(
+        new Lift().run(stopped, {
+          restore: {
+            ...restore(limits),
+            expected: { ...restore(limits).expected, 'stop.poolConfigManager': T },
+          },
+        }),
+        refusedAt('restore', /is a stop on PoolConfigManager/),
+      )
       // exact restore: the stop created the record, so the lift removes it
       const created = decoded((await new Lift().run(stopped, { restore: restore(limits) })).data)
       assert.deepEqual(created, { removes: [T], sets: [] })

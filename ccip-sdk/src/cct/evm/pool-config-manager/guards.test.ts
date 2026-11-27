@@ -413,6 +413,17 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       assert.equal(laneJudgingOf(fn), 'none')
   })
 
+  it('enforcing a limit that was not enforced only tightens (M4)', () => {
+    const limits = (outbound: RateLimitConfig): MultiTokenPoolRateLimits => ({
+      outbound,
+      inbound: on(true),
+      fastFinalityOutbound: on(false),
+      fastFinalityInbound: on(false),
+    })
+    // the default outbound bucket goes from no limit to 100/1: every transfer is limited more
+    assert.equal(loosensRateLimits(limits(on(false)), limits(on(true))), false)
+  })
+
   it('a stop is enabled with no capacity and no rate (M16, M17), and more rate alone loosens (M5)', () => {
     assert.equal(isStop({ isEnabled: true, capacity: 0n, rate: 0n }), true)
     assert.equal(isStop({ isEnabled: true, capacity: 0n, rate: 1n }), false)

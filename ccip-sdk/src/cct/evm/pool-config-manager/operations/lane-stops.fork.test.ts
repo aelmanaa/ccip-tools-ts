@@ -477,4 +477,35 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
         /is a stop on PoolConfigManager/.test(e.message),
     )
   })
+
+  it('the guard enforces the drop confirmation (A21; kills R3 M36 off the live suite)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const TWO_POOL_TOKEN = '0x84557ba2481E757553F479299f6Df129017320Dc'
+    const [kept, dropped] = [
+      '0xD14C91AD5C5cb41c5E58e75FD09f1EE60aA08F2e',
+      '0x45289275807E88A197391E060589D647e64519D5',
+    ]
+    // a set that keeps one of the two trusted pools drops the other: refused until confirmed
+    await refused(
+      () =>
+        cct.generateUnsignedApplyMultiTokenPoolInlineRemotePoolConfigUpdates({
+          poolAddress: CORE_POOL,
+          getChain,
+          set: [
+            {
+              tokenAddress: TWO_POOL_TOKEN,
+              remoteChainSelector: FUJI,
+              trustPolicyRemotePools: false,
+              poolDataFormat: 'long',
+              remotePools: [{ address: kept, allowLegacyPoolData: false }],
+            },
+          ],
+        }),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        e.context.param === 'confirmDropped' &&
+        JSON.stringify((e.context.dropped as { remotePools: string[] }[])[0]?.remotePools) ===
+          JSON.stringify([dropped]),
+    )
+  })
 })
