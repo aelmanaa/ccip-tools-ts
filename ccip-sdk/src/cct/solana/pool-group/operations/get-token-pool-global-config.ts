@@ -4,19 +4,19 @@ import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { deriveTokenPoolGlobalConfigPda } from '../../programs/token-pool.ts'
 import { SolanaQuery } from '../../query.ts'
-import type { GetTokenPoolProgramConfigParams, GetTokenPoolProgramConfigResult } from '../types.ts'
+import type { GetTokenPoolGlobalConfigParams, GetTokenPoolGlobalConfigResult } from '../types.ts'
 import { decodeOwned, parsePoolGroupProgram } from './common.ts'
 
 /** Reads a pool program's program-wide `PoolConfig`. */
-export class GetTokenPoolProgramConfig extends SolanaQuery<
-  GetTokenPoolProgramConfigParams,
-  GetTokenPoolProgramConfigResult,
+export class GetTokenPoolGlobalConfig extends SolanaQuery<
+  GetTokenPoolGlobalConfigParams,
+  GetTokenPoolGlobalConfigResult,
   { program: PublicKey }
 > {
-  readonly name = 'getTokenPoolProgramConfig'
+  readonly name = 'getTokenPoolGlobalConfig'
 
   /** @throws {@link CCTParamsInvalidError} if `poolProgramAddress` is invalid */
-  protected prepare(params: GetTokenPoolProgramConfigParams) {
+  protected prepare(params: GetTokenPoolGlobalConfigParams) {
     return { program: parsePoolGroupProgram(this.name, params) }
   }
 

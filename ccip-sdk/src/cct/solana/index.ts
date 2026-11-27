@@ -31,7 +31,7 @@ import {
   GetPoolGroupPolicy,
   GetPoolGroupPolicyChainRecord,
   GetPoolGroupRequiredCCVs,
-  GetTokenPoolProgramConfig,
+  GetTokenPoolGlobalConfig,
   HasPoolGroupListEntry,
 } from './pool-group/operations/index.ts'
 import type {
@@ -55,8 +55,8 @@ import type {
   GetPoolGroupRequiredCCVsParams,
   GetPoolGroupRequiredCCVsResult,
   GetPoolGroupResult,
-  GetTokenPoolProgramConfigParams,
-  GetTokenPoolProgramConfigResult,
+  GetTokenPoolGlobalConfigParams,
+  GetTokenPoolGlobalConfigResult,
   HasPoolGroupListEntryParams,
   PoolGroupFeature,
 } from './pool-group/types.ts'
@@ -349,7 +349,7 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   readonly #getPoolGroupHooks = new GetPoolGroupHooks()
   readonly #getPoolGroupListEntries = new GetPoolGroupListEntries()
   readonly #hasPoolGroupListEntry = new HasPoolGroupListEntry()
-  readonly #getTokenPoolProgramConfig = new GetTokenPoolProgramConfig()
+  readonly #getTokenPoolGlobalConfig = new GetTokenPoolGlobalConfig()
   readonly #getPoolGroupRequiredCCVs = new GetPoolGroupRequiredCCVs()
 
   /** Creates a Solana CCT manager for an existing chain. */
@@ -3423,13 +3423,13 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
    * @example
    * ```ts
-   * const result = await cct.getTokenPoolProgramConfig({})
+   * const result = await cct.getTokenPoolGlobalConfig({})
    * ```
    */
-  getTokenPoolProgramConfig(
-    opts: GetTokenPoolProgramConfigParams,
-  ): Promise<GetTokenPoolProgramConfigResult> {
-    return this.#getTokenPoolProgramConfig.query(this.chain, opts)
+  getTokenPoolGlobalConfig(
+    opts: GetTokenPoolGlobalConfigParams,
+  ): Promise<GetTokenPoolGlobalConfigResult> {
+    return this.#getTokenPoolGlobalConfig.query(this.chain, opts)
   }
 
   /**

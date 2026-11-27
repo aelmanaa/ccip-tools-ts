@@ -555,10 +555,10 @@ export type GetPoolGroupRequiredCCVsResult = {
   /** Whether `finality` changed the answer's threshold amount. */
   finalityApplied: boolean
 }
-/** Params of `getTokenPoolProgramConfig`. */
-export type GetTokenPoolProgramConfigParams = PoolGroupProgramRef
-/** Result of `getTokenPoolProgramConfig`: the deployment's defaults. */
-export type GetTokenPoolProgramConfigResult = {
+/** Params of `getTokenPoolGlobalConfig`. */
+export type GetTokenPoolGlobalConfigParams = PoolGroupProgramRef
+/** Result of `getTokenPoolGlobalConfig`: the deployment's defaults. */
+export type GetTokenPoolGlobalConfigResult = {
   /** Account version. */
   version: number
   /** Whether mint owners may initialize pools themselves. */

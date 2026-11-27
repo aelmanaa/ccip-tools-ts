@@ -21,7 +21,7 @@ import {
   GetPoolGroupListEntries,
   GetPoolGroupMembers,
   GetPoolGroupPolicy,
-  GetTokenPoolProgramConfig,
+  GetTokenPoolGlobalConfig,
   HasPoolGroupListEntry,
 } from './operations/index.ts'
 
@@ -264,7 +264,7 @@ describe('getPoolGroupPolicy', () => {
   })
 })
 
-describe('getTokenPoolProgramConfig', () => {
+describe('getTokenPoolGlobalConfig', () => {
   it('decodes the PoolConfig; a program without one is refused', async () => {
     const accounts: Accounts = new Map([
       [
@@ -282,7 +282,7 @@ describe('getTokenPoolProgramConfig', () => {
         },
       ],
     ])
-    const op = new GetTokenPoolProgramConfig()
+    const op = new GetTokenPoolGlobalConfig()
     assert.deepEqual(
       await op.query(chainWith(accounts), { poolProgramAddress: PROGRAM.toBase58() }),
       {

@@ -5,5 +5,5 @@ export { GetPoolGroupPolicy, GetPoolGroupPolicyChainRecord } from './get-pool-gr
 export { GetPoolGroupMembers } from './get-pool-group-members.ts'
 export { GetPoolGroupLane, GetPoolGroupLanes } from './get-pool-group-lane.ts'
 export { GetPoolGroupHooks, GetPoolGroupListEntries, HasPoolGroupListEntry } from './hooks.ts'
-export { GetTokenPoolProgramConfig } from './get-token-pool-program-config.ts'
+export { GetTokenPoolGlobalConfig } from './get-token-pool-global-config.ts'
 export { GetPoolGroupRequiredCCVs } from './get-pool-group-required-ccvs.ts'

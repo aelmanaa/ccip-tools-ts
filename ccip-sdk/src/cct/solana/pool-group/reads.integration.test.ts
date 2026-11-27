@@ -47,7 +47,7 @@ describe('pool-group reads on Devnet', { skip, timeout: 180_000 }, () => {
 
   it('features, program config, group and its chain record', async () => {
     assert.deepEqual(await cct.getPoolGroupFeatures(ref), [...POOL_GROUP_FEATURES])
-    const config = await cct.getTokenPoolProgramConfig(ref)
+    const config = await cct.getTokenPoolGlobalConfig(ref)
     assert.equal(config.defaultRouter, 'Ccip842gzYHhvdDkSyi2YVCoAWPbYJoApMFzSxQroE9C')
     const group = await cct.getPoolGroup({ ...ref, poolGroupAddress: G2 })
     assert.equal(group.poolGroupAddress, G2)
