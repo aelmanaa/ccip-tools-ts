@@ -24,6 +24,7 @@ import {
   MULTI_TOKEN_POOL_OPERATIONS,
 } from '../../multi-token-pool/contracts.ts'
 import { SetMultiTokenPoolRouter } from '../../multi-token-pool/operations/set-multi-token-pool-router.ts'
+import { SetPoolConfigManager } from '../../multi-token-pool/operations/set-pool-config-manager.ts'
 import type { MultiTokenPoolOwnedWriteOperation } from '../../multi-token-pool/owned-write-operation.ts'
 import { UpdatePolicyStoreAuthorizedCallers } from '../../policy-store/operations/update-policy-store-authorized-callers.ts'
 import { EVMQuery } from '../../query.ts'
@@ -130,6 +131,7 @@ export const OWNED_SEALED_OPS: ReadonlyMap<
     new UpdatePolicyStoreAuthorizedCallers(),
     new UpdateMultiTokenPoolHooksAuthorizedCallers(),
     new SetMultiTokenPoolRouter(),
+    new SetPoolConfigManager(),
   ].map((op) => [
     op.name,
     op as unknown as { recheck: MultiTokenPoolOwnedWriteOperation<never, never>['recheck'] },

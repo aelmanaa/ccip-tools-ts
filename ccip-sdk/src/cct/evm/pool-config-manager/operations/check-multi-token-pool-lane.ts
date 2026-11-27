@@ -20,7 +20,10 @@ import {
   sortFindings,
 } from '../../../multi-token-pool.ts'
 import { latestBlock } from '../../mined-block.ts'
-import { poolConfigManagerContract } from '../../multi-token-pool/contracts.ts'
+import {
+  type MultiTokenPoolVersion,
+  poolConfigManagerContract,
+} from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
 import { IsBurner } from '../../token/operations/is-burner.ts'
 import { IsMinter } from '../../token/operations/is-minter.ts'
@@ -83,6 +86,20 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
   ): Promise<MultiTokenPoolLaneCheckResult> {
     const poolAddress = await resolveLanePool(this.name, chain, params)
     const pcm = await resolvePoolConfigManagerTarget(chain, { poolAddress })
+    return this.checkWith(chain, params, poolAddress, pcm)
+  }
+
+  /**
+   * The lane check of `poolAddress`'s lane, judged on the records of `pcm` (the pool's own PCM, or a
+   * PCM it would call after `setPoolConfigManager`).
+   * @internal
+   */
+  async checkWith(
+    chain: EVMChain,
+    params: CheckMultiTokenPoolLaneParams,
+    poolAddress: string,
+    pcm: { address: string; version: MultiTokenPoolVersion },
+  ): Promise<MultiTokenPoolLaneCheckResult> {
     const blockTag = await latestBlock(chain)
     const key = {
       tokenAddress: getAddress(params.tokenAddress),

@@ -53,6 +53,7 @@ import {
   TransferPolicyStoreOwnership,
 } from './ownership-writes.ts'
 import { SetMultiTokenPoolRouter } from './set-multi-token-pool-router.ts'
+import { SetPoolConfigManager } from './set-pool-config-manager.ts'
 
 /** A port the OS reports free right now (the fork binds it immediately after). */
 async function freePort(): Promise<number> {
@@ -598,5 +599,78 @@ describe('MTTP owner-gated writes (Sepolia and Fuji forks)', { skip, timeout: 90
         wallet: ownerWallet,
       }),
     )
+  })
+  it('setPoolConfigManager refuses other stores while lanes are served, and a PCM the stores do not authorize', async () => {
+    const V5V9_PCM = '0x8AEe4112612168c05db5Dc204E18dCa6b3aD8Cc6' // another stack: other stores
+    const cct = EVMTokenManager.fromChain(sepolia.chain)
+    const stack = await withForkRetry(() =>
+      new GetMultiTokenPoolStack().query(sepolia.chain, { poolAddress: CORE_POOL }),
+    )
+    const current = stack.pool.poolConfigManager
+    const op = new SetPoolConfigManager()
+    const refusal = (poolConfigManager: string) =>
+      withForkRetry(() =>
+        rejectionOf(
+          op.generate(sepolia.chain, { poolAddress: CORE_POOL, poolConfigManager }),
+          'expected a refusal',
+        ),
+      )
+    const same = await refusal(current)
+    assert.ok(same instanceof CCTParamsInvalidError)
+    assert.match(String(same.context.reason), /already calls/)
+    const notPcm = await refusal(store)
+    assert.ok(
+      notPcm instanceof CCTParamsInvalidError &&
+        /is not a PoolConfigManager/.test(String(notPcm.context.reason)),
+    )
+    const otherStores = await refusal(V5V9_PCM)
+    assert.ok(otherStores instanceof CCTParamsInvalidError)
+    assert.match(
+      String(otherStores.context.reason),
+      /uses other policy stores .* while the pool serves \d+ lane/,
+    )
+    // the PCM's code on a fresh address: same registry and stores (immutables), not yet authorized
+    const copy = Wallet.createRandom().address
+    await sepolia.provider.send('anvil_setCode', [copy, await sepolia.provider.getCode(current)])
+    const unauthorized = await refusal(copy)
+    assert.ok(unauthorized instanceof CCTParamsInvalidError)
+    assert.match(String(unauthorized.context.reason), /is not an authorized caller of/)
+    const callers = new UpdatePolicyStoreAuthorizedCallers()
+    for (const { address } of Object.values(stack.policyStores)) {
+      const { owner } = await withForkRetry(() => readOwnership(sepolia.chain, address))
+      await mined(
+        sepolia.provider,
+        callers.execute(sepolia.chain, {
+          policyStore: address,
+          addedCallers: [copy],
+          wallet: await impersonate(sepolia.provider, owner),
+        }),
+      )
+    }
+    const { owner } = await withForkRetry(() => readOwnership(sepolia.chain, CORE_POOL))
+    const proposal = await op.generate(sepolia.chain, {
+      poolAddress: CORE_POOL,
+      poolConfigManager: copy,
+      sender: owner,
+    })
+    assert.deepEqual(proposal.goingLive, [])
+    assert.deepEqual(
+      (proposal.followUps ?? [])
+        .map((f) => [f.operation, f.target])
+        .sort((a, b) => String(a).localeCompare(String(b))),
+      stack.poolsSharingPoolConfigManager.length
+        ? []
+        : Object.values(stack.policyStores)
+            .map((s) => ['updatePolicyStoreAuthorizedCallers', s.address])
+            .sort((a, b) => String(a).localeCompare(String(b))),
+    )
+    const check = await withForkRetry(() =>
+      cct.checkMultiTokenPoolSnapshot({
+        snapshot: proposal.snapshot,
+        transaction: proposal,
+        sender: owner,
+      }),
+    )
+    assert.deepEqual([check.ok, check.changed], [true, []])
   })
 })
