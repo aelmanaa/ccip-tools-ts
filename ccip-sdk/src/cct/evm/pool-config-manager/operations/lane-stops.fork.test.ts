@@ -20,6 +20,7 @@ import { forkProvider } from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { EVMTokenManager } from '../../index.ts'
+import { mined as minedOn } from './fork.test.helpers.ts'
 import {
   LiftMultiTokenPoolLaneStops,
   StopMultiTokenPoolLanes,
@@ -98,12 +99,8 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     })
     return { sources: sources.rateLimit, stopped, rateLimits }
   }
-  const mined = async (hash: string) => {
-    assert.equal((await chain.provider.getTransactionReceipt(hash))?.status, 1)
-    // ethers answers a repeated request from its 250ms cache (`cacheTimeout`): the next read must
-    // see the block the write mined in, not the number the receipt wait just fetched
-    await new Promise((resolve) => setTimeout(resolve, 300))
-  }
+  const mined = async (write: Promise<{ hash: string }>) =>
+    assert.equal(await minedOn(chain.provider as JsonRpcProvider, write), 1)
 
   it("restores an inline lane exactly from the stop's snapshot", async (t) => {
     if (!deployed) return t.skip('mttp-core not deployed')
@@ -117,31 +114,27 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     })
     const wallet = await signer(CORE_CONFIG)
     await mined(
-      (
-        await stop.execute(chain, {
-          poolAddress: CORE_POOL,
-          lanes,
-          direction: 'outbound',
-          wallet,
-          expectedSnapshot: built.snapshot,
-        })
-      ).hash,
+      stop.execute(chain, {
+        poolAddress: CORE_POOL,
+        lanes,
+        direction: 'outbound',
+        wallet,
+        expectedSnapshot: built.snapshot,
+      }),
     )
     assert.deepEqual((await laneView(CORE_POOL, INLINE_TOKEN)).stopped, {
       outbound: true,
       inbound: false,
     })
     await mined(
-      (
-        await lift.execute(chain, {
-          poolAddress: CORE_POOL,
-          lanes,
-          direction: 'outbound',
-          wallet,
-          getChain,
-          restore: built.snapshot,
-        })
-      ).hash,
+      lift.execute(chain, {
+        poolAddress: CORE_POOL,
+        lanes,
+        direction: 'outbound',
+        wallet,
+        getChain,
+        restore: built.snapshot,
+      }),
     )
     assert.deepEqual(await laneView(CORE_POOL, INLINE_TOKEN), before)
   })
@@ -153,23 +146,20 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     assert.equal(before.sources.kind, 'policy')
     const wallet = await signer(CORE_CONFIG)
     await mined(
-      (await stop.execute(chain, { poolAddress: CORE_POOL, lanes, direction: 'outbound', wallet }))
-        .hash,
+      stop.execute(chain, { poolAddress: CORE_POOL, lanes, direction: 'outbound', wallet }),
     )
     const stopped = await laneView(CORE_POOL, POLICY_TOKEN)
     // the stop holds outbound, and copies inbound from the policy
     assert.equal(stopped.sources.kind, 'inline')
     assert.deepEqual(stopped.rateLimits.inbound, before.rateLimits.inbound)
     await mined(
-      (
-        await lift.execute(chain, {
-          poolAddress: CORE_POOL,
-          lanes,
-          direction: 'outbound',
-          wallet,
-          getChain,
-        })
-      ).hash,
+      lift.execute(chain, {
+        poolAddress: CORE_POOL,
+        lanes,
+        direction: 'outbound',
+        wallet,
+        getChain,
+      }),
     )
     assert.deepEqual(await laneView(CORE_POOL, POLICY_TOKEN), before)
   })
@@ -180,8 +170,7 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     const wallet = await signer(V5V9_OPERATOR)
     // a stop only tightens: no lane rule refuses it, and it reads no remote fact (no getChain)
     await mined(
-      (await stop.execute(chain, { poolAddress: V5V9_POOL, lanes, direction: 'outbound', wallet }))
-        .hash,
+      stop.execute(chain, { poolAddress: V5V9_POOL, lanes, direction: 'outbound', wallet }),
     )
     await assert.rejects(
       lift.generate(chain, {

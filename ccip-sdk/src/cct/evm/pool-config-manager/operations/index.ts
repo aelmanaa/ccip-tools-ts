@@ -207,3 +207,28 @@ export {
   LiftMultiTokenPoolLaneStops,
   StopMultiTokenPoolLanes,
 } from './stop-multi-token-pool-lanes.ts'
+export {
+  type AcceptMultiTokenPoolDefaultAdminTransferParams,
+  type BeginMultiTokenPoolDefaultAdminTransferParams,
+  type CancelMultiTokenPoolDefaultAdminTransferParams,
+  type ChangeMultiTokenPoolDefaultAdminDelayParams,
+  type GrantMultiTokenPoolRoleParams,
+  type RenounceMultiTokenPoolDefaultAdminParams,
+  type RenounceMultiTokenPoolRoleParams,
+  type RevokeMultiTokenPoolRoleParams,
+  type RollbackMultiTokenPoolDefaultAdminDelayParams,
+  AcceptMultiTokenPoolDefaultAdminTransfer,
+  BeginMultiTokenPoolDefaultAdminTransfer,
+  CancelMultiTokenPoolDefaultAdminTransfer,
+  ChangeMultiTokenPoolDefaultAdminDelay,
+  GrantMultiTokenPoolRole,
+  RenounceMultiTokenPoolDefaultAdmin,
+  RenounceMultiTokenPoolRole,
+  RevokeMultiTokenPoolRole,
+  RollbackMultiTokenPoolDefaultAdminDelay,
+} from './role-writes.ts'
+export {
+  type WithdrawMultiTokenPoolFeeTokensParams,
+  type WithdrawMultiTokenPoolFeeTokensResult,
+  WithdrawMultiTokenPoolFeeTokens,
+} from './withdraw-multi-token-pool-fee-tokens.ts'
