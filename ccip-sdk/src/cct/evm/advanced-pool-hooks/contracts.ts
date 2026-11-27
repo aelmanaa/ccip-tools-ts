@@ -28,7 +28,7 @@ import {
   resolveEncoder,
   resolveTokenPool,
 } from '../token-pool/contracts.ts'
-import { validateExactlyOneTarget } from '../validate.ts'
+import { validateAddress, validateArray, validateExactlyOneTarget } from '../validate.ts'
 
 /** The `typeAndVersion` contract type an `AdvancedPoolHooks` reports (`"AdvancedPoolHooks 2.0.0"`). */
 export const ADVANCED_POOL_HOOKS_TYPE = 'AdvancedPoolHooks'
@@ -349,4 +349,27 @@ export async function resolveAdvancedPoolHooksTarget(
     return resolveAdvancedPoolHooks(operation, chain, target.poolAddress)
   await assertAdvancedPoolHooksContract(chain, target.advancedPoolHooks)
   return target.advancedPoolHooks
+}
+
+/**
+ * A CCV address list: valid addresses, checksummed, no duplicate. Shared by `applyCCVConfigUpdates`
+ * and the multi-token pool security records.
+ * @throws {@link CCTParamsInvalidError} at `param` or `<param>[i]`
+ * @internal
+ */
+export function validateCCVList(operation: string, param: string, value: unknown): string[] {
+  validateArray(operation, param, value)
+  const seen = new Set<string>()
+  return value.map((address, i) => {
+    validateAddress(operation, `${param}[${i}]`, address)
+    const normalized = getAddress(address)
+    if (seen.has(normalized))
+      throw new CCTParamsInvalidError(
+        operation,
+        `${param}[${i}]`,
+        'must not duplicate an earlier CCV',
+      )
+    seen.add(normalized)
+    return normalized
+  })
 }

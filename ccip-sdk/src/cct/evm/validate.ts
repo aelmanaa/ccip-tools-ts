@@ -91,19 +91,6 @@ export function validateUint8(operation: string, param: string, value: unknown):
 }
 
 /**
- * Asserts `value` is an integer in `[0, 65535]` (a Solidity `uint16`).
- * @throws {@link CCTParamsInvalidError} if `value` is not such an integer
- */
-export function validateUint16(operation: string, param: string, value: unknown): void {
-  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 0xffff) return
-  throw new CCTParamsInvalidError(
-    operation,
-    param,
-    `must be an integer in [0, 65535], got ${String(value)}`,
-  )
-}
-
-/**
  * Asserts `value` is an integer in `[0, 2^32 − 1]` (a Solidity `uint32`).
  * @throws {@link CCTParamsInvalidError} if `value` is not such an integer
  */
