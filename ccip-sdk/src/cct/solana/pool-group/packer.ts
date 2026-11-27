@@ -69,8 +69,24 @@ export const SQUADS_OUTER_BYTES = 500
  * the packer reserves the batch figure, so every Squads transaction fits either.
  */
 export const SQUADS_EXECUTE_LOCKS = 7
-/** CU Squads' execute adds: a base, and per inner instruction. */
-export const SQUADS_EXECUTE_CU = { base: 25_000, perInstruction: 5_000 } as const
+/**
+ * CU Squads' execute adds: a base, per inner instruction and per distinct inner account (it loads
+ * and checks each one). Calibrated by the S6 planner fork (batchExecuteTransaction, 7-14 accounts,
+ * 1-2 instructions: overhead 28.9k-43.3k CU measured; 25,000 + 5,000 per instruction ran out).
+ */
+export const SQUADS_EXECUTE_CU = { base: 20_000, perInstruction: 5_000, perAccount: 1_500 } as const
+
+/** The Squads execute overhead of a vault message. @internal */
+export function squadsExecuteOverhead(instructions: readonly TransactionInstruction[]): number {
+  const accounts = new Set(
+    instructions.flatMap((i) => [i.programId, ...i.keys.map((k) => k.pubkey)].map(String)),
+  )
+  return (
+    SQUADS_EXECUTE_CU.base +
+    SQUADS_EXECUTE_CU.perInstruction * instructions.length +
+    SQUADS_EXECUTE_CU.perAccount * accounts.size
+  )
+}
 /** Default static priority-fee floor, in micro-lamports per CU (the value that landed on Phantom). */
 export const DEFAULT_COMPUTE_UNIT_PRICE_FLOOR = 10_000
 /** The bump allocator's heap: never freed, and the program requests no larger frame. */
@@ -540,8 +556,7 @@ export async function oneTransactionChecks(input: PackPoolGroupInput): Promise<{
         })
         // inside a Squads vault the execute instruction's own compute comes on top (S3b N6)
         if (!limits.squads) return false
-        const overhead =
-          SQUADS_EXECUTE_CU.base + SQUADS_EXECUTE_CU.perInstruction * instructions.length
+        const overhead = squadsExecuteOverhead(instructions)
         return (result.unitsConsumed ?? MAX_COMPUTE_UNIT_LIMIT) + overhead > MAX_COMPUTE_UNIT_LIMIT
       } catch (err) {
         if (!isBatchTooHeavy(err)) throw err
@@ -599,10 +614,7 @@ export async function packPoolGroupTransactions(
         'budget',
         `transaction ${i} does not fit once its nonce and compute budget are placed: ${over}`,
       )
-    const outerLimit = Math.min(
-      MAX_COMPUTE_UNIT_LIMIT,
-      limit + SQUADS_EXECUTE_CU.base + SQUADS_EXECUTE_CU.perInstruction * body.length,
-    )
+    const outerLimit = Math.min(MAX_COMPUTE_UNIT_LIMIT, limit + squadsExecuteOverhead(body))
     transactions.push({
       family: ChainFamily.Solana,
       instructions,

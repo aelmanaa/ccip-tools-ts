@@ -127,9 +127,9 @@ describe('the unpause rule (A16, OC2)', () => {
       landed: new Set(),
       what: 'x',
     })
-    assert.equal(foreign.lift, false)
-    assert.ok(!foreign.lift && foreign.block.steps?.includes(id))
-    assert.ok(!foreign.lift && /landedStepIds/.test(foreign.block.reason))
+    if (foreign.lift) assert.fail('a foreign pause must not be lifted')
+    assert.ok(foreign.block.steps?.includes(id))
+    assert.match(foreign.block.reason, /landedStepIds/)
   })
 })
 

@@ -56,6 +56,10 @@ export function createSurfpoolInstance({
         '--no-deploy',
         '--ws-port',
         String(port + 1),
+        // Surfpool 1.6+ binds a TPU QUIC port (8004 by default): let the OS pick one, so several
+        // forks (other suites, other sessions) run side by side
+        '--tpu-quic-port',
+        '0',
       ]
       if (rpcUrl) {
         args.push('--rpc-url', rpcUrl)

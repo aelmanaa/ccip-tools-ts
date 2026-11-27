@@ -806,12 +806,15 @@ describe('SolanaTokenManager (cct/solana)', () => {
 })
 
 describe('cct/solana entry point', () => {
-  it('exposes only the manager, the pool taxonomy, the shared tuples and the Squads converters at runtime', () => {
+  it('exposes only the manager, the pool taxonomy, the shared tuples, the planner step tuples and the Squads converters at runtime', () => {
     assert.deepEqual(Object.keys(cctSolana).sort(), [
       'DEFAULT_WRITABLE_INDEXES',
       'MULTI_TOKEN_POOL_LANE_CHECKS',
       'MULTI_TOKEN_POOL_STEP_SIGNER_KINDS',
+      'POOL_GROUP_CHAIN_ENABLEMENT_STEPS',
       'POOL_GROUP_FEATURES',
+      'POOL_GROUP_LEAVE_STEPS',
+      'POOL_GROUP_ONBOARDING_STEPS',
       'POOL_GROUP_POLICY_CLASSES',
       'REGISTRATION_METHODS',
       'SOLANA_TOKEN_POOL_TYPES',

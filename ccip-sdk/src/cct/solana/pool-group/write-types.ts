@@ -51,7 +51,7 @@ export type SolanaTxBudget = {
    * locks (multisig, proposal, batch, transaction, member, Squads program, ComputeBudget) plus 1 per
    * lookup table are reserved, as are the execute's own 3 trace entries; no compute-budget or nonce
    * instruction goes inside (they would not run as inner instructions); the CU estimate adds
-   * Squads' execute overhead (25,000 + 5,000 per inner instruction). Read-then-write ops merge
+   * Squads' execute overhead (20,000 + 5,000 per inner instruction + 1,500 per inner account). Read-then-write ops merge
    * exactly as on the wallet path and return the snapshot.
    */
   executor?: SolanaExecutor

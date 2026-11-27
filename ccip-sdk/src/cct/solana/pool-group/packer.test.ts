@@ -30,6 +30,7 @@ import {
   executePoolGroupTransactions,
   measureTransaction,
   packPoolGroupTransactions,
+  squadsExecuteOverhead,
 } from './packer.ts'
 import { poolGroupInstructionsHash, poolGroupTransactionsHash } from './snapshot.ts'
 import { toPoolGroupSquadsBatch, toPoolGroupSquadsTransaction } from './squads.ts'
@@ -208,7 +209,7 @@ describe('packPoolGroupTransactions', () => {
       const { bytes } = measureTransaction(PAYER, tx.instructions, [], true)
       assert.ok(bytes <= PACKET_DATA_SIZE, `${bytes}`)
       const units = Math.ceil(ownIxs(tx).length * 10_000 * 1.1)
-      assert.equal(tx.computeUnitLimit, units + 25_000 + 5_000 * ownIxs(tx).length)
+      assert.equal(tx.computeUnitLimit, units + squadsExecuteOverhead(tx.instructions))
       assert.equal(readComputeUnitLimit(tx.outerInstructions!), tx.computeUnitLimit)
     }
   })

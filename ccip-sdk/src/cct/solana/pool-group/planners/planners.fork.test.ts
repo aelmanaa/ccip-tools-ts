@@ -2,15 +2,14 @@
  * The shared planners on a Surfpool fork of Solana Devnet (S6), on the S5 fixture: the Devnet group
  * G2 (AgaDKRcg…, CONNECTION long toward the Sepolia MTTP) and the mints D and E (pools under 22P6h4,
  * registered on interface 2), handed to a signer on the fork. Each run: enable Sepolia, onboard D
- * and E through the planner, then remove D. Once with a wallet (signed planners), once with a 2-of-3
+ * and E through the planner (the §5.1 order), then remove D. Once with a wallet (signed planners), once with a 2-of-3
  * Squads vault (unsigned planners, ready steps batched with `toPoolGroupSquadsBatch`). The
  * transaction and approval counts are printed for the PRD.
  *
- * Fork limit: Surfpool 1.1.2 cannot run the Devnet Router (an SBPF v3 ELF), so every lane check
- * reads it as "not a CCIP Router" (TOKEN_NOT_REGISTERED, POOL_DATA_FORMAT_MISMATCH). No lane can be
- * made live here: enablement runs without `unpause` (the chain stays paused behind its own pause
- * step), onboarding ends at `checkLanes`, blocked by those artifacts only, and removal confirms the
- * drain (the remote side is not read).
+ * Enablement moves Sepolia out of 'off' behind its own pause; onboarding (given that pause's id in
+ * `landedStepIds`) joins and materializes behind it, checks every lane, then lifts it: the lanes go
+ * live through the real lane check (Surfpool 1.6+ runs the Devnet Router). Removal reads the
+ * Sepolia side first (it still sends: blocked), then the caller confirms the drain, remote unread.
  *
  * Run: `with-private-rpcs.sh node --test src/cct/solana/pool-group/planners/planners.fork.test.ts`
  * from `ccip-sdk` (needs `surfpool`).
@@ -52,7 +51,6 @@ const SEPOLIA = networkInfo('ethereum-testnet-sepolia').chainSelector
 const GROUP_OWNER_OFFSET = 8 + 1 + 1 + 32
 const STATE_OWNER_OFFSET = 8 + 1 + 32 + 32 + 1 + 32 + 32
 /** Fork Router artifacts (see the header). */
-const ARTIFACTS = /TOKEN_NOT_REGISTERED|POOL_DATA_FORMAT_MISMATCH/
 
 /** A fork of Devnet with G2, D and E handed to `owner`. */
 async function forkFixture(port: number, owner: PublicKey) {
@@ -165,104 +163,81 @@ describe(
       )
     })
 
-    it('enable Sepolia: the record leaves off behind its own pause; nothing else to write', async () => {
+    let pauseId = ''
+    it("enable Sepolia: the record leaves off behind this run's pause; a re-plan never lifts it without the landed id", async () => {
       const remoteChain = await sepoliaConfig(cct)
-      const plan = await cct.getMultiTokenPoolChainEnablementPlan({
-        ...g,
-        remoteChain,
-        tokenAddresses: 'all-members',
-        payer: owner.publicKey.toBase58(),
-      })
-      assert.deepEqual(
-        plan.steps.map((s) => s.name),
-        ['pausePoolGroupChainLanes', 'checkLanes'],
-      )
-      const r = await cct.enableMultiTokenPoolChain({
-        ...g,
-        remoteChain,
-        tokenAddresses: 'all-members',
-        getChain,
-        wallet: wallet(),
-      })
+      const base = { ...g, remoteChain, tokenAddresses: 'all-members' as const }
+      const r = await cct.enableMultiTokenPoolChain({ ...base, getChain, wallet: wallet() })
       assert.equal(r.blockedBy, undefined, r.blockedBy?.reason ?? '')
       assert.deepEqual(
         r.steps.map((s) => s.name),
         ['pausePoolGroupChainLanes'],
       )
       tally('enable (wallet)', r.steps)
+      pauseId = r.steps[0]!.id
       const record = await cct.getPoolGroupChain({ ...g, remoteChainSelector: SEPOLIA })
       assert.equal(record.laneMode, 'all-members')
       assert.equal(record.drivenLanesPaused, true)
-      // a re-plan with unpause and no landed ids fails closed: the pause is named, never lifted
       const again = await cct.getMultiTokenPoolChainEnablementPlan({
-        ...g,
-        remoteChain,
-        tokenAddresses: 'all-members',
+        ...base,
         unpause: true,
         payer: owner.publicKey.toBase58(),
       })
       assert.match(again.blockedBy?.reason ?? '', /landedStepIds/)
-      assert.ok(
-        again.blockedBy?.steps?.some((id) => id.endsWith(`pausePoolGroupChainLanes/${SEPOLIA}`)),
-      )
-      // with this run's pause listed as landed, the unpause is planned (it would lift only that)
-      const landed = await cct.getMultiTokenPoolChainEnablementPlan({
-        ...g,
-        remoteChain,
-        tokenAddresses: 'all-members',
-        unpause: true,
-        landedStepIds: r.steps.map((s) => s.id),
-        payer: owner.publicKey.toBase58(),
-      })
-      assert.ok(landed.steps.some((s) => s.name === 'unpausePoolGroupChainLanes'))
+      assert.deepEqual(again.blockedBy?.steps, [pauseId])
     })
 
-    it('onboard D and E: joins and lanes land paused; the plan ends at checkLanes, blocked by fork artifacts only', async () => {
+    it('onboard D and E behind that pause: join, materialize paused, check, then lift the landed pause; lanes live (§5.1 check)', async () => {
       const r = await cct.onboardMultiTokenPoolTokens({
         ...g,
         tokens: onboardingTokens,
+        unpause: true,
+        landedStepIds: [pauseId],
         getChain,
         wallet: wallet(),
       })
+      assert.equal(r.blockedBy, undefined, r.blockedBy?.reason ?? '')
       assert.deepEqual(
-        new Set(r.steps.map((s) => s.name)),
-        new Set(['joinPoolGroup', 'materializePoolGroupLanes']),
+        r.steps.map((s) => s.name),
+        ['joinPoolGroup', 'materializePoolGroupLanes', 'unpausePoolGroupChainLanes'],
       )
       tally('onboard 2 tokens (wallet)', r.steps)
-      assert.ok(r.blockedBy, 'blocked at the lane check')
-      const reasons = r.blockedBy.reason.split('; ').filter((x) => /→/.test(x))
-      assert.ok(reasons.length && reasons.every((x) => ARTIFACTS.test(x)), r.blockedBy.reason)
-      const lanes = await cct.getPoolGroupLanes({
-        ...g,
-        remoteChainSelector: SEPOLIA,
-        kind: 'driven',
-      })
-      assert.deepEqual(new Set(lanes.map((l) => l.tokenAddress)), new Set([D, E]))
-      assert.ok(lanes.every((l) => l.pausedOutbound && l.pausedInbound))
-      // a resume plans nothing more to write: the state shows every landed step
+      for (const { tokenAddress } of onboardingTokens) {
+        const check = await cct.checkMultiTokenPoolLane({
+          poolAddress: PROGRAM,
+          tokenAddress,
+          remoteChainSelector: SEPOLIA,
+          getChain,
+          expectOpen: ['outbound', 'inbound'],
+        })
+        assert.ok(
+          check.ok,
+          `${tokenAddress}: ${check.findings.map((f) => `${f.check}: ${f.reason}`).join('; ')}`,
+        )
+      }
       const plan = await cct.getMultiTokenPoolTokenOnboardingPlan({
         ...g,
         tokens: onboardingTokens,
+        getChain,
         payer: owner.publicKey.toBase58(),
       })
-      assert.deepEqual(
-        plan.steps.map((s) => s.name),
-        ['checkLanes'],
-      )
+      assert.deepEqual(plan.steps, [])
     })
 
     it('remove D: pause outbound, await the drain until confirmed, drop and close in one tx, close the member', async () => {
       const lane = { tokenAddress: D, remoteChainSelector: SEPOLIA }
+      // read through getChain, the Sepolia side still sends: blocked at the remote stop
       const blocked = await cct.removeMultiTokenPoolToken({
         ...g,
         tokenAddress: D,
+        getChain,
         wallet: wallet(),
       })
       assert.deepEqual(
         blocked.steps.map((s) => s.name),
         ['pauseLaneOutbound'],
       )
-      assert.match(blocked.blockedBy?.reason ?? '', /confirmInFlightDrained/)
+      assert.match(blocked.blockedBy?.reason ?? '', /still sends|confirmInFlightDrained/)
       const r = await cct.removeMultiTokenPoolToken({
         ...g,
         tokenAddress: D,
@@ -297,7 +272,13 @@ describe(
     let cct: SolanaTokenManager
     let vault: string
     const landed: string[] = []
+    let getChain: ChainGetter
     before(async () => {
+      const sepolia = await EVMChain.fromUrl(await reachableRpcEndpoint('RPC_SEPOLIA'))
+      getChain = async (selector) => {
+        if (selector === SEPOLIA) return sepolia
+        throw new CCTParamsInvalidError('test', 'getChain', `no RPC for ${selector}`)
+      }
       fx = await forkFixture(18_973, PublicKey.default)
       for (const key of [creator, m1, m2, m3]) {
         const sig = await fx.chain.connection.requestAirdrop(key.publicKey, 10 * LAMPORTS_PER_SOL)
@@ -390,6 +371,7 @@ describe(
           remoteChain,
           tokenAddresses: 'all-members',
           payer: vault,
+          getChain,
           maxReadySteps: 20,
           landedStepIds: landed,
           solana: { budget },
@@ -400,15 +382,18 @@ describe(
         cct.generateUnsignedOnboardMultiTokenPoolTokens({
           ...g,
           tokens: onboardingTokens,
+          unpause: true,
           payer: vault,
+          getChain,
           maxReadySteps: 20,
           landedStepIds: landed,
           solana: { budget },
         }),
       )
-      assert.ok(
-        onboard.blockedBy && ARTIFACTS.test(onboard.blockedBy.reason),
-        onboard.blockedBy?.reason ?? 'not blocked',
+      assert.equal(onboard.blockedBy, undefined, onboard.blockedBy?.reason ?? '')
+      assert.equal(
+        (await cct.getPoolGroupChain({ ...g, remoteChainSelector: SEPOLIA })).drivenLanesPaused,
+        false,
       )
       const lane = { tokenAddress: D, remoteChainSelector: SEPOLIA }
       const removed = await waves('remove 1 token (Squads)', () =>
@@ -427,6 +412,9 @@ describe(
       assert.ok(mints.includes(E) && !mints.includes(D), String(mints))
       console.log('S6 planner counts', JSON.stringify(counts))
       console.log('S6 Squads execute CU', JSON.stringify(squads.executeCU))
+      // the SDK's outer limit covers what each execute consumed (the calibrated overhead)
+      if (!process.env.CALIBRATE)
+        for (const x of squads.executeCU) assert.ok(x.consumed <= x.limit, JSON.stringify(x))
     })
   },
 )
