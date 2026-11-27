@@ -5,7 +5,7 @@
  * @packageDocumentation
  */
 
-import { dataLength, getAddress, hexlify, zeroPadValue } from 'ethers'
+import { dataLength, getAddress, hexlify, isError, zeroPadValue } from 'ethers'
 
 import type { Chain, ChainGetter } from '../../../chain.ts'
 import { CCIPTokenPoolChainConfigNotFoundError } from '../../../errors/index.ts'
@@ -19,8 +19,10 @@ import { readAllAuthorizedCallers } from '../advanced-pool-hooks/contracts.ts'
 import {
   type MultiTokenPoolVersion,
   ANY_FINALITY_CONFIG,
+  multiTokenPoolContract,
   poolConfigManagerContract,
   reportsMultiTokenPool,
+  resolveMultiTokenPool,
   uidProviderContract,
 } from '../multi-token-pool/contracts.ts'
 import { isNotCcipContract } from '../query.ts'
@@ -64,6 +66,11 @@ export type ReadMultiTokenPoolGuardFactsInput = {
   makesLive?: boolean
   /** Also read each remote pool's outbound bucket toward this chain (the lane check). */
   readRemoteRateLimits?: boolean
+  /**
+   * The additional pool data provider each token has after the write, for tokens a profile write
+   * changes (`null`: none); others read the provider stored now.
+   */
+  providerOverrides?: ReadonlyMap<string, string | null>
 }
 
 /** A remote family the SDK reads the remote side of (attestations are refused for it). */
@@ -81,15 +88,12 @@ export async function readMultiTokenPoolGuardFacts(
   input: ReadMultiTokenPoolGuardFactsInput,
 ): Promise<MultiTokenPoolGuardFacts> {
   const { chain, requests, blockTag } = input
-  const [
-    hookCallers,
-    servingPools,
-    { lengths: additionalPoolDataBytes, bytes: additionalPoolData },
-  ] = await Promise.all([
+  const [hookCallers, servingPools, provided] = await Promise.all([
     readHookCallers(chain, requests.hooks, blockTag),
     readServingPools(input),
-    readProviderDataLengths(input),
+    readProviderData(input),
   ])
+  const { lengths: additionalPoolDataBytes, bytes: additionalPoolData } = provided
   const remoteLanes = new Map<string, MultiTokenPoolRemoteLaneFacts>()
   const remotePools = new Map<string, MultiTokenPoolRemotePoolFacts>()
   const localSelector = chain.network.chainSelector
@@ -97,7 +101,13 @@ export async function readMultiTokenPoolGuardFacts(
     ...requests.remoteLanes.map(async (lane) =>
       remoteLanes.set(
         guardLaneKey(lane),
-        await readRemoteLane(input, lane, localSelector, servingPools),
+        await readRemoteLane(
+          input,
+          lane,
+          localSelector,
+          servingPools,
+          outboundData(lane, provided),
+        ),
       ),
     ),
     ...requests.remotePools.map(async ({ remoteChainSelector, address }) =>
@@ -107,6 +117,11 @@ export async function readMultiTokenPoolGuardFacts(
       ),
     ),
   ])
+  const { localAcceptsInbound, localAcceptsLegacy } = await readLocalAcceptance(
+    input,
+    provided.providers,
+    remoteLanes,
+  )
   return {
     remoteLanes,
     remotePools,
@@ -114,6 +129,9 @@ export async function readMultiTokenPoolGuardFacts(
     servingPools,
     additionalPoolDataBytes,
     additionalPoolData,
+    providerDataRefused: provided.refused,
+    localAcceptsInbound,
+    localAcceptsLegacy,
   }
 }
 
@@ -151,47 +169,123 @@ async function readServingPools({
   return [...new Set([...(poolAddress ? [getAddress(poolAddress)] : []), ...serving])].sort()
 }
 
-/** Bytes of additional pool data per lane whose token has a provider. */
-async function readProviderDataLengths({
+/** What each lane's token provider adds to a send, after the write. */
+type ProvidedData = {
+  /** The provider of each token read, after the write (`null`: none). */
+  providers: Map<string, string | null>
+  /** Bytes of the data, per lane key, for lanes whose token has a provider. */
+  lengths: Map<string, number>
+  /** The data (`0x` hex), per lane key. */
+  bytes: Map<string, string>
+  /** Why the provider refuses to produce data for the lane's token, per lane key. */
+  refused: Map<string, string>
+}
+
+/** The data each open lane's provider adds to a send, with the providers the write leaves. */
+async function readProviderData({
   chain,
   poolConfigManager,
   version,
   blockTag,
   requests,
-}: ReadMultiTokenPoolGuardFactsInput): Promise<{
-  lengths: Map<string, number>
-  bytes: Map<string, string>
-}> {
-  const lengths = new Map<string, number>()
-  const bytes = new Map<string, string>()
+  providerOverrides,
+}: ReadMultiTokenPoolGuardFactsInput): Promise<ProvidedData> {
+  const out: ProvidedData = {
+    providers: new Map(),
+    lengths: new Map(),
+    bytes: new Map(),
+    refused: new Map(),
+  }
   const tokens = [...new Set(requests.providerLanes.map((l) => getAddress(l.tokenAddress)))]
-  if (!tokens.length) return { lengths, bytes }
-  const pcm = poolConfigManagerContract(chain, poolConfigManager, version)
-  const configs = await pcm.getTokenConfigBatch(tokens, { blockTag })
-  const providers = new Map(
-    tokens.map((t, i) => [
-      t,
-      decodeTokenProfileFields(resultToObject(configs[i]!)).additionalPoolDataProvider,
-    ]),
-  )
-  await Promise.all(
-    requests.providerLanes.map(async (lane) => {
-      const provider = providers.get(getAddress(lane.tokenAddress))
-      if (!provider) return
-      // the data the send would add; a revert here reverts every send, which the eth_call of the write
-      // does not show, so it propagates as the read error it is
-      const data = await uidProviderContract(chain, provider).getAdditionalPoolData(
-        lane.tokenAddress,
-        lane.remoteChainSelector,
-        ANY_FINALITY_CONFIG,
-        '0x',
+  if (!tokens.length) return out
+  const stored = tokens.filter((t) => !providerOverrides?.has(t))
+  const configs = stored.length
+    ? await poolConfigManagerContract(chain, poolConfigManager, version).getTokenConfigBatch(
+        stored,
         { blockTag },
       )
-      lengths.set(guardLaneKey(lane), dataLength(data))
-      bytes.set(guardLaneKey(lane), hexlify(data))
+    : []
+  stored.forEach((t, i) =>
+    out.providers.set(
+      t,
+      decodeTokenProfileFields(resultToObject(configs[i]!)).additionalPoolDataProvider,
+    ),
+  )
+  for (const t of tokens)
+    if (providerOverrides?.has(t)) out.providers.set(t, providerOverrides.get(t) ?? null)
+  await Promise.all(
+    requests.providerLanes.map(async (lane) => {
+      const provider = out.providers.get(getAddress(lane.tokenAddress))
+      if (!provider) return
+      const key = guardLaneKey(lane)
+      // the data a send adds; a provider that refuses the token reverts every send, which the eth_call
+      // of the write does not show: a finding, while transport errors propagate
+      const data = await uidProviderContract(chain, provider)
+        .getAdditionalPoolData(
+          lane.tokenAddress,
+          lane.remoteChainSelector,
+          ANY_FINALITY_CONFIG,
+          '0x',
+          {
+            blockTag,
+          },
+        )
+        .catch((err: unknown) => {
+          if (!isError(err, 'CALL_EXCEPTION')) throw err
+          out.refused.set(key, err.revert?.name ?? err.shortMessage)
+          return undefined
+        })
+      if (data === undefined) return
+      out.lengths.set(key, dataLength(data))
+      out.bytes.set(key, hexlify(data))
     }),
   )
-  return { lengths, bytes }
+  return out
+}
+
+/** The additional data a lane sends: none on a legacy lane, else its provider's. */
+function outboundData(lane: ProjectedMultiTokenPoolLane, provided: ProvidedData): string {
+  if (lane.connection.poolDataFormat === 'legacy') return '0x'
+  return provided.bytes.get(guardLaneKey(lane)) ?? '0x'
+}
+
+/**
+ * Whether this token's provider, after the write, accepts what arrives: the data the remote side
+ * sends, and the empty data of legacy receive. The destination store runs the same
+ * `isAdditionalPoolDataValid` on every receive, empty data included (chainlink-ccip c950d9bc
+ * `ConnectionPolicyStore._checkPoolData`). Only for lanes whose token has a provider.
+ */
+async function readLocalAcceptance(
+  { chain, blockTag, requests }: ReadMultiTokenPoolGuardFactsInput,
+  providers: ReadonlyMap<string, string | null>,
+  remoteLanes: ReadonlyMap<string, MultiTokenPoolRemoteLaneFacts>,
+): Promise<{
+  localAcceptsInbound: Map<string, boolean>
+  localAcceptsLegacy: Map<string, boolean>
+}> {
+  const localAcceptsInbound = new Map<string, boolean>()
+  const localAcceptsLegacy = new Map<string, boolean>()
+  const valid = (provider: string, lane: ProjectedMultiTokenPoolLane, data: string) =>
+    uidProviderContract(chain, provider).isAdditionalPoolDataValid(
+      lane.tokenAddress,
+      lane.remoteChainSelector,
+      ANY_FINALITY_CONFIG,
+      data,
+      { blockTag },
+    )
+  await Promise.all(
+    requests.remoteLanes.map(async (lane) => {
+      const provider = providers.get(getAddress(lane.tokenAddress))
+      if (!provider) return
+      const key = guardLaneKey(lane)
+      const remote = remoteLanes.get(key)
+      if (remote?.status === 'known' && remote.remoteSendsData !== undefined)
+        localAcceptsInbound.set(key, await valid(provider, lane, remote.remoteSendsData))
+      if (lane.connection.remotePools.some((p) => p.allowLegacyPoolData))
+        localAcceptsLegacy.set(key, await valid(provider, lane, '0x'))
+    }),
+  )
+  return { localAcceptsInbound, localAcceptsLegacy }
 }
 
 /**
@@ -247,6 +341,7 @@ async function readRemoteLane(
   lane: ProjectedMultiTokenPoolLane,
   localSelector: bigint,
   servingPools: readonly string[],
+  sends: string,
 ): Promise<MultiTokenPoolRemoteLaneFacts> {
   const remoteToken = lane.connection.remoteToken!
   const trusted = lane.connection.remotePools.map((p) => p.address)
@@ -295,8 +390,13 @@ async function readRemoteLane(
   // the remote lane back: the reverse mapping a legacy lane relies on, and the remote outbound
   // limit the lane check compares with this lane's inbound
   const legacy = lane.connection.poolDataFormat === 'legacy'
+  // a remote multi-token pool runs its token's provider on what arrives, and adds its own on a send
+  const provider =
+    readsLongData && remote instanceof EVMChain
+      ? await readRemoteProviderVerdict(remote, registryPool, remoteToken, localSelector, sends)
+      : { remoteSendsData: '0x' }
   if (!legacy && !input.readRemoteRateLimits)
-    return { status: 'known', readsLongData, registryPool, mapsBack: true }
+    return { status: 'known', readsLongData, registryPool, mapsBack: true, ...provider }
   const back = await remote
     .getTokenPoolRemotes(registryPool, localSelector, { token: remoteToken })
     .then(
@@ -315,11 +415,57 @@ async function readRemoteLane(
     readsLongData,
     registryPool,
     mapsBack: legacy ? pointsBack : true,
+    ...provider,
     ...(input.readRemoteRateLimits &&
       back && {
         remoteOutbound: back.outboundRateLimiterState,
         remoteDecimals: (await remote.getTokenInfo(remoteToken)).decimals,
       }),
+  }
+}
+
+/**
+ * A remote multi-token pool's provider for the remote token: whether it accepts the data this lane
+ * sends, and the data it sends back. No provider accepts anything and sends nothing.
+ */
+async function readRemoteProviderVerdict(
+  remote: EVMChain,
+  remotePool: string,
+  remoteToken: string,
+  localSelector: bigint,
+  sends: string,
+): Promise<
+  Pick<
+    Extract<MultiTokenPoolRemoteLaneFacts, { status: 'known' }>,
+    'remoteAcceptsOutbound' | 'remoteSendsData' | 'remoteProviderRefused'
+  >
+> {
+  const { version } = await resolveMultiTokenPool(remote, remotePool)
+  const pcm = getAddress(
+    resultToObject(
+      await multiTokenPoolContract(remote, remotePool, version).getPoolConfigManager(),
+    ),
+  )
+  const [config] = await poolConfigManagerContract(remote, pcm, version).getTokenConfigBatch([
+    remoteToken,
+  ])
+  const provider = decodeTokenProfileFields(resultToObject(config!)).additionalPoolDataProvider
+  if (!provider) return { remoteSendsData: '0x' }
+  const contract = uidProviderContract(remote, provider)
+  const [remoteAcceptsOutbound, remoteSendsData] = await Promise.all([
+    contract.isAdditionalPoolDataValid(remoteToken, localSelector, ANY_FINALITY_CONFIG, sends),
+    contract
+      .getAdditionalPoolData(remoteToken, localSelector, ANY_FINALITY_CONFIG, '0x')
+      .then(hexlify, (err: unknown) => {
+        if (!isError(err, 'CALL_EXCEPTION')) throw err
+        return undefined
+      }),
+  ])
+  return {
+    remoteAcceptsOutbound,
+    ...(remoteSendsData === undefined
+      ? { remoteProviderRefused: 'the remote provider refuses to produce data for its token' }
+      : { remoteSendsData }),
   }
 }
 

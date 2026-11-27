@@ -82,6 +82,15 @@ export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   uid?: string | null
   /** A group-driven remote lane: whether its chain record admits the member now. */
   admitted?: boolean
+  /**
+   * Whether the remote token's provider accepts the additional data this lane sends (`undefined`: the
+   * remote token has no provider, or the reader cannot say).
+   */
+  remoteAcceptsOutbound?: boolean
+  /** The additional data the remote side sends (`0x`: none); `undefined` when it cannot be read. */
+  remoteSendsData?: string
+  /** Set when the remote provider refuses to produce data for its own token. */
+  remoteProviderRefused?: string
   /** Whether the remote token has code on the remote chain (read when the registry names no pool). */
   remoteTokenHasCode?: boolean
   /** The remote pool's outbound bucket toward this chain (read for the lane check), `null` when disabled. */
@@ -114,6 +123,12 @@ export type MultiTokenPoolGuardFacts = {
   additionalPoolDataBytes: ReadonlyMap<string, number>
   /** The additional pool data itself (`0x` hex), per lane key, for lanes with a provider. */
   additionalPoolData?: ReadonlyMap<string, string>
+  /** Why the token's provider refuses to produce data for it, per lane key. */
+  providerDataRefused?: ReadonlyMap<string, string>
+  /** Whether the token's provider accepts the data the remote side sends, per lane key. */
+  localAcceptsInbound?: ReadonlyMap<string, boolean>
+  /** Whether the token's provider accepts the empty data of legacy receive, per lane key. */
+  localAcceptsLegacy?: ReadonlyMap<string, boolean>
 }
 
 /** The facts to read for a set of projected lanes. @internal */
@@ -505,6 +520,53 @@ export function evaluateMultiTokenPoolGuards({
         'LANE_NOT_ADMITTED',
         'warning',
         "the remote group's chain record does not admit this member now, so the remote lane is paused: transfers wait until it is admitted",
+        'connection',
+      )
+    // the additional pool data, judged by the providers that judge it on chain: the remote token's on
+    // what this lane sends, this token's on what arrives (legacy receive arrives empty)
+    const laneKeyStr = guardLaneKey(key)
+    const refused = facts.providerDataRefused?.get(laneKeyStr)
+    if (refused !== undefined)
+      add(
+        'UID_MISMATCH',
+        'error',
+        `this token's additional pool data provider refuses to produce data for it (${refused}): every send reverts; use a provider that maps the token (a UID factory must have deployed it)`,
+        'connection',
+      )
+    if (remote.remoteAcceptsOutbound === false)
+      add(
+        'UID_MISMATCH',
+        'error',
+        `the remote token's provider refuses the additional pool data this lane sends (${c.poolDataFormat === 'legacy' ? 'none: the lane sends legacy data' : (facts.additionalPoolData?.get(laneKeyStr) ?? 'none')}): the release there reverts (InvalidAdditionalPoolData) and the burned tokens are stuck; pair the providers, or send long data`,
+        'connection',
+      )
+    if (facts.localAcceptsInbound?.get(laneKeyStr) === false)
+      add(
+        'UID_MISMATCH',
+        'error',
+        `this token's provider refuses the additional pool data the remote side sends (${remote.remoteSendsData}): inbound releases revert here (InvalidAdditionalPoolData); pair the providers`,
+        'connection',
+      )
+    if (facts.localAcceptsLegacy?.get(laneKeyStr) === false)
+      add(
+        'UID_MISMATCH',
+        'error',
+        "a trusted remote pool may send legacy pool data, which carries no additional data, and this token's provider refuses empty data: such inbound releases revert; clear allowLegacyPoolData",
+        'remotePool',
+      )
+    const hasProvider = facts.additionalPoolData?.has(laneKeyStr) === true || refused !== undefined
+    if (remote.remoteProviderRefused !== undefined)
+      add(
+        'UID_MISMATCH',
+        'warning',
+        `${remote.remoteProviderRefused}: sends from the remote side revert there`,
+        'connection',
+      )
+    else if (hasProvider && remote.remoteSendsData === undefined)
+      add(
+        'UID_MISMATCH',
+        'warning',
+        "the additional pool data the remote side sends cannot be read, so this token's provider was not checked against it",
         'connection',
       )
     if (remote.uid != null && c.poolDataFormat === 'long') {

@@ -596,4 +596,67 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       waiting.findings.some((f) => f.check === 'LANE_NOT_ADMITTED' && f.severity === 'warning'),
     )
   })
+
+  it('judges additional pool data by the providers that judge it on chain, both ways', () => {
+    const lane = guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 })
+    const UID = '0x' + 'ab'.repeat(32)
+    const run = (
+      remote: Partial<MultiTokenPoolRemoteLaneFacts>,
+      over: Partial<MultiTokenPoolGuardFacts> = {},
+      changes = inlineLane(T1),
+    ) =>
+      judge(changes, {
+        facts: goodFacts({
+          remoteLanes: new Map([
+            [lane, { ...knownRemote(), ...remote } as MultiTokenPoolRemoteLaneFacts],
+          ]),
+          additionalPoolData: new Map([[lane, UID]]),
+          additionalPoolDataBytes: new Map([[lane, 32]]),
+          ...over,
+        }),
+      })
+    // paired: the remote accepts what this lane sends, this token accepts what comes back
+    assert.deepEqual(
+      run(
+        { remoteAcceptsOutbound: true, remoteSendsData: UID },
+        { localAcceptsInbound: new Map([[lane, true]]) },
+      ).findings,
+      [],
+    )
+    // the remote token's provider refuses this lane's data: burned here, stuck there
+    assert.deepEqual(run({ remoteAcceptsOutbound: false, remoteSendsData: UID }).errors, [
+      'UID_MISMATCH',
+    ])
+    // this token's provider refuses what the remote sends
+    assert.deepEqual(
+      run({ remoteSendsData: '0x' }, { localAcceptsInbound: new Map([[lane, false]]) }).errors,
+      ['UID_MISMATCH'],
+    )
+    // a trusted pool may send legacy data, and the provider refuses empty data
+    assert.deepEqual(
+      run(
+        { remoteSendsData: UID },
+        {
+          localAcceptsLegacy: new Map([[lane, false]]),
+          localAcceptsInbound: new Map([[lane, true]]),
+        },
+      ).errors,
+      ['UID_MISMATCH'],
+    )
+    // the provider refuses to produce data for its own token: every send reverts
+    assert.deepEqual(
+      run(
+        { remoteSendsData: UID },
+        {
+          additionalPoolData: new Map(),
+          providerDataRefused: new Map([[lane, 'TokenNotFromFactory']]),
+        },
+      ).errors,
+      ['UID_MISMATCH'],
+    )
+    // what the remote sends cannot be read: said, never passed silently
+    const unread = run({}, {})
+    assert.deepEqual(unread.errors, [])
+    assert.ok(unread.findings.some((f) => f.check === 'UID_MISMATCH' && f.severity === 'warning'))
+  })
 })

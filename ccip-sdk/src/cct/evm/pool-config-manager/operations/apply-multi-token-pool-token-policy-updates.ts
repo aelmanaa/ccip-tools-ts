@@ -95,7 +95,10 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
     return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', TOKEN_POLICY_ROLES[recordType]]
   }
 
-  protected override errorContext({ recordType }: ApplyMultiTokenPoolTokenPolicyUpdatesParams) {
+  /** Every refusal names the record type. */
+  protected override errorContext({
+    recordType,
+  }: ApplyMultiTokenPoolTokenPolicyUpdatesParams): Record<string, unknown> {
     return { recordType }
   }
 

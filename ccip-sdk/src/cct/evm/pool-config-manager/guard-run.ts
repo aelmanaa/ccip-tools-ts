@@ -13,7 +13,7 @@ import { getAddress, keccak256, toBeHex } from 'ethers'
 
 import type { ChainGetter } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
-import { decodeLaneConnection } from '../../../evm/multi-token-pool.ts'
+import { decodeLaneConnection, decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
@@ -34,6 +34,7 @@ import {
   ANY_FINALITY_CONFIG,
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
+  poolConfigManagerContract,
 } from '../multi-token-pool/contracts.ts'
 import { simulateEVMTx } from '../simulate.ts'
 import { toTokenTransferFeeConfig } from '../token-pool/contracts.ts'
@@ -60,7 +61,9 @@ import {
   type ProjectedMultiTokenPoolLane,
   applyMultiTokenPoolRecordChanges,
   multiTokenPoolChangeChains,
+  multiTokenPoolSupportedChains,
   requiredMultiTokenPoolProviderAnswers,
+  resolveMultiTokenPoolLanes,
 } from './projection.ts'
 import { readMultiTokenPoolRecordState, readProviderAnswers } from './record-state.ts'
 
@@ -150,7 +153,15 @@ export async function runMultiTokenPoolGuards(
   await fillProviderAnswers(chain, before, candidates, blockNumber)
   await fillProviderAnswers(chain, after, candidates, blockNumber)
 
-  const lanes = multiTokenPoolAffectedLanes(before, after)
+  // a profile write changes no record, but what a token's lanes send and accept: its open lanes are
+  // judged again, with the provider the write leaves
+  const profiles = await profileChanges(input, decoded, blockNumber)
+  const lanes = [
+    ...multiTokenPoolAffectedLanes(before, after),
+    ...profileLanes(before, after, profiles.changedTokens),
+  ].filter(
+    (l, i, all) => all.findIndex((o) => guardLaneKey(o.after) === guardLaneKey(l.after)) === i,
+  )
   const afterLanes = lanes.map((l) => l.after)
   const facts = await readMultiTokenPoolGuardFacts({
     chain,
@@ -164,6 +175,7 @@ export async function runMultiTokenPoolGuards(
     ...(input.remoteAttestations && { remoteAttestations: input.remoteAttestations }),
     now: BigInt(Math.floor(Date.now() / 1000)),
     ...(input.makesLive && { makesLive: true }),
+    ...(profiles.providers.size && { providerOverrides: profiles.providers }),
   })
   const chainLanes = multiTokenPoolChainLanes(after, [
     ...new Set(afterLanes.map((l) => l.remoteChainSelector)),
@@ -338,6 +350,57 @@ export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGua
   }
 }
 
+/**
+ * The tokens a profile write changes (a field other than the pauses differs from the stored profile),
+ * and the provider each set profile leaves.
+ */
+async function profileChanges(
+  { chain, poolConfigManager, version }: RunMultiTokenPoolGuardsInput,
+  decoded: DecodedMultiTokenPoolWrite,
+  blockTag: number,
+): Promise<{ changedTokens: Set<string>; providers: Map<string, string | null> }> {
+  const set = decoded.profiles?.set ?? []
+  const providers = new Map(set.map((p) => [p.tokenAddress, p.additionalPoolDataProvider]))
+  if (!set.length) return { changedTokens: new Set(), providers }
+  const configs = await poolConfigManagerContract(
+    chain,
+    poolConfigManager,
+    version,
+  ).getTokenConfigBatch(
+    set.map((p) => p.tokenAddress),
+    { blockTag },
+  )
+  const changedTokens = new Set(
+    set
+      .filter((p, i) => {
+        const raw = resultToObject(configs[i]!)
+        if (!raw.isRegistered) return true
+        const { tokenAddress: _, ...next } = p
+        return canonicalHash([next]) !== canonicalHash([decodeTokenProfileFields(raw)])
+      })
+      .map((p) => p.tokenAddress),
+  )
+  return { changedTokens, providers }
+}
+
+/** The open lanes of `tokens`, unchanged in their records, for a re-check after a profile write. */
+function profileLanes(
+  before: MultiTokenPoolRecordState,
+  after: MultiTokenPoolRecordState,
+  tokens: ReadonlySet<string>,
+): { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[] {
+  const keys = [...tokens].flatMap((tokenAddress) =>
+    multiTokenPoolSupportedChains(after, tokenAddress).map((remoteChainSelector) => ({
+      tokenAddress,
+      remoteChainSelector,
+    })),
+  )
+  const was = resolveMultiTokenPoolLanes(before, keys)
+  return resolveMultiTokenPoolLanes(after, keys)
+    .map((l, i) => ({ before: was[i]!, after: l }))
+    .filter((l) => l.after.connection.hasConnection)
+}
+
 /** Every input the rules read, canonically hashed: equal when nothing they read has moved. */
 function hashGuardInputs(
   lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
@@ -355,6 +418,9 @@ function hashGuardInputs(
       servingPools: [...facts.servingPools].sort(),
       additionalPoolDataBytes: sorted(facts.additionalPoolDataBytes),
       additionalPoolData: sorted(facts.additionalPoolData ?? new Map()),
+      providerDataRefused: sorted(facts.providerDataRefused ?? new Map()),
+      localAcceptsInbound: sorted(facts.localAcceptsInbound ?? new Map()),
+      localAcceptsLegacy: sorted(facts.localAcceptsLegacy ?? new Map()),
     },
   })
 }
