@@ -96,6 +96,7 @@ export class DeleteFastFinalityRateLimit extends SolanaOperation<
       opts.remoteChainSelector,
     )
     if (marked)
+      // an override write on a pool-group lane: refused when the group governs RATE_LIMIT
       await guardPoolGroupLaneOp({
         operation: this.name,
         chain,

@@ -18,6 +18,7 @@ import {
 import {
   type ParsedLaneOpOptions,
   type PoolGroupLaneOpOptions,
+  type PoolGroupLaneOpResult,
   parseLaneOpOptions,
 } from '../../pool-group/lane-op-options.ts'
 import {
@@ -76,13 +77,13 @@ type ParsedEditChainRemoteConfigParams = {
 export type GenerateEditChainRemoteConfigParams = SolanaGenerateParams<EditChainRemoteConfigParams>
 
 /** Unsigned Solana token pool remote configuration editing result. */
-export type GenerateEditChainRemoteConfigResult = UnsignedSolanaTx
+export type GenerateEditChainRemoteConfigResult = UnsignedSolanaTx & PoolGroupLaneOpResult
 
 /** Parameters for executing Solana token pool remote configuration editing. */
 export type ExecuteEditChainRemoteConfigParams = SolanaExecuteParams<EditChainRemoteConfigParams>
 
 /** Result of executing Solana token pool remote configuration editing. */
-export type ExecuteEditChainRemoteConfigResult = TransactionResult
+export type ExecuteEditChainRemoteConfigResult = TransactionResult & PoolGroupLaneOpResult
 
 /**
  * Replaces an initialized remote-chain config.
@@ -93,7 +94,7 @@ export type ExecuteEditChainRemoteConfigResult = TransactionResult
  */
 export class EditChainRemoteConfig extends SolanaOperation<
   EditChainRemoteConfigParams,
-  UnsignedSolanaTx,
+  UnsignedSolanaTx & PoolGroupLaneOpResult,
   ParsedEditChainRemoteConfigParams
 > {
   readonly name = 'editChainRemoteConfig'
@@ -196,8 +197,13 @@ export class EditChainRemoteConfig extends SolanaOperation<
           instruction,
           options: opts.laneOptions,
         })
-      : instruction
-    return { family: ChainFamily.Solana, instructions: [sent], mainIndex: 0 }
+      : { instruction }
+    return {
+      family: ChainFamily.Solana,
+      instructions: [sent.instruction],
+      mainIndex: 0,
+      ...(sent.poolGroup && { poolGroup: sent.poolGroup }),
+    }
   }
 
   /** Generate, sign, simulate, send, and confirm with the pool owner wallet. */

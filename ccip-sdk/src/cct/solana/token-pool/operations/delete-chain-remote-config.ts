@@ -13,6 +13,7 @@ import {
 import {
   type ParsedLaneOpOptions,
   type PoolGroupLaneOpOptions,
+  type PoolGroupLaneOpResult,
   parseLaneOpOptions,
 } from '../../pool-group/lane-op-options.ts'
 import {
@@ -55,19 +56,19 @@ export type GenerateDeleteChainRemoteConfigParams =
   SolanaGenerateParams<DeleteChainRemoteConfigParams>
 
 /** Unsigned Solana token pool remote configuration deletion result. */
-export type GenerateDeleteChainRemoteConfigResult = UnsignedSolanaTx
+export type GenerateDeleteChainRemoteConfigResult = UnsignedSolanaTx & PoolGroupLaneOpResult
 
 /** Parameters for executing Solana token pool remote configuration deletion. */
 export type ExecuteDeleteChainRemoteConfigParams =
   SolanaExecuteParams<DeleteChainRemoteConfigParams>
 
 /** Result of executing Solana token pool remote configuration deletion. */
-export type ExecuteDeleteChainRemoteConfigResult = TransactionResult
+export type ExecuteDeleteChainRemoteConfigResult = TransactionResult & PoolGroupLaneOpResult
 
 /** Deletes an initialized remote-chain config. */
 export class DeleteChainRemoteConfig extends SolanaOperation<
   DeleteChainRemoteConfigParams,
-  UnsignedSolanaTx,
+  UnsignedSolanaTx & PoolGroupLaneOpResult,
   ParsedDeleteChainRemoteConfigParams
 > {
   readonly name = 'deleteChainRemoteConfig'
@@ -140,8 +141,13 @@ export class DeleteChainRemoteConfig extends SolanaOperation<
           instruction,
           options: opts.laneOptions,
         })
-      : instruction
-    return { family: ChainFamily.Solana, instructions: [sent], mainIndex: 0 }
+      : { instruction }
+    return {
+      family: ChainFamily.Solana,
+      instructions: [sent.instruction],
+      mainIndex: 0,
+      ...(sent.poolGroup && { poolGroup: sent.poolGroup }),
+    }
   }
 
   /** Generate, sign, simulate, send, and confirm with the pool owner wallet. */

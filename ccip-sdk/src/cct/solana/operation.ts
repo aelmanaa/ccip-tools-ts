@@ -12,6 +12,7 @@ import type { SolanaChain } from '../../solana/index.ts'
 import { type UnsignedSolanaTx, type Wallet, isWallet } from '../../solana/types.ts'
 import type { SolanaSplitMode } from '../../solana/utils.ts'
 import { type TransactionResult, Operation } from '../operation.ts'
+import type { PoolGroupLaneOpResult } from './pool-group/lane-op-options.ts'
 import { submit } from './submit.ts'
 
 /**
@@ -85,16 +86,23 @@ export abstract class SolanaOperation<
     }
   }
 
-  /** Generate, sign, simulate, send, and confirm with wallet.publicKey as payer. */
-  async execute(chain: SolanaChain, params: SolanaExecuteParams<P>): Promise<TransactionResult> {
+  /**
+   * Generate, sign, simulate, send, and confirm with wallet.publicKey as payer. A pool-group lane
+   * op's guard report (`poolGroup`: findings and lanes made live) is carried to the result.
+   */
+  async execute(
+    chain: SolanaChain,
+    params: SolanaExecuteParams<P>,
+  ): Promise<TransactionResult & PoolGroupLaneOpResult> {
     const { wallet, computeUnits, parsed } = this.prepareWalletExecution(chain, params)
-    return submit(
+    const unsigned: UnsignedSolanaTx & PoolGroupLaneOpResult = await this.buildUnsigned(
       chain,
-      wallet,
-      await this.buildUnsigned(chain, parsed),
-      this.name,
-      computeUnits,
-      this.splitMode,
+      parsed,
     )
+    const result = await submit(chain, wallet, unsigned, this.name, computeUnits, this.splitMode)
+    if (!unsigned.poolGroup) return result
+    // the snapshot binds an unsigned proposal; a landed write reports what it judged
+    const { findings, goingLive } = unsigned.poolGroup
+    return { ...result, poolGroup: { findings, goingLive } }
   }
 }

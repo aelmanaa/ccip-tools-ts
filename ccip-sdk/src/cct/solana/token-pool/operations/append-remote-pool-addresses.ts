@@ -18,6 +18,7 @@ import {
 import {
   type ParsedLaneOpOptions,
   type PoolGroupLaneOpOptions,
+  type PoolGroupLaneOpResult,
   parseLaneOpOptions,
 } from '../../pool-group/lane-op-options.ts'
 import {
@@ -68,14 +69,14 @@ export type GenerateAppendRemotePoolAddressesParams =
   SolanaGenerateParams<AppendRemotePoolAddressesParams>
 
 /** Unsigned Solana remote pool address appending result. */
-export type GenerateAppendRemotePoolAddressesResult = UnsignedSolanaTx
+export type GenerateAppendRemotePoolAddressesResult = UnsignedSolanaTx & PoolGroupLaneOpResult
 
 /** Parameters for executing Solana remote pool address appending. */
 export type ExecuteAppendRemotePoolAddressesParams =
   SolanaExecuteParams<AppendRemotePoolAddressesParams>
 
 /** Result of executing Solana remote pool address appending. */
-export type ExecuteAppendRemotePoolAddressesResult = TransactionResult
+export type ExecuteAppendRemotePoolAddressesResult = TransactionResult & PoolGroupLaneOpResult
 
 /**
  * Appends remote pool addresses to an initialized remote-chain config.
@@ -86,7 +87,7 @@ export type ExecuteAppendRemotePoolAddressesResult = TransactionResult
  */
 export class AppendRemotePoolAddresses extends SolanaOperation<
   AppendRemotePoolAddressesParams,
-  UnsignedSolanaTx,
+  UnsignedSolanaTx & PoolGroupLaneOpResult,
   ParsedAppendRemotePoolAddressesParams
 > {
   readonly name = 'appendRemotePoolAddresses'
@@ -179,8 +180,13 @@ export class AppendRemotePoolAddresses extends SolanaOperation<
           instruction,
           options: opts.laneOptions,
         })
-      : instruction
-    return { family: ChainFamily.Solana, instructions: [sent], mainIndex: 0 }
+      : { instruction }
+    return {
+      family: ChainFamily.Solana,
+      instructions: [sent.instruction],
+      mainIndex: 0,
+      ...(sent.poolGroup && { poolGroup: sent.poolGroup }),
+    }
   }
 
   /** Generate, sign, simulate, send, and confirm with the pool owner wallet. */

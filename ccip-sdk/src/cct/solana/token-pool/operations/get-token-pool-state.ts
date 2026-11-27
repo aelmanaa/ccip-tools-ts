@@ -1,5 +1,6 @@
 import type { PublicKey } from '@solana/web3.js'
 
+import { CCIPError } from '../../../../errors/index.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { PoolProgramRef, TokenPoolConfig } from '../../programs/token-pool.ts'
 import { SolanaQuery } from '../../query.ts'
@@ -104,8 +105,9 @@ async function poolGroupFeaturesOf(
   try {
     const { getPoolGroupProgramFeatures } = await import('../../pool-group/program.ts')
     return await getPoolGroupProgramFeatures(chain, program)
-  } catch {
-    // the probe is informative only: the state read stands without it
+  } catch (err) {
+    // the probe is informative only: an answer of "no" stands; a transport failure is the read's
+    if (CCIPError.isCCIPError(err) && err.isTransient) throw err
     return []
   }
 }

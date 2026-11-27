@@ -85,6 +85,8 @@ import {
   proposalBase,
   readPoolStates,
   requireExpectedGroupOwner,
+  sealLanes,
+  unsealLanes,
 } from './write-common.ts'
 
 /** The members of the group (`getProgramAccounts`, fails closed), with their chains. */
@@ -157,7 +159,7 @@ type ParsedJoin = ParsedGroupWrite & {
   rentReceiver?: PublicKey
   entries: JoinEntry[]
   poolGroupOwner?: PublicKey
-  acknowledged: PoolGroupLaneKey[] | 'all'
+  acknowledged: PoolGroupLaneKey[]
 }
 
 /** Tokens join a pool group (batched): the pool owner signs, with the group owner unless open. */
@@ -332,6 +334,7 @@ export class JoinPoolGroup extends PoolGroupWriteOperation<
         'group.openMembership': group.openMembership,
         'registry.nextMemberIndex': next,
         'chains.admission': admissionExpected(records),
+        ...sealLanes('acknowledgeLiveAdmission', parsed.acknowledged),
       },
       goingLive: admitted,
       extra: {
@@ -346,6 +349,7 @@ export class JoinPoolGroup extends PoolGroupWriteOperation<
     ref: ParsedPoolGroupRef,
     instructions: readonly TransactionInstruction[],
     guardOptions: PoolGroupGuardOptions,
+    sealed: Readonly<Record<string, unknown>>,
   ): ParsedJoin {
     const ixs = decodeOne(this.name, instructions, ['joinGroup'], false)
     const first = ixs[0]!
@@ -362,8 +366,8 @@ export class JoinPoolGroup extends PoolGroupWriteOperation<
       rentReceiver: keyField(this.name, first.data, 'params', 'rentReceiver'),
       entries,
       ...(owner && { poolGroupOwner: owner }),
-      // the proposal admits what it admits: a move of the chain records shows in the snapshot
-      acknowledged: 'all',
+      // the admission gate runs again with what the caller acknowledged (S5 review M1)
+      acknowledged: unsealLanes(sealed, 'acknowledgeLiveAdmission'),
     }
   }
 }
@@ -389,12 +393,10 @@ type ParsedSetRemoteTokens = ParsedGroupWrite & {
   rentReceiver?: PublicKey
   /** Per mint: chains to add or replace, and chains to drop (or, from a proposal, the full list). */
   updates: Map<string, { upsert: MemberChains; remove: Set<bigint>; replace?: MemberChains }>
-  /** Re-checking a proposal: its drops and closes were chosen when it was built. */
-  fromProposal?: boolean
   confirmDroppedLanes: PoolGroupLaneKey[]
   closeDroppedLanes: boolean
   confirmInFlightDrained: PoolGroupLaneKey[]
-  acknowledged: PoolGroupLaneKey[] | 'all'
+  acknowledged: PoolGroupLaneKey[]
 }
 
 /** A member's remote tokens, with add/remove semantics (the token owner). */
@@ -479,7 +481,7 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
    * `close_group_lanes` per chain for the lanes the write drops, in the same transaction.
    * @throws {@link CCTParamsInvalidError} if a token is not a member of the group, `authority`
    *   does not own its pool, a remote token is another member's, a dropped live lane is not in
-   *   `confirmDroppedLanes`, a lane to close is neither paused both ways nor confirmed drained, or
+   *   `confirmDroppedLanes`, a lane to close is not paused outbound and confirmed drained, or
    *   a running chain admits a new chain unacknowledged
    */
   protected async plan(
@@ -586,9 +588,7 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
     }
     requireAdmissionAcknowledged(this.name, admitted, parsed.acknowledged)
     const confirmed = new Set(parsed.confirmDroppedLanes.map(laneId))
-    const unconfirmed = parsed.fromProposal
-      ? []
-      : dropped.filter((d) => d.live && !confirmed.has(laneId(d.key)))
+    const unconfirmed = dropped.filter((d) => d.live && !confirmed.has(laneId(d.key)))
     if (unconfirmed.length)
       throw new CCTParamsInvalidError(
         this.name,
@@ -603,12 +603,11 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
         'closeDroppedLanes',
         'a dropped lane cannot be read, so it is not closed here: close it with closePoolGroupLanes',
       )
-    if (!parsed.fromProposal)
-      requireDrained(
-        this.name,
-        toClose.map((d) => ({ key: d.key, state: d.state! })),
-        parsed.confirmInFlightDrained,
-      )
+    requireDrained(
+      this.name,
+      toClose.map((d) => ({ key: d.key, state: d.state! })),
+      parsed.confirmInFlightDrained,
+    )
     const client = createPoolGroupProgram(chain, ref.program, parsed.payer)
     const registry = poolGroupPdas.groupRegistry(ref.program, ref.group)
     const setIx = await client.methods
@@ -686,6 +685,15 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
           member.lanePayers.map((p) => p.remoteChainSelector),
         ]),
         'chains.admission': admissionExpected(records),
+        // the flags the drop and drain gates read, and the confirmations (S5 review M1)
+        'lanes.pauses': dropped.map((d) => [
+          laneId(d.key),
+          !!d.state?.ext?.pausedOutbound,
+          !!d.state?.ext?.pausedInbound,
+        ]),
+        ...sealLanes('acknowledgeLiveAdmission', parsed.acknowledged),
+        ...sealLanes('confirmDroppedLanes', parsed.confirmDroppedLanes),
+        ...sealLanes('confirmInFlightDrained', parsed.confirmInFlightDrained),
       },
       goingLive: admitted,
       followUps: () => followUps,
@@ -698,6 +706,7 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
     ref: ParsedPoolGroupRef,
     instructions: readonly TransactionInstruction[],
     guardOptions: PoolGroupGuardOptions,
+    sealed: Readonly<Record<string, unknown>>,
   ): ParsedSetRemoteTokens {
     const ixs = decodeOne(
       this.name,
@@ -726,12 +735,11 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
       ...proposalBase(ref, set.ix.keys[3]!.pubkey, guardOptions),
       updates,
       ...(receiver instanceof PublicKey && { rentReceiver: receiver }),
-      // the proposal already chose: every drop it makes is confirmed, its closes drained
-      confirmDroppedLanes: [],
+      // every gate runs again with what the caller confirmed when it was built (S5 review M1)
+      confirmDroppedLanes: unsealLanes(sealed, 'confirmDroppedLanes'),
       closeDroppedLanes: closes,
-      confirmInFlightDrained: [],
-      acknowledged: 'all',
-      fromProposal: true,
+      confirmInFlightDrained: unsealLanes(sealed, 'confirmInFlightDrained'),
+      acknowledged: unsealLanes(sealed, 'acknowledgeLiveAdmission'),
     }
   }
 }

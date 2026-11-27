@@ -27,7 +27,7 @@ import type {
   PoolGroupUnsignedResult,
   PoolGroupWriteParams,
 } from '../write-types.ts'
-import { type ParsedPoolGroupRef, parsePoolGroupRef } from './common.ts'
+import { type ParsedPoolGroupRef, isViewRefusal, parsePoolGroupRef } from './common.ts'
 
 /** The accounts every `#[event_cpi]` instruction ends with. @internal */
 export const eventAccounts = (program: PublicKey) => ({
@@ -306,9 +306,28 @@ export async function fittedItems<E>(
   }
   if (current.length) chunks.push(current)
   const items: PoolGroupPackItem[] = []
+  const heavy = async (item: PoolGroupPackItem): Promise<boolean> => {
+    try {
+      return await checks.tooHeavy([item])
+    } catch (err) {
+      // a program refusal is the write's, with its error name (not a raw "Simulation failed")
+      if (!isViewRefusal(err)) throw err
+      const logs: unknown = Reflect.get(Object(err), 'logs')
+      const lines = Array.isArray(logs)
+        ? logs.filter((l): l is string => typeof l === 'string')
+        : []
+      const named = lines.join('\n').match(/Error Code: (\w+)/)?.[1]
+      throw new CCTParamsInvalidError(
+        operation,
+        'simulation',
+        `the write fails when simulated: ${named ?? (err instanceof Error ? err.message : String(err))}`,
+        { cause: err instanceof Error ? err : undefined, context: { logs: lines } },
+      )
+    }
+  }
   const sized = async (chunk: E[]): Promise<void> => {
     const item = await itemOf(chunk)
-    if (!simulate || !(await checks.tooHeavy([item]))) {
+    if (!simulate || !(await heavy(item))) {
       items.push(item)
       return
     }
@@ -513,6 +532,35 @@ export function parseLaneKeys(
     }
   })
   return [...new Map(lanes.map((l) => [laneId(l), l])).values()]
+}
+
+/** The snapshot path a sealed lane confirmation of `name` is kept at. @internal */
+export const sealedPath = (name: string) => `confirm.${name}`
+
+/**
+ * A lane confirmation (`acknowledgeLiveAdmission`, `confirmInFlightDrained`, `confirmDroppedLanes`)
+ * as an `expected` entry, so the snapshot seals it and the re-check reads it back (M1, as A21 does
+ * for `confirmDropped`). @internal
+ */
+export const sealLanes = (name: string, lanes: readonly PoolGroupLaneKey[]) => ({
+  [sealedPath(name)]: [...new Set(lanes.map(laneId))].sort(),
+})
+
+/** The lanes a snapshot sealed under `name` (none when absent). @internal */
+export function unsealLanes(
+  sealed: Readonly<Record<string, unknown>>,
+  name: string,
+): PoolGroupLaneKey[] {
+  const v = sealed[sealedPath(name)]
+  if (!Array.isArray(v)) return []
+  return v.flatMap((id: unknown) => {
+    if (typeof id !== 'string') return []
+    const at = id.lastIndexOf(':')
+    const selector = id.slice(at + 1)
+    return at > 0 && /^\d+$/.test(selector)
+      ? [{ tokenAddress: id.slice(0, at), remoteChainSelector: BigInt(selector) }]
+      : []
+  })
 }
 
 /**

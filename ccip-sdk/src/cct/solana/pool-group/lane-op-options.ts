@@ -6,7 +6,28 @@
  */
 
 import { CCTParamsInvalidError } from '../../errors.ts'
+import type { MultiTokenPoolLaneFinding, MultiTokenPoolSnapshot } from '../../multi-token-pool.ts'
+import type { PoolGroupLaneKey } from './types.ts'
 import type { PoolGroupGuardOptions, PoolGroupLiveCheckOptions } from './write-types.ts'
+
+/** What an extended lane op reports on a pool-group lane (absent on a standard lane). */
+export type PoolGroupLaneOpReport = {
+  /** The guard's warnings on the lane (errors refuse the write). */
+  findings: MultiTokenPoolLaneFinding[]
+  /** Lanes the write makes live (each passed the lane check). */
+  goingLive: PoolGroupLaneKey[]
+  /**
+   * Unsigned path: the guard inputs and the instruction the write was judged on; run
+   * `checkPoolGroupSnapshot`'s comparison before a delayed proposal executes.
+   */
+  snapshot?: MultiTokenPoolSnapshot
+}
+
+/** The result field the extended lane ops add on a pool-group lane. */
+export type PoolGroupLaneOpResult = {
+  /** The pool-group guard's report; absent on a standard lane. */
+  poolGroup?: PoolGroupLaneOpReport
+}
 
 /**
  * Options the extended lane ops take on a pool-group lane (ignored on a standard lane): the lane
@@ -16,9 +37,11 @@ export type PoolGroupLaneOpOptions = PoolGroupLiveCheckOptions &
   Pick<PoolGroupGuardOptions, 'confirmDropped'>
 
 /**
- * Set by `applyChainUpdates` on the ops it composes: the standard multi-chain flow resolves its
- * pool program once and reads nothing per chain, so it is not pool-group aware (a lane with a
- * marker refuses on chain with the program's error). @internal
+ * Set by `applyChainUpdates` on the ops it composes. Skipping the gate is safe because every
+ * instruction it composes fails on chain for a lane with a pool-group marker:
+ * `init_chain_remote_config` refuses an existing `ChainConfig`, and `delete_chain_config` refuses a
+ * marked lane (`LaneLinked`, delete_chain_config.rs:20). The error is then the program's, not a
+ * named SDK refusal. @internal
  */
 export const SKIP_POOL_GROUP_GATE = Symbol('skipPoolGroupGate')
 

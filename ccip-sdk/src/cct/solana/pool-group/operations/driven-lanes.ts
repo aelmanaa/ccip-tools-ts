@@ -8,7 +8,7 @@
  * judge runs the lane check on each materialized one) or materializable by anyone (refused unless
  * acknowledged). Materialize and close are permissionless cranks: a lane the guard refuses is left
  * out and reported, the others are built. A close strands inbound in-flight messages, so each lane
- * must be paused in both directions or confirmed drained (the SDK gates only its own calls: a third
+ * must be paused outbound and confirmed drained, design §7.6 (the SDK gates only its own calls: a third
  * party can still crank a close once the record stops admitting a lane).
  *
  * @packageDocumentation
@@ -34,6 +34,7 @@ import {
 } from '../accounts.ts'
 import { decodeSections } from '../decode.ts'
 import { type PoolGroupLaneState, isUnread } from '../lane.ts'
+import { type PackPoolGroupInput, type PoolGroupPackItem, oneTransactionChecks } from '../packer.ts'
 import { createPoolGroupProgram } from '../program.ts'
 import type { PoolGroupLaneKey, PoolGroupLaneMode } from '../types.ts'
 import { type PoolGroupWritePlan, PoolGroupWriteOperation } from '../write-operation.ts'
@@ -79,11 +80,53 @@ import {
   parseLaneKeys,
   proposalBase,
   requireClassWriter,
+  sealLanes,
   signerRole,
+  unsealLanes,
 } from './write-common.ts'
 
-/** Bitmap bytes per `set_group_chain_lanes` instruction; a larger write is split (not atomic). */
-const BITMAP_BYTES_PER_WRITE = 800
+/**
+ * Splits a bitmap write into the largest chunks one transaction carries, measured by the packer for
+ * the real payer, budget and executor (binary search on the byte count; the probe instruction
+ * carries the final mode, pause and index changes, the largest a chunk's instruction gets).
+ * @throws {@link CCTParamsInvalidError} if not even one byte fits
+ * @internal
+ */
+export async function bitmapChunks(
+  operation: string,
+  parsed: Pick<ParsedGroupWrite, 'payer' | 'budget' | 'durableNonces'>,
+  bitmap: { byteOffset: number; bytes: Buffer },
+  itemsOf: (write: { byteOffset: number; bytes: Buffer }) => Promise<PoolGroupPackItem[]>,
+  chain: PackPoolGroupInput['chain'],
+): Promise<{ byteOffset: number; bytes: Buffer }[]> {
+  const { fits } = await oneTransactionChecks({
+    operation,
+    chain,
+    payer: parsed.payer,
+    items: [],
+    ...(parsed.budget && { budget: parsed.budget }),
+    ...(parsed.durableNonces && { durableNonces: parsed.durableNonces }),
+  })
+  const probe = async (n: number) =>
+    fits(await itemsOf({ byteOffset: bitmap.byteOffset, bytes: bitmap.bytes.subarray(0, n) }))
+  let lo = 0
+  let hi = bitmap.bytes.length
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    if (await probe(mid)) lo = mid
+    else hi = mid - 1
+  }
+  if (!lo)
+    throw new CCTParamsInvalidError(
+      operation,
+      'bitmapWrite',
+      'not even one bitmap byte fits a transaction with this payer and budget',
+    )
+  return Array.from({ length: Math.ceil(bitmap.bytes.length / lo) }, (_, i) => ({
+    byteOffset: bitmap.byteOffset + i * lo,
+    bytes: bitmap.bytes.subarray(i * lo, (i + 1) * lo),
+  }))
+}
 
 const LANE_MODES: readonly PoolGroupLaneMode[] = ['off', 'all-members', 'subset']
 
@@ -174,7 +217,7 @@ type ParsedChainLanes = ParsedGroupWrite & {
   removeIndices: number[]
   bitmap?: { byteOffset: number; bytes: Buffer }
   acknowledgeNonAtomic: boolean
-  acknowledged: PoolGroupLaneKey[] | 'all'
+  acknowledged: PoolGroupLaneKey[]
 }
 
 /** Parses a list of `u32` member indices. */
@@ -394,35 +437,20 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
       )
     const after = applySubset(before.bitmap, parsed.bitmap, remove, add)
     const runningAfter = chainRunsDriven({ ...record, drivenLanesPaused: paused })
-    const chunks = parsed.bitmap
-      ? Array.from(
-          { length: Math.ceil(parsed.bitmap.bytes.length / BITMAP_BYTES_PER_WRITE) },
-          (_, i) => ({
-            byteOffset: parsed.bitmap!.byteOffset + i * BITMAP_BYTES_PER_WRITE,
-            bytes: parsed.bitmap!.bytes.subarray(
-              i * BITMAP_BYTES_PER_WRITE,
-              (i + 1) * BITMAP_BYTES_PER_WRITE,
-            ),
-          }),
-        )
-      : []
-    if (
-      chunks.length > 1 &&
-      (runningAfter || chainRunsDriven(record)) &&
-      !parsed.acknowledgeNonAtomic
-    )
-      throw new CCTParamsInvalidError(
-        this.name,
-        'acknowledgeNonAtomicBitmapWrite',
-        `the bitmap write takes ${chunks.length} transactions, and the chain's driven lanes run between them: pause them first, or pass acknowledgeNonAtomicBitmapWrite`,
-      )
     // members it makes materializable (or live) on a running chain: their lanes go live with no
     // further write of theirs
+    // every flag the admission gate reads, and the acknowledgement, are sealed (S5 review M1)
     const expected = {
       [`groupChain.${selector}.laneMode`]: before.mode,
       [`groupChain.${selector}.drivenLanesPaused`]: before.paused,
+      [`groupChain.${selector}.pauses`]: [
+        record.groupPaused,
+        record.pausedOutbound,
+        record.pausedInbound,
+      ],
       [`groupChain.${selector}.bitmap`]: before.bitmap.toString('hex'),
       'registry.nextMemberIndex': nextMemberIndex,
+      ...sealLanes('acknowledgeLiveAdmission', parsed.acknowledged),
     }
     if (!lanesChange && paused === before.paused)
       return { group: ref.group, items: [], judge: null, expected, extra: {} }
@@ -475,6 +503,33 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
           ...eventAccounts(ref.program),
         })
         .instruction()
+    // chunks sized by the packer's own measurement of the real transaction (payer, budget,
+    // executor, compute budget): the largest byte count whose instruction fits (S5 review M6)
+    const chunks = parsed.bitmap
+      ? await bitmapChunks(
+          this.name,
+          parsed,
+          parsed.bitmap,
+          async (bytes) => [
+            {
+              tokenAddresses: [],
+              instructions: [await ixOf({ mode, paused, bitmapWrite: bytes, remove, add })],
+              signerRoles: { [authority.toBase58()]: signerRole(group.owner, authority) },
+            },
+          ],
+          chain,
+        )
+      : []
+    if (
+      chunks.length > 1 &&
+      (runningAfter || chainRunsDriven(record)) &&
+      !parsed.acknowledgeNonAtomic
+    )
+      throw new CCTParamsInvalidError(
+        this.name,
+        'acknowledgeNonAtomicBitmapWrite',
+        `the bitmap write takes ${chunks.length} transactions, and the chain's driven lanes run between them: pause them first, or pass acknowledgeNonAtomicBitmapWrite`,
+      )
     const ixs: TransactionInstruction[] = []
     for (const [i, c] of chunks.entries())
       if (i < chunks.length - 1)
@@ -510,6 +565,7 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
     ref: ParsedPoolGroupRef,
     instructions: readonly TransactionInstruction[],
     guardOptions: PoolGroupGuardOptions,
+    sealed: Readonly<Record<string, unknown>>,
   ): ParsedChainLanes {
     const ixs = decodeOne(this.name, instructions, ['setGroupChainLanes'], false)
     const last = ixs[ixs.length - 1]!
@@ -550,7 +606,8 @@ export class SetPoolGroupChainLanes extends PoolGroupWriteOperation<
       removeIndices: indices('remove'),
       ...(bitmap && { bitmap }),
       acknowledgeNonAtomic: true,
-      acknowledged: 'all',
+      // the gate runs again with what the caller acknowledged when the proposal was built
+      acknowledged: unsealLanes(sealed, 'acknowledgeLiveAdmission'),
     }
   }
 }
@@ -641,7 +698,8 @@ export class MaterializePoolGroupLanes extends PoolGroupWriteOperation<
       ref.program,
       members.map((m) => ({ mint: new PublicKey(m.mint), selector })),
     )
-    if (parsed.resync && chainRunsDriven(record))
+    // the program re-syncs only under driven_lanes_paused (members.rs:630), not under a group pause
+    if (parsed.resync && !record.drivenLanesPaused)
       throw new CCTParamsInvalidError(
         this.name,
         'resync',
@@ -652,6 +710,7 @@ export class MaterializePoolGroupLanes extends PoolGroupWriteOperation<
       member: PoolGroupMemberAccount
       metas: ReturnType<typeof meta>[]
     }[] = []
+    const skipped: { tokenAddress: string; reason: string }[] = []
     members.forEach((m, i) => {
       if (excluded.has(m.mint)) return
       const mint = new PublicKey(m.mint)
@@ -672,12 +731,15 @@ export class MaterializePoolGroupLanes extends PoolGroupWriteOperation<
               : `${m.mint} does not list chain ${selector} (MemberRemoteTokenMissing): add it with setPoolGroupMemberRemoteTokens`,
           )
         }
-        if (paid)
-          throw new CCTParamsInvalidError(
-            this.name,
-            'tokenAddresses',
-            `${m.mint} records a payer for chain ${selector} but has no lane there: its member account disagrees with its lanes (InvalidGroupMember)`,
-          )
+        if (paid) {
+          const reason = `${m.mint} records a payer for chain ${selector} but has no lane there: its member account disagrees with its lanes (InvalidGroupMember)`
+          // a crank never aborts on one inconsistent member (S5 review m2)
+          if (!explicit) {
+            skipped.push({ tokenAddress: m.mint, reason })
+            return
+          }
+          throw new CCTParamsInvalidError(this.name, 'tokenAddresses', reason)
+        }
       } else {
         if (isUnread(s) || s.kind !== 'driven' || s.ext?.memberIndex !== m.memberIndex) {
           // a hand-made lane keeps precedence: the program leaves it alone
@@ -694,12 +756,14 @@ export class MaterializePoolGroupLanes extends PoolGroupWriteOperation<
           remote.decimals === listed.decimals
         )
           return
-        if (!paid)
-          throw new CCTParamsInvalidError(
-            this.name,
-            'tokenAddresses',
-            `${m.mint} has a driven lane toward ${selector} but records no payer for it (InvalidGroupMember)`,
-          )
+        if (!paid) {
+          const reason = `${m.mint} has a driven lane toward ${selector} but records no payer for it (InvalidGroupMember)`
+          if (!explicit) {
+            skipped.push({ tokenAddress: m.mint, reason })
+            return
+          }
+          throw new CCTParamsInvalidError(this.name, 'tokenAddresses', reason)
+        }
       }
       if (!admitted) return
       lanes.push({
@@ -719,7 +783,15 @@ export class MaterializePoolGroupLanes extends PoolGroupWriteOperation<
         bitmapOf(data).toString('hex'),
       ],
     }
-    if (!lanes.length) return { group: ref.group, items: [], judge: null, expected, extra: {} }
+    const findings = skipped.map((x) => ({
+      check: 'LANE_UNREADABLE' as const,
+      severity: 'warning' as const,
+      tokenAddress: x.tokenAddress,
+      remoteChainSelector: selector,
+      reason: `${x.reason}; left out of the crank`,
+    }))
+    if (!lanes.length)
+      return { group: ref.group, items: [], judge: null, expected, extra: {}, findings }
     const client = createPoolGroupProgram(chain, ref.program, parsed.payer)
     const items = await fittedItems(
       this.name,
@@ -761,6 +833,7 @@ export class MaterializePoolGroupLanes extends PoolGroupWriteOperation<
       judgeEach: true,
       expected,
       extra: {},
+      findings,
       partition: {
         operation: this.name,
         inputs: (left) => ({
@@ -812,7 +885,7 @@ async function mintsOfMembers(
 type ParsedCloseLanes = ParsedGroupWrite & {
   selector: bigint
   mints?: PublicKey[] | { members: PublicKey[] }
-  confirmInFlightDrained: PoolGroupLaneKey[] | 'all'
+  confirmInFlightDrained: PoolGroupLaneKey[]
 }
 
 /** Closes driven lanes the group no longer admits or the member no longer lists (permissionless). */
@@ -845,7 +918,7 @@ export class ClosePoolGroupLanes extends PoolGroupWriteOperation<
    * FTF override, payer and the member's rent receiver. Without `tokenAddresses`, every closable
    * driven lane of the chain (`getProgramAccounts`).
    * @throws {@link CCTParamsInvalidError} if a lane is not a driven lane of the group, is still
-   *   enabled (`GroupLaneStillEnabled`), has no payer entry, is neither paused both ways nor
+   *   enabled (`GroupLaneStillEnabled`), has no payer entry, is not paused outbound and
    *   confirmed drained, or every lane is refused
    */
   protected async plan(
@@ -902,15 +975,27 @@ export class ClosePoolGroupLanes extends PoolGroupWriteOperation<
       }
       lanes.push({ entry: closeLaneEntry(this.name, ref.program, m, s), state: s })
     })
-    if (parsed.confirmInFlightDrained !== 'all')
-      requireDrained(
-        this.name,
-        lanes.map((l) => ({ key: l.entry.key, state: l.state })),
-        parsed.confirmInFlightDrained,
-      )
+    requireDrained(
+      this.name,
+      lanes.map((l) => ({ key: l.entry.key, state: l.state })),
+      parsed.confirmInFlightDrained,
+    )
+    // the pauses the drain gate reads, and the confirmation, are sealed (S5 review M1)
     const expected = {
       [`groupChain.${selector}.admission`]: [modeOf(record), bitmapOf(data).toString('hex')],
+      [`groupChain.${selector}.pauses`]: [
+        record.groupPaused,
+        record.drivenLanesPaused,
+        record.pausedOutbound,
+        record.pausedInbound,
+      ],
       [`lanes.${selector}.closing`]: lanes.map((l) => laneId(l.entry.key)),
+      [`lanes.${selector}.pauses`]: lanes.map((l) => [
+        laneId(l.entry.key),
+        !!l.state.ext?.pausedOutbound,
+        !!l.state.ext?.pausedInbound,
+      ]),
+      ...sealLanes('confirmInFlightDrained', parsed.confirmInFlightDrained),
     }
     if (!lanes.length) return { group: ref.group, items: [], judge: null, expected, extra: {} }
     const items = await fittedItems(
@@ -957,6 +1042,7 @@ export class ClosePoolGroupLanes extends PoolGroupWriteOperation<
     ref: ParsedPoolGroupRef,
     instructions: readonly TransactionInstruction[],
     guardOptions: PoolGroupGuardOptions,
+    sealed: Readonly<Record<string, unknown>>,
   ): ParsedCloseLanes {
     const ixs = decodeOne(this.name, instructions, ['closeGroupLanes'], false)
     const first = ixs[0]!
@@ -968,7 +1054,7 @@ export class ClosePoolGroupLanes extends PoolGroupWriteOperation<
       ...proposalBase(ref, first.ix.keys[3]!.pubkey, guardOptions),
       selector: bigField(field(first.data, 'remoteChainSelector')) ?? 0n,
       mints: { members },
-      confirmInFlightDrained: 'all',
+      confirmInFlightDrained: unsealLanes(sealed, 'confirmInFlightDrained'),
     }
   }
 }

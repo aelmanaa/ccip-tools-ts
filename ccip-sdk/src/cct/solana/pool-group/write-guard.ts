@@ -571,13 +571,17 @@ function lanesJoining(
   return out
 }
 
-/** A lane's remote token in its chain's spelling (raw hex when the family cannot decode it). */
+/** A lane's remote token as stored: compared byte for byte (base58 is case-sensitive, S5 m6). */
 function remoteTokenOf(state: PoolGroupLaneState): string {
+  return Buffer.from(state.chainConfig.base.remote.tokenAddress.address).toString('hex')
+}
+
+/** A lane's remote token in its chain's spelling, for reasons (raw hex when it cannot decode). */
+function remoteTokenSpelling(state: PoolGroupLaneState): string {
   const bytes = Buffer.from(state.chainConfig.base.remote.tokenAddress.address)
   try {
-    return decodeRemoteAddress(bytes, state.selector).toLowerCase()
+    return decodeRemoteAddress(bytes, state.selector)
   } catch {
-    // bytes the family rejects still compare as bytes
     return `0x${bytes.toString('hex')}`
   }
 }
@@ -625,7 +629,7 @@ function sharedRemoteTokens(
         severity: live || !had ? ('error' as const) : ('warning' as const),
         ...key,
         recordType: 'connection' as const,
-        reason: `remote token ${token} is also the remote token of ${shared.map((o) => o.mint).join(', ')} on this chain in the pool group, so the destination cannot tell them apart: give each local token its own remote token${had && !live ? ' (already so before the write)' : ''}`,
+        reason: `remote token ${remoteTokenSpelling(state)} is also the remote token of ${shared.map((o) => o.mint).join(', ')} on this chain in the pool group, so the destination cannot tell them apart: give each local token its own remote token${had && !live ? ' (already so before the write)' : ''}`,
       },
     ]
   })
