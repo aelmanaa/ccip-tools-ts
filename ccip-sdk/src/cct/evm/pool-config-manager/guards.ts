@@ -79,7 +79,11 @@ export type MultiTokenPoolGuardOptions = {
   allowDroppingDefaultCCVs?: boolean
   /** Highest resolved transfer fee in bps on any affected lane, both tiers. Defaults to 1,000. */
   maxTransferFeeBps?: number
-  /** Lowest resolved `destGasOverhead`. Defaults to 200,000, plus 100,000 when a hook resolves. */
+  /**
+   * Lowest resolved `destGasOverhead`, on this lane and on its remote lane back. Defaults to 200,000,
+   * plus 100,000 when a hook resolves on the side that releases (the remote lane for this record, the
+   * local lane for the remote record).
+   */
   minDestGasOverhead?: number
   /** Lanes the caller agrees this write closes (connection gone after the write). */
   confirmClosing?: MultiTokenPoolLaneKey[]
@@ -147,6 +151,16 @@ export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   remoteDecimals?: number
   /** Why the remote outbound bucket could not be read, when it was asked for and the lane back exists. */
   remoteOutboundUnknownReason?: string
+  /**
+   * Whether a hook resolves on the remote lane back (a remote multi-token pool's lane toward this
+   * chain): it runs in the remote release, under this lane's `destGasOverhead`. `undefined`: not read.
+   */
+  remoteHasHook?: boolean
+  /**
+   * The remote lane back's resolved `destGasOverhead` (its fee record enabled): the gas this chain's
+   * release runs in, the local hook's `postflightCheck` included. `undefined`: not read, or no record.
+   */
+  remoteDestGasOverhead?: number
   /** The attestation the long-data fact came from, for a family the SDK cannot read. */
   attestation?: MultiTokenPoolRemoteAttestation
 }>
@@ -395,15 +409,18 @@ export function evaluateMultiTokenPoolGuards({
           `destBytesOverhead ${fee.destBytesOverhead} is below the ${needed} bytes of ${c.poolDataFormat} pool data this lane sends: every send reverts`,
           'destOverhead',
         )
-      // too little gas for the destination releaseOrMint
+      // too little gas for the destination releaseOrMint: it runs on the remote chain, with the
+      // remote lane's hook (A26), never this lane's (that one runs in sends and local releases)
+      const remoteAt = facts.remoteLanes.get(guardLaneKey(key))
+      const remoteHook = remoteAt?.status === 'known' && !!remoteAt.remoteHasHook
       const minGas =
         options.minDestGasOverhead ??
-        DEFAULT_MIN_DEST_GAS_OVERHEAD + (lane.verification.hook ? HOOK_DEST_GAS_OVERHEAD : 0)
+        DEFAULT_MIN_DEST_GAS_OVERHEAD + (remoteHook ? HOOK_DEST_GAS_OVERHEAD : 0)
       if (fee.destGasOverhead < minGas)
         add(
           'DEST_GAS_OVERHEAD_TOO_LOW',
           'error',
-          `destGasOverhead ${fee.destGasOverhead} is below ${minGas}${lane.verification.hook ? ' (a hook resolves)' : ''}: the destination release can run out of gas`,
+          `destGasOverhead ${fee.destGasOverhead} is below ${minGas}${remoteHook ? ' (a hook resolves on the remote lane)' : ''}: the destination release can run out of gas`,
           'destOverhead',
         )
       // the resolved token fee, both tiers
@@ -514,6 +531,19 @@ export function evaluateMultiTokenPoolGuards({
         ...(remote?.cause !== undefined && { cause: remote.cause }),
       })
       continue
+    }
+    // the local hook runs in this chain's release (postflightCheck), under the remote lane back's
+    // destGasOverhead: that record must carry it (A26); only the remote side can raise it
+    if (lane.verification.hook && remote.remoteDestGasOverhead !== undefined) {
+      const minInbound =
+        options.minDestGasOverhead ?? DEFAULT_MIN_DEST_GAS_OVERHEAD + HOOK_DEST_GAS_OVERHEAD
+      if (remote.remoteDestGasOverhead < minInbound)
+        add(
+          'DEST_GAS_OVERHEAD_TOO_LOW',
+          'error',
+          `the remote lane back's destGasOverhead ${remote.remoteDestGasOverhead} is below ${minInbound}, and hook ${lane.verification.hook} runs in this chain's release: an inbound release can run out of gas (the message then needs manual execution); raise it on the remote side`,
+          'destOverhead',
+        )
     }
     if (remote.attestation)
       add(

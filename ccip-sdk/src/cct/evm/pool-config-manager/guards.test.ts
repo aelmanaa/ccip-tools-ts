@@ -177,12 +177,40 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     assert.deepEqual(judge(inlineLane(T1, legacy)).errors, [])
   })
 
-  it('refuses gas below the minimum, raised when a hook resolves (G1)', () => {
+  it('refuses gas below the minimum, raised when a hook resolves on the releasing side (G1, A26)', () => {
+    const remote = (o: { remoteHasHook?: boolean; remoteDestGasOverhead?: number }) =>
+      goodFacts({
+        remoteLanes: new Map([
+          [
+            guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 }),
+            { ...knownRemote(), ...o } as MultiTokenPoolRemoteLaneFacts,
+          ],
+        ]),
+      })
     assert.deepEqual(judge(inlineLane(T1, { gas: 199_999 })).errors, ['DEST_GAS_OVERHEAD_TOO_LOW'])
-    assert.deepEqual(judge(inlineLane(T1, { gas: 250_000, hook: HOOK })).errors, [
+    // this record's gas runs the remote release: the remote lane's hook raises it
+    const remoteHook = remote({ remoteHasHook: true })
+    assert.deepEqual(judge(inlineLane(T1, { gas: 250_000 }), { facts: remoteHook }).errors, [
       'DEST_GAS_OVERHEAD_TOO_LOW',
     ])
-    assert.deepEqual(judge(inlineLane(T1, { gas: 300_000, hook: HOOK })).errors, [])
+    assert.deepEqual(judge(inlineLane(T1, { gas: 300_000 }), { facts: remoteHook }).errors, [])
+    // the local hook does not run in the remote release (the live finding's false positive)
+    assert.deepEqual(judge(inlineLane(T1, { gas: 200_000, hook: HOOK })).errors, [])
+    // the local hook runs in the local release, under the remote lane back's gas
+    const lowBack = remote({ remoteDestGasOverhead: 200_000 })
+    const back = judge(inlineLane(T1, { gas: 200_000, hook: HOOK }), { facts: lowBack })
+    assert.deepEqual(back.errors, ['DEST_GAS_OVERHEAD_TOO_LOW'])
+    assert.match(
+      back.findings[0]!.reason,
+      /remote lane back's destGasOverhead 200000 is below 300000/,
+    )
+    assert.deepEqual(judge(inlineLane(T1, { gas: 200_000 }), { facts: lowBack }).errors, [])
+    assert.deepEqual(
+      judge(inlineLane(T1, { gas: 200_000, hook: HOOK }), {
+        facts: remote({ remoteDestGasOverhead: 300_000 }),
+      }).errors,
+      [],
+    )
     assert.deepEqual(
       judge(inlineLane(T1, { gas: 150_000 }), { options: { minDestGasOverhead: 100_000 } }).errors,
       [],

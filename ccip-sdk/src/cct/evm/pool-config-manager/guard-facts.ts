@@ -5,7 +5,7 @@
  * @packageDocumentation
  */
 
-import { dataLength, getAddress } from 'ethers'
+import { type Result, dataLength, getAddress } from 'ethers'
 
 import type { Chain, ChainGetter } from '../../../chain.ts'
 import {
@@ -23,6 +23,7 @@ import { readAllAuthorizedCallers } from '../advanced-pool-hooks/contracts.ts'
 import {
   type MultiTokenPoolVersion,
   ANY_FINALITY_CONFIG,
+  nullableAddress,
   poolConfigManagerContract,
   readProviderPoolData,
   reportsMultiTokenPool,
@@ -30,6 +31,7 @@ import {
   uidProviderContract,
 } from '../multi-token-pool/contracts.ts'
 import { isMissingFunction, isNotCcipContract, readContractTypeOrNull } from '../query.ts'
+import { toTokenTransferFeeConfig } from '../token-pool/contracts.ts'
 import { toAbiLaneKey } from './contracts.ts'
 import {
   type MultiTokenPoolGuardFactRequests,
@@ -490,6 +492,8 @@ export async function readRemoteMultiTokenPoolSide(
     | 'remoteProviderRefused'
     | 'remoteSendsLegacy'
     | 'remoteSideUnread'
+    | 'remoteHasHook'
+    | 'remoteDestGasOverhead'
   >
 > {
   const resolved = await resolveMultiTokenPool(remote, remotePool).catch((err: unknown) => {
@@ -509,16 +513,25 @@ export async function readRemoteMultiTokenPoolSide(
   if (pcmAddress === undefined)
     return { remoteSideUnread: `remote pool ${remotePool} reports no PoolConfigManager` }
   const pcm = poolConfigManagerContract(remote, pcmAddress, version)
-  const [[config], [connection]] = await Promise.all([
+  const back = toAbiLaneKey({ tokenAddress: remoteToken, remoteChainSelector: localSelector })
+  const [[config], [connection], [hooks], [fee]] = await Promise.all([
     pcm.getTokenConfigBatch([remoteToken]),
-    pcm.getLaneConnectionBatch([
-      toAbiLaneKey({ tokenAddress: remoteToken, remoteChainSelector: localSelector }),
-    ]),
+    pcm.getLaneConnectionBatch([back]),
+    pcm.getLaneVerificationBatch([back], ANY_FINALITY_CONFIG).then((r) => r[0] as Result),
+    pcm.getTokenTransferFeeConfigBatch([back]),
   ])
+  // the remote lane back's hook runs in the remote release, under this lane's destGasOverhead; its
+  // destGasOverhead carries the local hook in the local release (A26)
+  const remoteHasHook = nullableAddress(String(resultToObject(hooks!))) !== null
+  const backFee = toTokenTransferFeeConfig(resultToObject(fee!))
+  const gas = {
+    remoteHasHook,
+    ...(backFee.isEnabled && { remoteDestGasOverhead: backFee.destGasOverhead }),
+  }
   const remoteSendsLegacy =
     decodeLaneConnection(resultToObject(connection!), String).poolDataFormat === 'legacy'
   const provider = decodeTokenProfileFields(resultToObject(config!)).additionalPoolDataProvider
-  if (!provider) return { remoteSendsData: '0x', remoteSendsLegacy }
+  if (!provider) return { remoteSendsData: '0x', remoteSendsLegacy, ...gas }
   const [remoteAcceptsOutbound, adds] = await Promise.all([
     isDataValid(uidProviderContract(remote, provider), remoteToken, localSelector, sends),
     readProviderPoolData(remote, provider, remoteToken, localSelector),
@@ -526,6 +539,7 @@ export async function readRemoteMultiTokenPoolSide(
   return {
     remoteAcceptsOutbound,
     remoteSendsLegacy,
+    ...gas,
     ...('refused' in adds
       ? {
           remoteProviderRefused: `the remote provider refuses to produce data for its token (${adds.refused})`,
