@@ -188,21 +188,21 @@ export async function laneBatchItems<L extends { mint: PublicKey; metas: Account
   signerRoles: PoolGroupPackItem['signerRoles'],
   prelude: ReadonlyMap<string, TransactionInstruction> = new Map(),
 ): Promise<PoolGroupPackItem[]> {
-  const items = await fittedItems(operation, chain, parsed, lanes, build, {
+  return fittedItems(operation, chain, parsed, lanes, build, {
     ...(signerRoles && { signerRoles }),
     tokenAddressesOf: (chunk) => chunk.map((l) => l.mint.toBase58()),
     describe: (l) => `the lane of ${l.mint.toBase58()}`,
-    // a lane's fee vault is created in the same transaction: its simulation needs it first
+    // a lane's fee vault is created in the same transaction, first: fitted with it (the size
+    // overran at 10 fresh mints on the fork), and its simulation needs it in place
     simulate: prelude.size === 0,
+    ...(prelude.size && {
+      preludeOf: (chunk: L[]) =>
+        chunk.flatMap((l) => {
+          const ix = prelude.get(l.mint.toBase58())
+          return ix ? [ix] : []
+        }),
+    }),
   })
-  if (!prelude.size) return items
-  return items.map((item) => ({
-    ...item,
-    instructions: [
-      ...item.tokenAddresses.flatMap((m) => (prelude.has(m) ? [prelude.get(m)!] : [])),
-      ...item.instructions,
-    ],
-  }))
 }
 
 // ─── link_lanes ──────────────────────────────────────────────────────────────────────────────

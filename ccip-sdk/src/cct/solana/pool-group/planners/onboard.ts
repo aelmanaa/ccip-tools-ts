@@ -236,7 +236,7 @@ export function parseOnboarding(params: GenerateOnboardMultiTokenPoolTokensParam
       throw new CCTParamsInvalidError(
         NAME,
         `${at}.solana.remotePoolAddresses`,
-        'are one chain\'s pools, in its address format: onboard a linked token with remotePoolAddresses one remote chain at a time',
+        "are one chain's pools, in its address format: onboard a linked token with remotePoolAddresses one remote chain at a time",
       )
     const remotePoolAddresses =
       laneKind === 'linked' && s.remotePoolAddresses

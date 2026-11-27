@@ -56,11 +56,11 @@ const NAME = 'removeMultiTokenPoolToken'
 type Name = PoolGroupLeaveStepName
 
 /**
- * Tokens per drop-and-close step: its `set_member_remote_tokens` and every `close_group_lanes` of
- * those tokens are one transaction (the op packs them as one item), so the chunk stays small.
+ * Tokens per drop-and-close step: the op keeps each token's drop and its lanes' close in one
+ * transaction and packs the tokens apart (as many as fit), so a step may hold many.
  * @internal
  */
-export const DROPS_PER_STEP = 3
+export const DROPS_PER_STEP = 12
 
 /** Parsed removal params. @internal */
 export type ParsedRemoval = {

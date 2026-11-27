@@ -259,6 +259,7 @@ export async function fittedItems<E>(
     describe,
     simulate = true,
     checks: injected,
+    preludeOf,
   }: {
     /** The signers' roles of every item. */
     signerRoles?: PoolGroupPackItem['signerRoles']
@@ -270,12 +271,17 @@ export async function fittedItems<E>(
     simulate?: boolean
     /** The one-transaction checks (tests inject them); defaults to {@link oneTransactionChecks}. */
     checks?: Awaited<ReturnType<typeof oneTransactionChecks>>
+    /**
+     * Instructions a chunk's transaction carries before its own (fee vault creations): counted when
+     * the chunk is fitted, so the item with them still fits one transaction.
+     */
+    preludeOf?: (chunk: E[]) => TransactionInstruction[]
   },
 ): Promise<PoolGroupPackItem[]> {
   if (!entries.length) return []
   const itemOf = async (chunk: E[]): Promise<PoolGroupPackItem> => ({
     tokenAddresses: tokenAddressesOf(chunk),
-    instructions: [await build(chunk)],
+    instructions: [...(preludeOf?.(chunk) ?? []), await build(chunk)],
     ...(signerRoles && { signerRoles }),
   })
   const checks =

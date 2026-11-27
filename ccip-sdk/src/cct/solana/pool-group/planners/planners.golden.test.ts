@@ -454,7 +454,7 @@ describe('removal goldens', () => {
   const keys = (ms: string[]) =>
     ms.map((tokenAddress) => ({ tokenAddress, remoteChainSelector: SEPOLIA }))
 
-  it('4 tokens batch: pauses per mint, drops in chunks of 3, one member close', () => {
+  it('4 tokens batch: pauses per mint, one drop step, one member close', () => {
     const ms = mints(4)
     const x = expandRemovalFrom(ctxOf(), removal(ms), leaving(ms), () =>
       Promise.resolve({ stopped: true }),
@@ -462,13 +462,10 @@ describe('removal goldens', () => {
     const count = (n: string) => names(x.specs).filter((s) => s === n).length
     assert.equal(count('pauseLaneOutbound'), 4)
     assert.equal(count('awaitRemoteOutboundStop'), 4)
-    assert.equal(count('dropChainsAndCloseLanes'), 2)
+    assert.equal(count('dropChainsAndCloseLanes'), 1)
     assert.equal(count('closePoolGroupMembers'), 1)
     const close = x.specs.find((s) => s.step.name === 'closePoolGroupMembers')!
-    assert.deepEqual(close.step.dependsOn, [
-      id('setPoolGroupMemberRemoteTokens', ms[0]!),
-      id('setPoolGroupMemberRemoteTokens', ms[3]!),
-    ])
+    assert.deepEqual(close.step.dependsOn, [id('setPoolGroupMemberRemoteTokens', ms[0]!)])
     // one wave holds every pause
     const wave = selectReady(
       x.specs.map((s) => s.step),

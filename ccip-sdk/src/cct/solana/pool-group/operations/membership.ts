@@ -335,6 +335,9 @@ export class JoinPoolGroup extends PoolGroupWriteOperation<
         ],
       })),
       judge: { failsClosedSeverity: 'error' },
+      // the items do not fit one simulated transaction together; a join changes no lane, so each
+      // is judged on its own (found at 10 members on the fork)
+      judgeEach: items.length > 1,
       expected: {
         'group.owner': group.owner.toBase58(),
         'group.openMembership': group.openMembership,
@@ -712,18 +715,37 @@ export class SetPoolGroupMemberRemoteTokens extends PoolGroupWriteOperation<
             }
           }),
         )
-      : [
-          {
-            tokenAddresses: mints,
-            instructions: [await setIxOf(after.map((_, i) => i)), ...closeIxs],
-            signerRoles,
-          },
-        ]
+      : toClose.length && after.length > 1
+        ? // each member's drop and its lanes' close stay one transaction; members pack apart
+          await Promise.all(
+            after.map(async ({ mint }, i) => ({
+              tokenAddresses: [mint],
+              instructions: [
+                await setIxOf([i]),
+                ...(await closeLanesInstructions(
+                  chain,
+                  ref,
+                  parsed.payer,
+                  authority,
+                  group.owner,
+                  toClose.filter((d) => d.key.tokenAddress === mint).map((d) => d.entry!),
+                )),
+              ],
+              signerRoles,
+            })),
+          )
+        : [
+            {
+              tokenAddresses: mints,
+              instructions: [await setIxOf(after.map((_, i) => i)), ...closeIxs],
+              signerRoles,
+            },
+          ]
     return {
       group: ref.group,
       items,
       judge: { failsClosedSeverity: 'error', drainConfirmed: lanesToClose },
-      ...(pausedIxs && { judgeEach: true }),
+      ...(items.length > 1 && { judgeEach: true }),
       expected: {
         [`members.remoteTokens`]: after.map(({ mint, before }) => [
           mint,
