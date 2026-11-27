@@ -5,14 +5,14 @@
  * @packageDocumentation
  */
 
-import { getAddress, hexlify } from 'ethers'
+import { ZeroAddress, getAddress, hexlify } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
 import { decodeRemotePools } from '../../../evm/multi-token-pool.ts'
 import { encodeAddressToAny } from '../../../utils.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
 import { nullableAddress } from '../multi-token-pool/contracts.ts'
-import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
+import { fromAbiRateLimitConfig, toAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PolicyName,
@@ -94,6 +94,27 @@ export function decodeSecurityConfig(c: {
     inboundCCVs: c.inboundCCVs.map((a) => getAddress(a)),
     hook: nullableAddress(c.hook),
   }
+}
+
+/** Encodes the four buckets of a parsed rate limit record (`decodeRateLimits`' inverse). @internal */
+export function encodeRateLimits(c: MultiTokenPoolRateLimits): AbiRateLimits {
+  const abi = (b: MultiTokenPoolRateLimits[keyof MultiTokenPoolRateLimits]) =>
+    toAbiRateLimitConfig({ enabled: b.enabled, capacity: b.capacity ?? 0n, rate: b.rate ?? 0n })
+  return {
+    outbound: abi(c.outbound),
+    inbound: abi(c.inbound),
+    fastFinalityOutbound: abi(c.fastFinalityOutbound),
+    fastFinalityInbound: abi(c.fastFinalityInbound),
+  }
+}
+
+/** Encodes a security record (`decodeSecurityConfig`' inverse). @internal */
+export function encodeSecurityConfig(c: MultiTokenPoolSecurityConfig): {
+  outboundCCVs: string[]
+  inboundCCVs: string[]
+  hook: string
+} {
+  return { outboundCCVs: c.outboundCCVs, inboundCCVs: c.inboundCCVs, hook: c.hook ?? ZeroAddress }
 }
 
 /** The policy record key of a decoded record. @internal */

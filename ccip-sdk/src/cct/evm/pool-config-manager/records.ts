@@ -10,12 +10,13 @@
  * @packageDocumentation
  */
 
-import type { TokenTransferFeeConfig } from '../../../chain.ts'
+import type { TokenTransferFeeConfig, TransferDirection } from '../../../chain.ts'
 import type {
   MultiTokenPoolRateLimits,
   MultiTokenPoolRemotePool,
   PoolDataFormat,
 } from '../../multi-token-pool.ts'
+import type { RateLimitConfig } from '../../rate-limit.ts'
 import type { MultiTokenPoolLaneKey, PolicyName } from './contracts.ts'
 
 /** One policy record: a policy and a remote chain (`0n` = the policy's default record). */
@@ -87,6 +88,26 @@ export type RateLimitPolicyRecord = PolicyRecordKey & {
   localDecimals: number
   /** The record's four buckets. */
   rateLimits: MultiTokenPoolRateLimits
+}
+
+/** One bucket of an existing inline rate limit record: a direction and finality tier. */
+export type InlineRateLimitBucketUpdate = MultiTokenPoolLaneKey & {
+  /** The direction. */
+  direction: TransferDirection
+  /** The faster-than-finality bucket (`true`) or the finality one. */
+  fastFinality: boolean
+  /** The bucket. */
+  config: RateLimitConfig
+}
+
+/** One bucket of an existing rate limit policy record. */
+export type RateLimitPolicyBucketUpdate = PolicyRecordKey & {
+  /** The direction. */
+  direction: TransferDirection
+  /** The faster-than-finality bucket (`true`) or the finality one. */
+  fastFinality: boolean
+  /** The bucket. */
+  config: RateLimitConfig
 }
 
 /** Fee fields: the fee half of core `TokenTransferFeeConfig`. A fee record has no disabled state. */

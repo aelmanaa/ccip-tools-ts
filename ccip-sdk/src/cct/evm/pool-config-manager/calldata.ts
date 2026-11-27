@@ -29,7 +29,12 @@ import {
   decodeInlineKey,
   decodePolicyRecordKey,
 } from './decode.ts'
-import type { MultiTokenPoolRateLimitBucket, MultiTokenPoolRecordChange } from './projection.ts'
+import {
+  type MultiTokenPoolRateLimitBucket,
+  type MultiTokenPoolRecordChange,
+  MESSAGE_DIRECTIONS,
+  rateLimitBucketOf,
+} from './projection.ts'
 
 const OPERATION = 'decodeMultiTokenPoolWrite'
 
@@ -66,9 +71,7 @@ function pauseFlags(
 
 /** `MessageDirection` (Outbound, Inbound) and `fastFinality` to a bucket name. */
 function bucketOf(direction: unknown, fastFinality: unknown): MultiTokenPoolRateLimitBucket {
-  const inbound = Number(direction) === 1
-  if (fastFinality) return inbound ? 'fastFinalityInbound' : 'fastFinalityOutbound'
-  return inbound ? 'inbound' : 'outbound'
+  return rateLimitBucketOf(MESSAGE_DIRECTIONS[Number(direction)] ?? 'outbound', !!fastFinality)
 }
 
 /** `apply<Type>PolicyConfigUpdates(toRemove, policiesToRemove, toSet)`: removals, then sets. */

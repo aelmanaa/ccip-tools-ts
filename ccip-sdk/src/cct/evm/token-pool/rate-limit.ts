@@ -133,6 +133,23 @@ export function parseRateLimitConfig(
 }
 
 /**
+ * Re-keys a parsed {@link RateLimitConfig}'s `enabled` to the ABI's `isEnabled`: the on-chain
+ * `RateLimiter.Config` struct.
+ * @internal
+ */
+export function toAbiRateLimitConfig({
+  enabled: isEnabled,
+  capacity,
+  rate,
+}: ParsedRateLimitConfig): {
+  isEnabled: boolean
+  capacity: bigint
+  rate: bigint
+} {
+  return { isEnabled, capacity, rate }
+}
+
+/**
  * Converts an on-chain `RateLimiter.Config` (`isEnabled`, `capacity`, `rate`) to the SDK's
  * {@link RateLimitConfig}, re-keying `isEnabled` to `enabled`, so read output can be written back.
  * @internal

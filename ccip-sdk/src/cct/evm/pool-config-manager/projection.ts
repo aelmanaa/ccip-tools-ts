@@ -27,7 +27,7 @@
 
 import { ZeroAddress, getAddress } from 'ethers'
 
-import type { LaneRecordType, TokenTransferFeeConfig } from '../../../chain.ts'
+import type { LaneRecordType, TokenTransferFeeConfig, TransferDirection } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import type { RateLimitConfig } from '../token-pool/rate-limit.ts'
@@ -147,6 +147,21 @@ export type MultiTokenPoolRecordState = {
 
 /** One of a rate limit record's four buckets. @internal */
 export type MultiTokenPoolRateLimitBucket = keyof MultiTokenPoolRateLimits
+
+/** The bucket of a direction and finality tier. @internal */
+export function rateLimitBucketOf(
+  direction: TransferDirection,
+  fastFinality: boolean,
+): MultiTokenPoolRateLimitBucket {
+  if (fastFinality) return direction === 'inbound' ? 'fastFinalityInbound' : 'fastFinalityOutbound'
+  return direction
+}
+
+/** `IPoolV2.MessageDirection` on chain: `Outbound` is 0, `Inbound` is 1. @internal */
+export const MESSAGE_DIRECTIONS = [
+  'outbound',
+  'inbound',
+] as const satisfies readonly TransferDirection[]
 
 // ─── Changes ────────────────────────────────────────────────────────────────────────────────
 
