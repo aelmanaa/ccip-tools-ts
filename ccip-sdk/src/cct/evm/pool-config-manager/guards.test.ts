@@ -402,13 +402,17 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     assert.equal(loosensRateLimits(limits(), limits({ inbound: more })), true)
     assert.equal(loosensRateLimits(limits(), limits({ outbound: on(false) })), true)
     assert.equal(loosensRateLimits(null, limits()), true)
-    assert.equal(loosensRateLimits(limits(), null), false)
+    // a lane left with no limit is judged (RECORD_MISSING), and two nulls change nothing
+    assert.equal(loosensRateLimits(limits(), null), true)
+    assert.equal(loosensRateLimits(null, null), false)
     // the scope is read from the calldata's function
     assert.equal(laneJudgingOf('pauseTokens'), 'none')
     assert.equal(laneJudgingOf('unpauseTokens'), 'all')
     assert.equal(laneJudgingOf('applyRateLimitPolicyBucketUpdates'), 'loosened')
     assert.equal(laneJudgingOf('applyInlineRateLimitBucketUpdates'), 'loosened')
-    assert.equal(laneJudgingOf('applyInlineRateLimitConfigUpdates'), 'all')
+    assert.equal(laneJudgingOf('applyInlineRateLimitConfigUpdates'), 'loosened')
+    assert.equal(laneJudgingOf('applyRateLimitPolicyConfigUpdates'), 'loosened')
+    assert.equal(laneJudgingOf('applyInlineFeeConfigUpdates'), 'all')
   })
 
   it('waives a missing remote pool while the lane is stopped outbound, as a token pause does', () => {

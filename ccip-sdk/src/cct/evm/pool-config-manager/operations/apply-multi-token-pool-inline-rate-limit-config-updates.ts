@@ -25,7 +25,7 @@ export type ApplyMultiTokenPoolInlineRateLimitConfigUpdatesParams = PoolConfigMa
 /**
  * Writes inline rate limit records.
  * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
- *   (no inline record, an unregistered token), `sender` lacks the gate, or a lane guard refuses;
+ *   (no inline record, an unregistered token), `sender` lacks the gate, or a lane guard refuses a lane the write loosens (one it only tightens or stops is never refused);
  *   `context.recordType` is `'rateLimit'`
  */
 export class ApplyMultiTokenPoolInlineRateLimitConfigUpdates extends InlineRecordWriteOperation<
