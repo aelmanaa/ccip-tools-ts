@@ -5,11 +5,8 @@
  * @packageDocumentation
  */
 
-import { hexlify } from 'ethers'
-
-import { encodeAddressToAny } from '../../../../utils.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { parseUniqueRemoteAddresses } from '../../../remote-address.ts'
+import { encodeRemoteAddress, parseUniqueRemoteAddresses } from '../../../remote-address.ts'
 import { validateArray } from '../../validate.ts'
 import type { PolicyRecordKey, PolicyRemovalOptions, RemotePoolPolicyRecord } from '../records.ts'
 import type { MultiTokenPoolWriteGuards, PoolConfigManagerWriteParams } from '../write-operation.ts'
@@ -64,10 +61,6 @@ export class ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates extends PolicyReco
   }
 
   protected encodeRecord(record: RemotePoolPolicyRecord, word: string): unknown {
-    return [
-      word,
-      record.remoteChainSelector,
-      record.remotePoolAddresses.map((p) => hexlify(encodeAddressToAny(p))),
-    ]
+    return [word, record.remoteChainSelector, record.remotePoolAddresses.map(encodeRemoteAddress)]
   }
 }

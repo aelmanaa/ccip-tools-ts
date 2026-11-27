@@ -15,7 +15,7 @@
  * @packageDocumentation
  */
 
-import { getAddress, hexlify } from 'ethers'
+import { getAddress } from 'ethers'
 
 import type {
   ChainGetter,
@@ -27,10 +27,11 @@ import type {
 } from '../chain.ts'
 import type { FinalityRequested } from '../extra-args.ts'
 import type { ChainFamily } from '../networks.ts'
-import { encodeAddressToAny, jsonParse } from '../utils.ts'
+import { jsonParse } from '../utils.ts'
 import { canonicalHash, canonicalJson } from './canonical.ts'
 import { type CCTStateChange, CCTParamsInvalidError } from './errors.ts'
 import type { RateLimitConfig } from './rate-limit.ts'
+import { encodeRemoteAddress } from './remote-address.ts'
 
 /** A transfer direction: core {@link TransferDirection}, the one direction type of the SDK. */
 export type MultiTokenPoolDirection = TransferDirection
@@ -833,7 +834,7 @@ export function longPoolDataBytes(extra: number): number {
  * @internal
  */
 export function abiWord(address: string): string {
-  return hexlify(encodeAddressToAny(getAddress(address)))
+  return encodeRemoteAddress(getAddress(address))
 }
 
 /**

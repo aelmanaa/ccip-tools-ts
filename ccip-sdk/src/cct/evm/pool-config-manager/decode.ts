@@ -5,12 +5,11 @@
  * @packageDocumentation
  */
 
-import { ZeroAddress, getAddress, hexlify } from 'ethers'
+import { ZeroAddress, getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
 import { decodeRemotePools } from '../../../evm/multi-token-pool.ts'
-import { encodeAddressToAny } from '../../../utils.ts'
-import { decodeRemoteAddress } from '../../remote-address.ts'
+import { decodeRemoteAddress, encodeRemoteAddress } from '../../remote-address.ts'
 import { nullableAddress } from '../multi-token-pool/contracts.ts'
 import { fromAbiRateLimitConfig, toAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
 import {
@@ -182,7 +181,7 @@ export function encodeInlineRemotePoolConfig(c: InlineRemotePoolConfig): {
     remotePoolConfig: {
       useLegacyPoolDataOnSend: c.poolDataFormat === 'legacy',
       remotePools: c.remotePools.map((p) => ({
-        remotePoolAddress: hexlify(encodeAddressToAny(p.address)),
+        remotePoolAddress: encodeRemoteAddress(p.address),
         allowLegacyPoolDataOnReceive: p.allowLegacyPoolData,
       })),
     },

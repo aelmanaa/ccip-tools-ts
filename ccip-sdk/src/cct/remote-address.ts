@@ -9,7 +9,7 @@ import { type BytesLike, hexlify } from 'ethers'
 
 import { type ChainFamily, networkInfo } from '../networks.ts'
 import { notRegisteredRecovery, supportedChains } from '../supported-chains.ts'
-import { decodeAddress, getAddressBytes } from '../utils.ts'
+import { decodeAddress, encodeAddressToAny, getAddressBytes } from '../utils.ts'
 import { CCTDataDecodeError, CCTParamsInvalidError } from './errors.ts'
 
 /**
@@ -160,4 +160,13 @@ export function decodeRemoteAddress(value: BytesLike, remoteChainSelector: bigin
       },
     })
   }
+}
+
+/**
+ * A canonical remote address as the bytes an EVM pool stores and compares (`encodeAddressToAny`:
+ * EVM addresses left-padded to 32 bytes, others raw), hex. The inverse of {@link decodeRemoteAddress}.
+ * @internal
+ */
+export function encodeRemoteAddress(address: string): string {
+  return hexlify(encodeAddressToAny(address))
 }
