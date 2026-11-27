@@ -24,11 +24,12 @@ import {
   type PolicyName,
   type PoolConfigManagerReader,
   encodePolicyName,
+  toAbiLaneKey,
   validateLaneKeys,
 } from '../contracts.ts'
 import { type MultiTokenPoolRecordState, policyKey } from '../projection.ts'
 import { readMultiTokenPoolRecordState } from '../record-state.ts'
-import type { PolicyRecordKey } from '../records.ts'
+import type { PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
   type PoolConfigManagerWrite,
@@ -244,16 +245,21 @@ export function checkInlineRecordWrite(
   })
 }
 
-/** Parameters every policy record write takes. @internal */
+/** The record lists every policy record write takes (the shape its params extend). @internal */
 export type PolicyRecordWriteParams<R extends PolicyRecordKey> = PoolConfigManagerWriteParams &
-  MultiTokenPoolWriteGuards & {
+  MultiTokenPoolWriteGuards &
+  PolicyRemovalOptions & {
     /** Records to remove (first, as on chain). */
     recordsToRemove?: PolicyRecordKey[]
-    /** Whole policies to remove; each needs no token and no record left. */
-    policiesToRemove?: PolicyName[]
     /** Records to set; a set replaces the record. */
     recordsToSet?: R[]
   }
+
+/** The context a record write's own state checks get. @internal */
+export type RecordWriteContext = PoolConfigManagerWriteContext & {
+  /** The PCM's stored records at the build block. */
+  state: MultiTokenPoolRecordState
+}
 
 /**
  * Base of the policy record writes (`apply<Type>PolicyConfigUpdates`): the lists are validated before
@@ -281,8 +287,12 @@ export abstract class PolicyRecordWriteOperation<
   /** Encodes one record to set as the ABI struct. */
   protected abstract encodeRecord(record: R, word: string): unknown
 
-  /** Further refusals from the state, for a type with its own rules. */
-  protected checkState(_params: P, _state: MultiTokenPoolRecordState): void {}
+  /** Further refusals from the state (or other reads), for a type with its own rules. */
+  protected async checkState(
+    _chain: EVMChain,
+    _params: P,
+    _ctx: RecordWriteContext,
+  ): Promise<void> {}
 
   protected override prepare(params: P): P {
     super.prepare(params)
@@ -307,7 +317,7 @@ export abstract class PolicyRecordWriteOperation<
     const { state } = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
     const pcm = poolConfigManagerContract(chain, address, version)
     await checkPolicyRecordWrite(this.name, pcm, state, this.recordType, params, blockTag)
-    this.checkState(params, state)
+    await this.checkState(chain, params, { address, version, blockTag, state })
     const word = (name: PolicyName, at: string) => encodePolicyName(this.name, at, name)
     const remove = (params.recordsToRemove ?? []).map((k, i) => [
       word(k.policyName, `recordsToRemove[${i}].policyName`),
@@ -331,6 +341,94 @@ export abstract class PolicyRecordWriteOperation<
       [...(params.recordsToRemove ?? []), ...(params.recordsToSet ?? [])].map((k) => [
         `policies.${this.recordType}.${keyOf(k)}`,
         stored.find((s) => keyOf(s) === keyOf(k)) ?? null,
+      ]),
+    )
+    return { data, expected }
+  }
+}
+
+/** The record lists every inline record write takes (the shape its params extend). @internal */
+export type InlineRecordWriteParams<R extends MultiTokenPoolLaneKey> =
+  PoolConfigManagerWriteParams &
+    MultiTokenPoolWriteGuards & {
+      /** Lanes whose inline record to remove (first, as on chain). */
+      remove?: MultiTokenPoolLaneKey[]
+      /** Records to set; a set replaces the lane's record. */
+      set?: R[]
+    }
+
+/**
+ * Base of the inline record writes (`applyInline<Type>ConfigUpdates`): the lanes are validated before
+ * any RPC, the stores' bookkeeping refusals are named from the state at the build block, and the
+ * replaced records are sealed in the snapshot. A subclass supplies the record type, its role, and the
+ * validation and encoding of one record.
+ * @internal
+ */
+export abstract class InlineRecordWriteOperation<
+  R extends MultiTokenPoolLaneKey,
+  P extends InlineRecordWriteParams<R> = InlineRecordWriteParams<R>,
+> extends PoolConfigManagerWriteOperation<P> {
+  /** The record type. */
+  protected abstract readonly recordType: LaneRecordType
+  /** The PCM function. */
+  protected abstract readonly functionName: string
+  /** The type's own role (with `CONFIG_ROLE` and `TOKEN_MANAGER_ROLE`, `_checkTokenRoles`). */
+  protected abstract readonly typeRole: PoolConfigManagerRole
+
+  /** Validates one record to set, before any RPC. */
+  protected abstract validateRecord(params: P, record: R, at: string): void
+
+  /** Encodes one record to set as the ABI struct. */
+  protected abstract encodeRecord(record: R, at: string): unknown
+
+  /** Further refusals from the state (or other reads), for a type with its own rules. */
+  protected async checkState(
+    _chain: EVMChain,
+    _params: P,
+    _ctx: RecordWriteContext,
+  ): Promise<void> {}
+
+  protected override prepare(params: P): P {
+    super.prepare(params)
+    validateInlineRecordWrite(this.name, params)
+    params.set?.forEach((r, i) => this.validateRecord(params, r, `set[${i}]`))
+    return params
+  }
+
+  protected gate(): readonly PoolConfigManagerRole[] {
+    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', this.typeRole]
+  }
+
+  protected override errorContext(): Record<string, unknown> {
+    return { recordType: this.recordType }
+  }
+
+  protected async encode(
+    chain: EVMChain,
+    params: P,
+    { address, version, blockTag }: PoolConfigManagerWriteContext,
+  ): Promise<PoolConfigManagerWrite> {
+    const { state } = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
+    checkInlineRecordWrite(this.name, state, this.recordType, params)
+    await this.checkState(chain, params, { address, version, blockTag, state })
+    const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
+      this.functionName,
+      [
+        (params.remove ?? []).map(toAbiLaneKey),
+        (params.set ?? []).map((r, i) => this.encodeRecord(r, `set[${i}]`)),
+      ],
+    )
+    // the values the write replaces: each touched lane's inline record (absent: `null`)
+    const current = (l: MultiTokenPoolLaneKey) =>
+      (
+        state.tokens.find((t) => getAddress(t.tokenAddress) === getAddress(l.tokenAddress))?.inline[
+          this.recordType
+        ] as readonly MultiTokenPoolLaneKey[] | undefined
+      )?.find((r) => r.remoteChainSelector === l.remoteChainSelector) ?? null
+    const expected = Object.fromEntries(
+      [...(params.remove ?? []), ...(params.set ?? [])].map((l) => [
+        `inline.${this.recordType}.${getAddress(l.tokenAddress)}:${l.remoteChainSelector}`,
+        current(l),
       ]),
     )
     return { data, expected }

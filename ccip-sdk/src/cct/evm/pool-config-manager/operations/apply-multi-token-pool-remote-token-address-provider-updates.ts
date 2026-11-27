@@ -65,12 +65,9 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
     super.prepare(params)
     validateArray(this.name, 'updates', params.updates, 1)
     const seen = new Map<string, string>()
-    Array.from(params.updates, (u, i) => {
+    Array.from(params.updates as readonly unknown[], (u, i) => {
       const at = `updates[${i}]`
-      const { policyName, remoteTokenAddressProvider } = ((u as unknown) ?? {}) as Record<
-        string,
-        unknown
-      >
+      const { policyName, remoteTokenAddressProvider } = (u ?? {}) as Record<string, unknown>
       const word = encodePolicyName(this.name, `${at}.policyName`, policyName).toLowerCase()
       if (remoteTokenAddressProvider !== null)
         validateAddress(this.name, `${at}.remoteTokenAddressProvider`, remoteTokenAddressProvider)

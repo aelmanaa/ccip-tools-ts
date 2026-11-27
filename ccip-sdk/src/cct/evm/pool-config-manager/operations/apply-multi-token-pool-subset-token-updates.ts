@@ -64,9 +64,9 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
       if (entries === undefined) continue
       validateArray(this.name, list, entries)
       const seen = new Map<string, string>()
-      Array.from(entries, (e, i) => {
+      Array.from(entries as readonly unknown[], (e, i) => {
         const at = `${list}[${i}]`
-        const { policyName, remoteChainSelector, tokenAddress } = ((e as unknown) ?? {}) as Record<
+        const { policyName, remoteChainSelector, tokenAddress } = (e ?? {}) as Record<
           string,
           unknown
         >

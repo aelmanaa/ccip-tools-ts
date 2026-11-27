@@ -10,12 +10,19 @@ import { hexlify } from 'ethers'
 import { encodeAddressToAny } from '../../../../utils.ts'
 import { parseUniqueRemoteAddresses } from '../../../remote-address.ts'
 import { validateArray } from '../../validate.ts'
-import type { RemotePoolPolicyRecord } from '../records.ts'
-import { type PolicyRecordWriteParams, PolicyRecordWriteOperation } from './record-writes.ts'
+import type { PolicyRecordKey, PolicyRemovalOptions, RemotePoolPolicyRecord } from '../records.ts'
+import type { MultiTokenPoolWriteGuards, PoolConfigManagerWriteParams } from '../write-operation.ts'
+import { PolicyRecordWriteOperation } from './record-writes.ts'
 
 /** Parameters of `applyMultiTokenPoolRemotePoolPolicyConfigUpdates`. */
-export type ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams =
-  PolicyRecordWriteParams<RemotePoolPolicyRecord>
+export type ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams = PoolConfigManagerWriteParams &
+  MultiTokenPoolWriteGuards &
+  PolicyRemovalOptions & {
+    /** Records to remove (first, as on chain). */
+    recordsToRemove?: PolicyRecordKey[]
+    /** Records to set; a set replaces the record's pools. */
+    recordsToSet?: RemotePoolPolicyRecord[]
+  }
 
 /**
  * Writes remote pool policy records. Policy pools never send legacy data, so the lanes they serve
@@ -24,7 +31,10 @@ export type ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams =
  *   (a missing record or policy, a policy in use or with records left), `sender` lacks the gate, or a
  *   lane guard refuses; `context.recordType` is `'remotePool'`
  */
-export class ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates extends PolicyRecordWriteOperation<RemotePoolPolicyRecord> {
+export class ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates extends PolicyRecordWriteOperation<
+  RemotePoolPolicyRecord,
+  ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams
+> {
   readonly name = 'applyMultiTokenPoolRemotePoolPolicyConfigUpdates'
   protected readonly recordType = 'remotePool'
   protected readonly functionName = 'applyRemotePoolPolicyConfigUpdates'

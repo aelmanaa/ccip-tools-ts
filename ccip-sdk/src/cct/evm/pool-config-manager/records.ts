@@ -26,6 +26,12 @@ export type PolicyRecordKey = {
   remoteChainSelector: bigint
 }
 
+/** Removal of whole policies, for a policy record write: each needs no token and no record left. */
+export type PolicyRemovalOptions = {
+  /** Policies to remove, after the records the same call removes. */
+  policiesToRemove?: PolicyName[]
+}
+
 /** An inline connection record: the remote token of one lane. */
 export type InlineConnectionConfig = MultiTokenPoolLaneKey & {
   /**

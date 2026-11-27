@@ -7,12 +7,18 @@
 
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { validateBoolean } from '../../validate.ts'
-import type { ConnectionPolicyRecord } from '../records.ts'
-import { type PolicyRecordWriteParams, PolicyRecordWriteOperation } from './record-writes.ts'
+import type { ConnectionPolicyRecord, PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
+import type { MultiTokenPoolWriteGuards, PoolConfigManagerWriteParams } from '../write-operation.ts'
+import { PolicyRecordWriteOperation } from './record-writes.ts'
 
 /** Parameters of `applyMultiTokenPoolConnectionPolicyConfigUpdates`. */
-export type ApplyMultiTokenPoolConnectionPolicyConfigUpdatesParams =
-  PolicyRecordWriteParams<ConnectionPolicyRecord> & {
+export type ApplyMultiTokenPoolConnectionPolicyConfigUpdatesParams = PoolConfigManagerWriteParams &
+  MultiTokenPoolWriteGuards &
+  PolicyRemovalOptions & {
+    /** Records to remove (first, as on chain). */
+    recordsToRemove?: PolicyRecordKey[]
+    /** Records to set; a set replaces the record. */
+    recordsToSet?: ConnectionPolicyRecord[]
     /**
      * Accept a record with `onlySubsetTokens: false`, which opens its chain to every current and
      * future token of the policy. Defaults to `false`.

@@ -5,10 +5,11 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
+import { getAddress, hexlify } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
 import { decodeRemotePools } from '../../../evm/multi-token-pool.ts'
+import { encodeAddressToAny } from '../../../utils.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
 import { nullableAddress } from '../multi-token-pool/contracts.ts'
 import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
@@ -136,6 +137,34 @@ export function decodeInlineRemotePoolConfig(c: {
     remotePools: decodeRemotePools(c.remotePoolConfig.remotePools, (bytes) =>
       decodeRemoteAddress(bytes, key.remoteChainSelector),
     ),
+  }
+}
+
+/**
+ * Encodes an inline remote pool record as the ABI struct `decodeInlineRemotePoolConfig` reads: the
+ * inverse, so a record read can be written back. `remotePools` addresses must already be canonical.
+ * @internal
+ */
+export function encodeInlineRemotePoolConfig(c: InlineRemotePoolConfig): {
+  localToken: string
+  remoteChainSelector: bigint
+  trustPolicyRemotePools: boolean
+  remotePoolConfig: {
+    useLegacyPoolDataOnSend: boolean
+    remotePools: { remotePoolAddress: string; allowLegacyPoolDataOnReceive: boolean }[]
+  }
+} {
+  return {
+    localToken: getAddress(c.tokenAddress),
+    remoteChainSelector: c.remoteChainSelector,
+    trustPolicyRemotePools: c.trustPolicyRemotePools,
+    remotePoolConfig: {
+      useLegacyPoolDataOnSend: c.poolDataFormat === 'legacy',
+      remotePools: c.remotePools.map((p) => ({
+        remotePoolAddress: hexlify(encodeAddressToAny(p.address)),
+        allowLegacyPoolDataOnReceive: p.allowLegacyPoolData,
+      })),
+    },
   }
 }
 
