@@ -67,7 +67,10 @@ export type PoolGroupBatchOptions = {
 export type PoolGroupGenerateBatchOptions =
   | {
       /** The limits, for the wallet executor. */
-      budget?: SolanaTxBudget & { executor?: 'wallet' }
+      budget?: SolanaTxBudget & {
+        /** The wallet executes. */
+        executor?: 'wallet'
+      }
       /** A pool of nonces, one per transaction; refused when too few; `noncesUsed` reports the count. */
       durableNonces?: {
         /** The nonce accounts. */
@@ -76,7 +79,10 @@ export type PoolGroupGenerateBatchOptions =
     }
   | {
       /** The limits, for a Squads v4 vault. */
-      budget: SolanaTxBudget & { executor: 'squads-v4' }
+      budget: SolanaTxBudget & {
+        /** A Squads v4 vault executes. */
+        executor: 'squads-v4'
+      }
       /** Never with Squads. */
       durableNonces?: never
     }
