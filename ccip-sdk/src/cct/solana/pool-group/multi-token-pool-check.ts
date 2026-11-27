@@ -648,8 +648,9 @@ export async function checkSolanaMultiTokenPoolLane(
       )
     const failsClosed = orThrow(laneFailsClosed(state), where)
     if (failsClosed !== undefined) {
-      const { check, recordType, fix } = laneFailsClosedFinding(failsClosed)
-      add(check, 'error', `every transfer reverts: ${failsClosed}; ${fix}`, recordType)
+      const { check, recordType, fix } = laneFailsClosedFinding(failsClosed.code)
+      const what = failsClosed.directions.length > 1 ? 'every transfer' : 'every send'
+      add(check, 'error', `${what} reverts: ${failsClosed.reason}; ${fix}`, recordType)
     }
     const sync = orThrow(laneCcvSync(state), where)
     if (sync?.failsClosedAt !== undefined)

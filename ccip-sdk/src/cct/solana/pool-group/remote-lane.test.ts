@@ -304,7 +304,8 @@ describe('readSolanaRemoteLaneFacts', () => {
       }),
     )
     assert.match(unsynced.back?.failsClosed ?? '', /GroupCcvsNotSynced/)
-    // a cap lowered after the FEE was written applies at once (`BpsFeeAboveGroupMax`)
+    // a cap lowered after the FEE was written blocks sends at once (`BpsFeeAboveGroupMax`), not
+    // transfers from the EVM chain: the back fact (what an EVM send into this lane meets) is clear
     const capped = await known(
       lane({
         cc: chainConfigData(LANE_LINKED_MARKER),
@@ -312,7 +313,7 @@ describe('readSolanaRemoteLaneFacts', () => {
         extra: [[GCP, groupChainData({ maxBpsFee: 40, feeBps: 50 })]],
       }),
     )
-    assert.match(capped.back?.failsClosed ?? '', /BpsFeeAboveGroupMax: .* 50 bps, above .* 40 bps/)
+    assert.equal(capped.back?.failsClosed, undefined)
     const atCap = await known(
       lane({
         cc: chainConfigData(LANE_LINKED_MARKER),

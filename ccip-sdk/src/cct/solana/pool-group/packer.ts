@@ -485,6 +485,28 @@ async function sizeBySimulation(
   }
 }
 
+/** The items' PDAs that already hold lamports (their creation costs 3 trace entries, not 1). */
+async function prefundedPdas(input: PackPoolGroupInput): Promise<Set<string>> {
+  const pdas = input.items.flatMap((i) => i.createdPdas ?? [])
+  const accounts: (AccountInfo<Buffer> | null)[] = pdas.length
+    ? await getMultipleAccountsInfoPaged(input.chain.connection, pdas)
+    : []
+  return new Set(pdas.filter((_, i) => (accounts[i]?.lamports ?? 0) > 0).map((p) => p.toBase58()))
+}
+
+/**
+ * How many leading items fit the first transaction by bytes, locks, trace and heap (no
+ * simulation): for a write whose later items need the first transaction landed (they cannot be
+ * simulated before it).
+ * @throws {@link CCTParamsInvalidError} if a limit is invalid or the first item does not fit alone
+ * @internal
+ */
+export async function firstTransactionItemCount(input: PackPoolGroupInput): Promise<number> {
+  if (!input.items.length) return 0
+  const limits = await resolveLimits(input)
+  return chunk(input, limits, input.items, await prefundedPdas(input))[0]!.length
+}
+
 /**
  * Packs items into pool-group transactions: greedy chunks under the compiled message's bytes and
  * locks, the trace (pre-funded PDAs read in one paged call) and the heap; then each chunk simulated,
@@ -502,13 +524,7 @@ export async function packPoolGroupTransactions(
   const { chain, payer, items, budget = {} } = input
   if (!items.length) return { transactions: [] }
   const limits = await resolveLimits(input)
-  const pdas = items.flatMap((i) => i.createdPdas ?? [])
-  const accounts: (AccountInfo<Buffer> | null)[] = pdas.length
-    ? await getMultipleAccountsInfoPaged(chain.connection, pdas)
-    : []
-  const prefunded = new Set(
-    pdas.filter((_, i) => (accounts[i]?.lamports ?? 0) > 0).map((p) => p.toBase58()),
-  )
+  const prefunded = await prefundedPdas(input)
   const sized = []
   for (const c of chunk(input, limits, items, prefunded))
     sized.push(...(await sizeBySimulation(input, limits, c)))

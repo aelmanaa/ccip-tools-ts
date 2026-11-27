@@ -117,7 +117,9 @@ export type SolanaRemoteLaneBack = {
   admitted?: boolean
   /**
    * Set when every transfer on the lane reverts in both directions although it is not paused: a
-   * stale SECURITY record or an unsynced CCV copy. Treat the lane as not live.
+   * stale SECURITY record or an unsynced CCV copy. Treat the lane as not live. A send-only rule
+   * (the pool group's fee cap below the lane's FEE policy) is not reported: it does not stop
+   * transfers from the EVM chain.
    */
   failsClosed?: string
 }
@@ -415,7 +417,9 @@ async function readLane(
       remotePools,
       ...lanePauses(state),
       ...outbound,
-      ...(failsClosed !== undefined && { failsClosed }),
+      // only what reverts transfers from the EVM chain (inbound here): a send-only rule (the fee
+      // cap) leaves the lane open to them
+      ...(failsClosed?.directions.includes('inbound') && { failsClosed: failsClosed.reason }),
     },
   }
 }

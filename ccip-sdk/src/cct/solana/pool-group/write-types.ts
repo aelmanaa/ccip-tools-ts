@@ -177,10 +177,8 @@ export type PoolGroupUnsignedResult = {
   affectedLanes: PoolGroupLaneKey[]
   /** (mint, chain) lanes this write makes live or materializable on an unpaused chain. */
   goingLive: PoolGroupLaneKey[]
-  /** Warning findings on the affected lanes (errors refuse the write). */
-  warnings: MultiTokenPoolLaneFinding[]
-  /** Lane-check findings on the lanes the write makes live (warnings; errors throw). */
-  findings?: MultiTokenPoolLaneFinding[]
+  /** Findings on the affected lanes and the lanes the write makes live (warnings; errors throw). */
+  findings: MultiTokenPoolLaneFinding[]
   /** Follow-up writes this one makes necessary. */
   followUps?: PoolGroupFollowUp[]
 }
@@ -302,8 +300,11 @@ export type PoolGroupWriteParams = PoolGroupRef &
 /**
  * `create_group` (+ `set_group_roles` and `add_group_chain` for `initialChains`, packed after it).
  * Refused when the PDA exists and someone else owns it: a group at that id may be a squatter's. When
- * it exists and `authority` owns it (an earlier run landed its first transaction), only the missing
- * `initialChains` are built.
+ * it exists and `authority` owns it (an earlier run landed its first transaction), the op resumes:
+ * it builds the missing `initialChains`, and `set_group_roles` / `set_group_settings` for the
+ * explicitly passed roles and settings that differ (roles all unset, as a bare `create_group`
+ * leaves them, take the defaults). A higher `maxBpsFee` than the group's is refused (it can only go
+ * down).
  */
 export type CreatePoolGroupParams = PoolGroupProgramRef &
   PoolGroupBatchOptions & {
@@ -329,6 +330,12 @@ export type CreatePoolGroupResult = {
   poolGroupAddress: string
   /** The id it was created with. */
   poolGroupId: string
+  /**
+   * `true` when the group already existed and `authority` owns it (an earlier run landed its first
+   * transaction): the build then holds only what differs from the request (missing chains, roles
+   * and settings passed explicitly, roles a bare `create_group` left unset).
+   */
+  resumed: boolean
 }
 
 /** `set_group_roles`. Owner. Merged: omitted roles keep their holder; `null` clears one. */
