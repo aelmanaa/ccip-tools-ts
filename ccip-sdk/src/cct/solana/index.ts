@@ -20,6 +20,47 @@ import {
   OnboardToken,
 } from './onboarding/onboard-token.ts'
 import {
+  GetPoolGroup,
+  GetPoolGroupChain,
+  GetPoolGroupFeatures,
+  GetPoolGroupHooks,
+  GetPoolGroupLane,
+  GetPoolGroupLanes,
+  GetPoolGroupListEntries,
+  GetPoolGroupMembers,
+  GetPoolGroupPolicy,
+  GetPoolGroupPolicyChainRecord,
+  GetPoolGroupRequiredCCVs,
+  GetTokenPoolProgramConfig,
+  HasPoolGroupListEntry,
+} from './pool-group/operations/index.ts'
+import type {
+  GetPoolGroupChainParams,
+  GetPoolGroupChainResult,
+  GetPoolGroupFeaturesParams,
+  GetPoolGroupHooksParams,
+  GetPoolGroupHooksResult,
+  GetPoolGroupLaneParams,
+  GetPoolGroupLaneResult,
+  GetPoolGroupLanesParams,
+  GetPoolGroupListEntriesParams,
+  GetPoolGroupListEntriesResult,
+  GetPoolGroupMembersParams,
+  GetPoolGroupMembersResult,
+  GetPoolGroupParams,
+  GetPoolGroupPolicyChainRecordParams,
+  GetPoolGroupPolicyChainRecordResult,
+  GetPoolGroupPolicyParams,
+  GetPoolGroupPolicyResult,
+  GetPoolGroupRequiredCCVsParams,
+  GetPoolGroupRequiredCCVsResult,
+  GetPoolGroupResult,
+  GetTokenPoolProgramConfigParams,
+  GetTokenPoolProgramConfigResult,
+  HasPoolGroupListEntryParams,
+  PoolGroupFeature,
+} from './pool-group/types.ts'
+import {
   type SerializeUnsignedTxOptions,
   type SerializedSolanaTxEncoding,
   type SolanaDurableNonce,
@@ -295,6 +336,21 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   readonly #withdrawFeeTokens = new WithdrawFeeTokens()
   // Onboarding
   readonly #onboardToken = new OnboardToken()
+
+  // Pool groups (reads)
+  readonly #getPoolGroupFeatures = new GetPoolGroupFeatures()
+  readonly #getPoolGroup = new GetPoolGroup()
+  readonly #getPoolGroupChain = new GetPoolGroupChain()
+  readonly #getPoolGroupPolicy = new GetPoolGroupPolicy()
+  readonly #getPoolGroupPolicyChainRecord = new GetPoolGroupPolicyChainRecord()
+  readonly #getPoolGroupMembers = new GetPoolGroupMembers()
+  readonly #getPoolGroupLane = new GetPoolGroupLane()
+  readonly #getPoolGroupLanes = new GetPoolGroupLanes()
+  readonly #getPoolGroupHooks = new GetPoolGroupHooks()
+  readonly #getPoolGroupListEntries = new GetPoolGroupListEntries()
+  readonly #hasPoolGroupListEntry = new HasPoolGroupListEntry()
+  readonly #getTokenPoolProgramConfig = new GetTokenPoolProgramConfig()
+  readonly #getPoolGroupRequiredCCVs = new GetPoolGroupRequiredCCVs()
 
   /** Creates a Solana CCT manager for an existing chain. */
   constructor(chain: SolanaChain) {
@@ -3192,6 +3248,207 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   ): Promise<string> {
     return serializeUnsignedSolanaTx(this.provider, unsigned, payer, encodingOrOpts)
   }
+
+  // ── Pool groups: reads ──
+
+  /**
+   * Probes which pool-group features the pool program has.
+   * @remarks Unknown (an RPC failure, a missing simulation payer) is an error, never "absent".
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroupFeatures({})
+   * ```
+   */
+  getPoolGroupFeatures(opts: GetPoolGroupFeaturesParams): Promise<PoolGroupFeature[]> {
+    return this.#getPoolGroupFeatures.query(this.chain, opts)
+  }
+
+  /**
+   * Decodes a pool group, including the default policy, CCV epoch counter and pending notice that
+   * `observe_group` omits.
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroup({ poolGroupId })
+   * ```
+   */
+  getPoolGroup(opts: GetPoolGroupParams): Promise<GetPoolGroupResult> {
+    return this.#getPoolGroup.query(this.chain, opts)
+  }
+
+  /**
+   * Decodes a pool group chain record with lane mode, `drivenLanesPaused`, and the subset as live
+   * mints plus raw and stale indices.
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroupChain({ poolGroupId, remoteChainSelector })
+   * ```
+   */
+  getPoolGroupChain(opts: GetPoolGroupChainParams): Promise<GetPoolGroupChainResult> {
+    return this.#getPoolGroupChain.query(this.chain, opts)
+  }
+
+  /**
+   * Decodes a named policy, optionally with its chain records.
+   * @remarks Enumerate policies over `0..nextPolicyId`; closed ids are skipped.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroupPolicy({ poolGroupId, policyId: 0, withChainRecords: true })
+   * ```
+   */
+  getPoolGroupPolicy(opts: GetPoolGroupPolicyParams): Promise<GetPoolGroupPolicyResult> {
+    return this.#getPoolGroupPolicy.query(this.chain, opts)
+  }
+
+  /**
+   * Decodes one policy chain record.
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroupPolicyChainRecord({ poolGroupId, policyId: 0, remoteChainSelector })
+   * ```
+   */
+  getPoolGroupPolicyChainRecord(
+    opts: GetPoolGroupPolicyChainRecordParams,
+  ): Promise<GetPoolGroupPolicyChainRecordResult> {
+    return this.#getPoolGroupPolicyChainRecord.query(this.chain, opts)
+  }
+
+  /**
+   * Lists the pool group members and registry (`getProgramAccounts`, memcmp on the pool group at
+   * offset 10).
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroupMembers({ poolGroupId })
+   * ```
+   */
+  getPoolGroupMembers(opts: GetPoolGroupMembersParams): Promise<GetPoolGroupMembersResult> {
+    return this.#getPoolGroupMembers.query(this.chain, opts)
+  }
+
+  /**
+   * Decodes one lane: marker, tail, admission, CCV sync state and current buckets.
+   * @remarks Naive IDL decoders see a linked lane as standard.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroupLane({ tokenAddress: mint, remoteChainSelector })
+   * ```
+   */
+  getPoolGroupLane(opts: GetPoolGroupLaneParams): Promise<GetPoolGroupLaneResult> {
+    return this.#getPoolGroupLane.query(this.chain, opts)
+  }
+
+  /**
+   * Lists every linked and driven lane of a pool group, optionally for one chain.
+   * @remarks Used by the sync and cleanup ops when no mints are given.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @throws {@link CCTParamsInvalidError} also when the RPC refuses `getProgramAccounts`; pass
+   * mints explicitly to the op instead
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroupLanes({ poolGroupId, remoteChainSelector })
+   * ```
+   */
+  getPoolGroupLanes(opts: GetPoolGroupLanesParams): Promise<GetPoolGroupLaneResult[]> {
+    return this.#getPoolGroupLanes.query(this.chain, opts)
+  }
+
+  /**
+   * Reads a SECURITY record's hook config, its lists and the hook authority.
+   * @remarks Read-only: needs no wallet and builds no transaction.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroupHooks({ record: chainRecord })
+   * ```
+   */
+  getPoolGroupHooks(opts: GetPoolGroupHooksParams): Promise<GetPoolGroupHooksResult> {
+    return this.#getPoolGroupHooks.query(this.chain, opts)
+  }
+
+  /**
+   * Lists a hook list's entries.
+   * @remarks Blocklist entries store only a hash; addresses come from `ListUpdated` events since
+   * `fromSlot`.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroupListEntries({ list, fromSlot: 300_000_000n })
+   * ```
+   */
+  getPoolGroupListEntries(
+    opts: GetPoolGroupListEntriesParams,
+  ): Promise<GetPoolGroupListEntriesResult> {
+    return this.#getPoolGroupListEntries.query(this.chain, opts)
+  }
+
+  /**
+   * Reads whether an address is on a hook list (the entry PDA exists).
+   * @remarks Blocklist keys are normalized (32-byte padded EVM folds to 20 bytes).
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.hasPoolGroupListEntry({ list, address: '0xSender...' })
+   * ```
+   */
+  hasPoolGroupListEntry(opts: HasPoolGroupListEntryParams): Promise<boolean> {
+    return this.#hasPoolGroupListEntry.query(this.chain, opts)
+  }
+
+  /**
+   * Reads the program-wide `PoolConfig`: default router, default RMN and whether pools are
+   * self-served.
+   * @remarks Reading needs no authority; writing it is the upgrade authority's (not exposed).
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getTokenPoolProgramConfig({})
+   * ```
+   */
+  getTokenPoolProgramConfig(
+    opts: GetTokenPoolProgramConfigParams,
+  ): Promise<GetTokenPoolProgramConfigResult> {
+    return this.#getTokenPoolProgramConfig.query(this.chain, opts)
+  }
+
+  /**
+   * Simulates `get_required_ccvs` for a lane, amount, direction and finality, and says where the
+   * answer came from.
+   * @remarks With SECURITY from the pool group the answer is the lane's synced copy (amount and
+   * finality ignored); `synced` and `failsClosedAt` tell whether transfers enforce the same set.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded
+   * @example
+   * ```ts
+   * const result = await cct.getPoolGroupRequiredCCVs({ tokenAddress: mint, remoteChainSelector, amount: 1_000n, direction: 'outbound', finality: 'finalized' })
+   * ```
+   */
+  getPoolGroupRequiredCCVs(
+    opts: GetPoolGroupRequiredCCVsParams,
+  ): Promise<GetPoolGroupRequiredCCVsResult> {
+    return this.#getPoolGroupRequiredCCVs.query(this.chain, opts)
+  }
 }
 
 export {
@@ -3225,6 +3482,8 @@ export {
   type TokenOnboardingStepName,
   TOKEN_ONBOARDING_STEPS,
 } from './onboarding/onboard-token.ts'
+export type * from './pool-group/types.ts'
+export { POOL_GROUP_FEATURES, POOL_GROUP_POLICY_CLASSES } from './pool-group/types.ts'
 // Shared cross-family multi-token pool shapes, as on `cct/evm`.
 export type * from '../multi-token-pool.ts'
 export {

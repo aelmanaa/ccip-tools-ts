@@ -1,12 +1,19 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+import { BorshAccountsCoder } from '@coral-xyz/anchor'
 import { PublicKey } from '@solana/web3.js'
 
 import type { TokenPoolRemote } from '../../../../chain.ts'
+import { networkInfo } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
+import { deriveTokenPoolChainConfigV2Pda } from '../../../../solana/token-pool.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
+import { LANE_LINKED_MARKER, poolGroupsCoder } from '../../pool-group/accounts.ts'
+import {
+  deriveTokenPoolChainConfigPda,
+  deriveTokenPoolConfigPda,
+} from '../../programs/token-pool.ts'
 import { GetTokenPoolRemotes } from './get-token-pool-remotes.ts'
 
 function key(byte: number): PublicKey {
@@ -29,7 +36,11 @@ describe('GetTokenPoolRemotes (cct/solana)', () => {
 
   function chain(): SolanaChain {
     return {
-      connection: { getAccountInfo: async () => ({}) }, // the pool state under `program`
+      // the pool state under `program`; no lane accounts (not a pool-groups program)
+      connection: {
+        getAccountInfo: async () => ({}),
+        getMultipleAccountsInfo: async (keys: unknown[]) => keys.map(() => null),
+      },
       getTokenPoolRemotes: async (state: string, remoteChainSelector?: bigint) => {
         assert.equal(state, deriveTokenPoolConfigPda(program, mint).toBase58())
         assert.equal(remoteChainSelector, selector)
@@ -51,7 +62,10 @@ describe('GetTokenPoolRemotes (cct/solana)', () => {
 
     it('omits the selector to read all remote configs', async () => {
       const chainWithAll = {
-        connection: { getAccountInfo: async () => ({}) },
+        connection: {
+          getAccountInfo: async () => ({}),
+          getMultipleAccountsInfo: async (keys: unknown[]) => keys.map(() => null),
+        },
         getTokenPoolRemotes: async (_state: string, remoteChainSelector?: bigint) => {
           assert.equal(remoteChainSelector, undefined)
           return REMOTES
@@ -64,6 +78,56 @@ describe('GetTokenPoolRemotes (cct/solana)', () => {
       })
 
       assert.equal(remotes, REMOTES)
+    })
+  })
+
+  it('marks a pool-group lane with its kind and group', async () => {
+    const group = key(9)
+    const remoteSelector = networkInfo('ethereum-mainnet').chainSelector
+    const zero = poolGroupsCoder.types.decode<Record<string, unknown>>(
+      'ChainConfig',
+      Buffer.alloc(512),
+    )
+    const body = poolGroupsCoder.types.encode('ChainConfig', zero)
+    const ccLen = 8 + 139
+    const cc = Buffer.alloc(ccLen + 8)
+    Buffer.concat([BorshAccountsCoder.accountDiscriminator('ChainConfig'), body]).copy(cc)
+    LANE_LINKED_MARKER.copy(cc, ccLen)
+    const v2Zero = poolGroupsCoder.types.decode<Record<string, unknown>>(
+      'ChainConfigV2',
+      Buffer.alloc(512),
+    )
+    const v2Body = poolGroupsCoder.types.encode('ChainConfigV2', { ...v2Zero, version: 2 })
+    const tail = Buffer.alloc(209)
+    group.toBuffer().copy(tail, 0)
+    tail[32] = 1
+    const v2 = Buffer.concat([
+      BorshAccountsCoder.accountDiscriminator('ChainConfigV2'),
+      v2Body,
+      tail,
+    ])
+    const accounts = new Map([
+      [deriveTokenPoolChainConfigPda(program, remoteSelector, mint).toBase58(), cc],
+      [deriveTokenPoolChainConfigV2Pda(program, remoteSelector, mint).toBase58(), v2],
+    ])
+    const marked = {
+      connection: {
+        getAccountInfo: async () => ({}),
+        getMultipleAccountsInfo: async (keys: PublicKey[]) =>
+          keys.map((k) => {
+            const data = accounts.get(k.toBase58())
+            return data ? { data, owner: program, lamports: 1, executable: false } : null
+          }),
+      },
+      getTokenPoolRemotes: async () => ({ ...REMOTES }),
+    } as unknown as SolanaChain
+    const remotes = await new GetTokenPoolRemotes().query(marked, {
+      tokenAddress: mint.toBase58(),
+      poolProgramAddress: program.toBase58(),
+    })
+    assert.deepEqual(remotes['ethereum-mainnet']?.poolGroup, {
+      kind: 'linked',
+      poolGroupAddress: group.toBase58(),
     })
   })
 

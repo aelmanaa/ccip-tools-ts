@@ -33,7 +33,6 @@ import {
   type PoolGroupClass,
   type PoolGroupLaneExt,
   type PoolGroupLaneMarker,
-  POOL_GROUP_CLASS_ORDER,
   POOL_GROUP_MAX_ACCOUNT_VERSION,
   chainConfigStandardLen,
   decodePoolGroupChainConfigV2,
@@ -42,6 +41,7 @@ import {
   poolGroupChainAdmits,
   poolGroupPdas,
 } from './accounts.ts'
+import { POOL_GROUP_POLICY_CLASSES } from './types.ts'
 
 /** A fact that could not be read: absent, or not as the program writes it. @internal */
 export type Unread = { status: 'missing' | 'unknown'; reason: string }
@@ -190,7 +190,7 @@ export async function readPoolGroupLaneState(
   const group = new PublicKey(ext.poolGroupAddress)
   const gcpAddress = poolGroupPdas.groupChain(program, group, selector)
   const slots = new Map<number, PublicKey>()
-  for (const cls of POOL_GROUP_CLASS_ORDER) {
+  for (const cls of POOL_GROUP_POLICY_CLASSES) {
     const source = ext.classSource[cls]
     if (source.kind !== 'policy') continue
     const policy = ext.policySlots[source.slot]

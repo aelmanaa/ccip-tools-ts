@@ -810,6 +810,8 @@ describe('cct/solana entry point', () => {
       'DEFAULT_WRITABLE_INDEXES',
       'MULTI_TOKEN_POOL_LANE_CHECKS',
       'MULTI_TOKEN_POOL_STEP_SIGNER_KINDS',
+      'POOL_GROUP_FEATURES',
+      'POOL_GROUP_POLICY_CLASSES',
       'REGISTRATION_METHODS',
       'SOLANA_TOKEN_POOL_TYPES',
       'SolanaTokenManager',

@@ -10,7 +10,8 @@ import { useResource } from '../../../../../scripts/useResource.ts'
 import { SolanaChain } from '../../../solana/index.ts'
 import { CCTOperationUnsupportedError } from '../../errors.ts'
 import { TOKEN_POOL_PROGRAMS } from '../programs/token-pool.ts'
-import { POOL_GROUP_PROBED_FEATURES, getPoolGroupProgramFeatures } from './program.ts'
+import { getPoolGroupProgramFeatures } from './program.ts'
+import { POOL_GROUP_FEATURES } from './types.ts'
 
 // Live, read-only (simulations only): the pool-groups program of record on Solana Devnet and the
 // canonical burn-mint program. Override the RPC via RPC_SOLANA_DEVNET.
@@ -28,7 +29,7 @@ describe('getPoolGroupProgramFeatures on Devnet', { skip, timeout: 120_000 }, ()
 
   it('finds every feature on the stage-2f program', async () => {
     assert.deepEqual(await getPoolGroupProgramFeatures(chain, POOL_GROUPS), [
-      ...POOL_GROUP_PROBED_FEATURES,
+      ...POOL_GROUP_FEATURES,
     ])
   })
 

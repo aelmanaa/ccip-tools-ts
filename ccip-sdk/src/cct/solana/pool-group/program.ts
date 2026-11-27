@@ -27,16 +27,7 @@ import {
 } from '../../../solana/utils.ts'
 import { CCTOperationUnsupportedError } from '../../errors.ts'
 import { deriveEventAuthorityPda, deriveTokenPoolProgramDataPda } from '../programs/token-pool.ts'
-
-/** Pool-group features a program may have, oldest first. @internal */
-export const POOL_GROUP_PROBED_FEATURES = [
-  'groups',
-  'hooks',
-  'drivenLanes',
-  'drivenLanesV2Layout',
-] as const
-/** One probed feature. @internal */
-export type PoolGroupProbedFeature = (typeof POOL_GROUP_PROBED_FEATURES)[number]
+import { type PoolGroupFeature, POOL_GROUP_FEATURES } from './types.ts'
 
 /**
  * The pool-groups IDL with the base pool's events and errors, composed as `composeTokenPoolIdl`
@@ -83,7 +74,7 @@ const PROGRAM_DATA_HEADER_LEN = 45
 async function probeInstruction(
   chain: SolanaChain,
   poolProgram: PublicKey,
-  feature: PoolGroupProbedFeature,
+  feature: PoolGroupFeature,
 ): Promise<TransactionInstruction> {
   const program = createPoolGroupProgram(chain, poolProgram)
   const group = Keypair.generate().publicKey
@@ -131,7 +122,7 @@ async function probeInstruction(
 async function probe(
   chain: SolanaChain,
   poolProgram: PublicKey,
-  feature: PoolGroupProbedFeature,
+  feature: PoolGroupFeature,
 ): Promise<boolean> {
   let ix
   try {
@@ -190,12 +181,8 @@ async function lastDeploySlot(chain: SolanaChain, poolProgram: PublicKey): Promi
   return info.data.readBigUInt64LE(PROGRAM_DATA_SLOT_OFFSET)
 }
 
-const probeOne = (
-  chain: SolanaChain,
-  program: string,
-  _slot: bigint,
-  feature: PoolGroupProbedFeature,
-) => probe(chain, new PublicKey(program), feature)
+const probeOne = (chain: SolanaChain, program: string, _slot: bigint, feature: PoolGroupFeature) =>
+  probe(chain, new PublicKey(program), feature)
 
 const caches = new WeakMap<SolanaChain, typeof probeOne>()
 
@@ -207,7 +194,7 @@ const caches = new WeakMap<SolanaChain, typeof probeOne>()
  * @param poolProgram - The pool program.
  * @param opts - `groupExists`: a `Group` was decoded at a PDA of this program, which proves
  *   `groups` and skips its probe.
- * @returns The present features, in {@link POOL_GROUP_PROBED_FEATURES} order.
+ * @returns The present features, in {@link POOL_GROUP_FEATURES} order.
  * @throws {@link CCTOperationUnsupportedError} when a probe answers neither present nor absent (a
  *   missing simulation payer, a non-executable program), or the program has no program data
  * @throws the RPC's errors, unchanged
@@ -217,15 +204,15 @@ export async function getPoolGroupProgramFeatures(
   chain: SolanaChain,
   poolProgram: PublicKey,
   opts: { groupExists?: boolean } = {},
-): Promise<PoolGroupProbedFeature[]> {
+): Promise<PoolGroupFeature[]> {
   let cached = caches.get(chain)
   if (!cached) {
     cached = memoize(probeOne, { async: true, maxArgs: 4, maxSize: 100 })
     caches.set(chain, cached)
   }
   const slot = await lastDeploySlot(chain, poolProgram)
-  const present: PoolGroupProbedFeature[] = []
-  for (const feature of POOL_GROUP_PROBED_FEATURES)
+  const present: PoolGroupFeature[] = []
+  for (const feature of POOL_GROUP_FEATURES)
     if (
       (feature === 'groups' && opts.groupExists) ||
       (await cached(chain, poolProgram.toBase58(), slot, feature))

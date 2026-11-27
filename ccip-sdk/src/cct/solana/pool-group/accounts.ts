@@ -23,6 +23,7 @@ import {
 import { toLeArray } from '../../../utils.ts'
 import { CCTDataDecodeError } from '../../errors.ts'
 import type { PoolDataFormat } from '../../multi-token-pool.ts'
+import type { PoolGroupPolicyClass } from './types.ts'
 
 /** Borsh coder of the pool-groups program's IDL. @internal */
 export const poolGroupsCoder = sizedCoder(POOL_GROUPS_BURN_MINT_IDL)
@@ -46,10 +47,8 @@ const GROUP_REGISTRY_LEN = 8 + 1 + 1 + 32 + 4 + 4 + 32
 const CHAIN_CONFIG_V2_STANDARD = 1
 const CHAIN_CONFIG_V2_WITH_EXT = 2
 
-/** Policy classes in the program's index order (`PolicyClass::index`). @internal */
-export const POOL_GROUP_CLASS_ORDER = ['connection', 'fee', 'rateLimit', 'security'] as const
-/** One policy class. @internal */
-export type PoolGroupClass = (typeof POOL_GROUP_CLASS_ORDER)[number]
+/** One policy class (`POOL_GROUP_POLICY_CLASSES` is the program's index order). @internal */
+export type PoolGroupClass = PoolGroupPolicyClass
 
 /** Where a lane reads one class from (`ClassSource`). @internal */
 export type PoolGroupClassSourceByte =
@@ -64,7 +63,7 @@ export type PoolGroupLaneMarker = 'standard' | 'linked' | 'driven'
 export type PoolGroupLaneExt = {
   /** The `Group` account, or `null` for a lane with only its own pool-data settings. */
   poolGroupAddress: string | null
-  /** Per class, in {@link POOL_GROUP_CLASS_ORDER}. */
+  /** Per class, in `POOL_GROUP_POLICY_CLASSES` order. */
   classSource: Record<PoolGroupClass, PoolGroupClassSourceByte>
   /** Named policy accounts by slot; `null` for an empty slot. */
   policySlots: (string | null)[]
@@ -414,6 +413,31 @@ const seed = (s: string) => Buffer.from(s)
  * @internal
  */
 export const poolGroupPdas = {
+  group: (program: PublicKey, groupId: PublicKey) =>
+    PublicKey.findProgramAddressSync(
+      [seed('ccip_tokenpool_group'), groupId.toBuffer()],
+      program,
+    )[0],
+  policy: (program: PublicKey, group: PublicKey, policyId: number) =>
+    PublicKey.findProgramAddressSync(
+      [seed('ccip_tokenpool_policy'), group.toBuffer(), toLeArray(policyId, 4)],
+      program,
+    )[0],
+  allowlistEntry: (program: PublicKey, allowlist: PublicKey, sender: PublicKey) =>
+    PublicKey.findProgramAddressSync(
+      [seed('ccip_tokenpool_allowed'), allowlist.toBuffer(), sender.toBuffer()],
+      program,
+    )[0],
+  blocklistEntry: (program: PublicKey, blocklist: PublicKey, addressHash: Buffer) =>
+    PublicKey.findProgramAddressSync(
+      [seed('ccip_tokenpool_blocked'), blocklist.toBuffer(), addressHash],
+      program,
+    )[0],
+  hookAuthority: (program: PublicKey, group: PublicKey) =>
+    PublicKey.findProgramAddressSync(
+      [seed('ccip_tokenpool_hook_authority'), group.toBuffer()],
+      program,
+    )[0],
   groupChain: (program: PublicKey, group: PublicKey, selector: bigint) =>
     PublicKey.findProgramAddressSync(
       [seed('ccip_tokenpool_group_chain'), group.toBuffer(), toLeArray(selector, 8)],
@@ -434,4 +458,26 @@ export const poolGroupPdas = {
       [seed('ccip_tokenpool_group_registry'), group.toBuffer()],
       program,
     )[0],
+}
+
+/** `AllowlistEntry` discriminator. @internal */
+export const ALLOWLIST_ENTRY_DISCRIMINATOR =
+  BorshAccountsCoder.accountDiscriminator('AllowlistEntry')
+/** `BlocklistEntry` discriminator. @internal */
+export const BLOCKLIST_ENTRY_DISCRIMINATOR =
+  BorshAccountsCoder.accountDiscriminator('BlocklistEntry')
+/** `GroupMember` discriminator. @internal */
+export const POOL_GROUP_MEMBER_DISCRIMINATOR = GROUP_MEMBER_DISCRIMINATOR
+/** `GroupRegistry` discriminator. @internal */
+export const POOL_GROUP_REGISTRY_DISCRIMINATOR = GROUP_REGISTRY_DISCRIMINATOR
+
+/**
+ * A blocklist key (`normalize_address`): 32 bytes with 12 leading zeros (a padded EVM address)
+ * fold to their 20-byte tail; anything else is kept.
+ * @internal
+ */
+export function normalizeBlocklistAddress(address: Buffer): Buffer {
+  return address.length === 32 && address.subarray(0, 12).every((b) => b === 0)
+    ? address.subarray(12)
+    : address
 }
