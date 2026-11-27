@@ -371,9 +371,16 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
       // without decimals() takes the given ones, as the store's try/catch does
       const read = await chain.getTokenInfo(token).then(
         (info) => info.decimals,
-        (err: unknown) => {
-          if (!(err instanceof CCIPTokenDecimalsUnavailableError)) throw err
-          return undefined
+        async (err: unknown) => {
+          if (err instanceof CCIPTokenDecimalsUnavailableError) return undefined
+          // no code: decoding the empty answer to decimals() reverts the store, outside its catch
+          if ((await chain.provider.getCode(token, blockTag)) === '0x')
+            throw new CCTParamsInvalidError(
+              this.name,
+              `profilesToSet[${i}].tokenAddress`,
+              `${token} has no code: the store's decimals() call reverts on it, so it cannot be registered (pass the token contract)`,
+            )
+          throw err
         },
       )
       if (read === undefined && p.localDecimals === undefined)
