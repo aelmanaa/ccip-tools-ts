@@ -111,8 +111,6 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   getChain?: ChainGetter
   /** Long-data facts for remote families the SDK cannot read. */
   remoteAttestations?: MultiTokenPoolRemoteAttestation[]
-  /** `true` for checks that make lanes live (unpauses): attestations are never used. */
-  makesLive?: boolean
   /** Block to read at; defaults to the latest block, read once. */
   blockTag?: number
   /** Return error findings in `findings` instead of refusing (the snapshot check reports them). */
@@ -183,20 +181,10 @@ export async function runMultiTokenPoolGuards(
   // a pause is the emergency action: it never reads remote facts, and never refuses on what is
   // wrong with the lanes it stops (it is still gated, simulated and sealed); a bucket write judges
   // only the lanes it loosens
-  const scope = laneJudgingOf(decoded.functionName)
-  // an unpause judges only the lanes it makes live: one still held by another pause or a stop
-  // sends nothing, so it never blocks the recovery of the others
-  const live = new Set(multiTokenPoolLaneTransitions(lanes).goingLive.map((l) => guardLaneKey(l)))
-  // derived from the projection, so every op and the snapshot re-check apply it alike
-  const makesLive = input.makesLive === true || multiTokenPoolMakesLive(lanes)
-  const judged =
-    scope === 'none'
-      ? []
-      : scope === 'loosened'
-        ? lanes.filter((l) => loosensRateLimits(l.before.rateLimits, l.after.rateLimits))
-        : scope === 'goingLive'
-          ? lanes.filter((l) => live.has(guardLaneKey(l.after)))
-          : lanes
+  const judged = judgedLanesOf(laneJudgingOf(decoded.functionName), lanes)
+  // "makes lanes live" (no attestations) is derived from the projection, so every op and the
+  // snapshot re-check apply it alike
+  const makesLive = multiTokenPoolMakesLive(lanes)
   const judge = judged.length > 0
   const facts: MultiTokenPoolGuardFacts = !judge
     ? {
@@ -819,6 +807,25 @@ async function crossCheckWithSimulateV1(
       })
   })
   return true
+}
+
+/**
+ * The lanes a scope judges, from the write's projected lanes: none; the ones whose rate limits it
+ * loosens; the ones it makes live (an unpause: a lane still held by another pause or a stop sends
+ * nothing, so it never blocks the recovery of the rest); or all of them.
+ * @internal
+ */
+export function judgedLanesOf<
+  L extends { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane },
+>(scope: ReturnType<typeof laneJudgingOf>, lanes: readonly L[]): L[] {
+  if (scope === 'none') return []
+  if (scope === 'loosened')
+    return lanes.filter((l) => loosensRateLimits(l.before.rateLimits, l.after.rateLimits))
+  if (scope === 'goingLive') {
+    const live = new Set(multiTokenPoolLaneTransitions(lanes).goingLive.map((l) => guardLaneKey(l)))
+    return lanes.filter((l) => live.has(guardLaneKey(l.after)))
+  }
+  return [...lanes]
 }
 
 /**

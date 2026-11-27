@@ -145,14 +145,6 @@ export abstract class PoolConfigManagerWriteOperation<
     ctx: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> | PoolConfigManagerWrite
 
-  /**
-   * Whether the write can make lanes live (an unpause): its guard then never uses attestations.
-   * Defaults to `false`.
-   */
-  protected makesLive(_params: Parsed): boolean {
-    return false
-  }
-
   /** Context every refusal of this op carries (e.g. a merged op's kind). */
   protected errorContext(_params: Parsed): Record<string, unknown> | undefined {
     return undefined
@@ -206,7 +198,6 @@ export abstract class PoolConfigManagerWriteOperation<
       ...(params.sender !== undefined && { sender: params.sender }),
       ...(expected && { expected }),
       ...(context && { errorContext: context }),
-      ...(this.makesLive(params) && { makesLive: true }),
       ...writeGuardsOf(params),
     })
     return {

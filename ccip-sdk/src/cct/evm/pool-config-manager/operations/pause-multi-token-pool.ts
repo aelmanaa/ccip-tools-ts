@@ -106,12 +106,6 @@ abstract class PauseWriteOperation<
     return ['DEFAULT_ADMIN_ROLE', this.pauses ? 'PAUSER_ROLE' : 'UNPAUSER_ROLE']
   }
 
-  // a pause is never judged (the guard reads that from the calldata); an unpause makes lanes live:
-  // no attestations
-  protected override makesLive(): boolean {
-    return !this.pauses
-  }
-
   protected async encode(
     chain: EVMChain,
     params: P,

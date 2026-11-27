@@ -299,11 +299,6 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
     }
   }
 
-  // the lift makes its lanes live: no attestations
-  protected override makesLive(): boolean {
-    return true
-  }
-
   protected async encode(
     _chain: EVMChain,
     { lanes, direction, restore, rateLimits }: LiftMultiTokenPoolLaneStopsParams,
