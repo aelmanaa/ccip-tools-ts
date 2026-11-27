@@ -14,7 +14,11 @@ import { ChainFamily, networkInfo } from '../../../../networks.ts'
 // registers the Solana chain family, for the lanes whose remote is Solana
 import '../../../../solana/index.ts'
 import { parseTypeAndVersion } from '../../../../utils.ts'
-import { CCTOperationUnsupportedError, CCTParamsInvalidError } from '../../../errors.ts'
+import {
+  CCTContractTypeInvalidError,
+  CCTOperationUnsupportedError,
+  CCTParamsInvalidError,
+} from '../../../errors.ts'
 import {
   type TokenPoolType,
   TokenPoolVersion,
@@ -464,6 +468,19 @@ describe('AddRemotePool (cct/evm)', () => {
           err.context.operation === 'addRemotePool' &&
           err.context.param === 'sender',
       )
+    })
+  })
+
+  it('names the multi-token pool op when the pool is a multi-token pool', async () => {
+    const chain = stubChain()
+    Object.assign(chain, {
+      typeAndVersion: () =>
+        Promise.resolve(parseTypeAndVersion('BurnMintMultiTokenPool 2.1.0-dev')),
+    })
+    await assert.rejects(generate(chain), (e: unknown) => {
+      assert.ok(e instanceof CCTContractTypeInvalidError)
+      assert.match(String(e.context.reason), /applyMultiTokenPoolInlineRemotePoolConfigUpdates/)
+      return true
     })
   })
 })
