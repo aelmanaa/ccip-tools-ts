@@ -22,7 +22,7 @@ import {
   isComputeBudgetInstruction,
   readComputeUnitLimit,
 } from '../../../solana/compute-budget.ts'
-import { CCTParamsInvalidError, CCTTxFailedError } from '../../errors.ts'
+import { CCTParamsInvalidError, CCTTxFailedError, CCTTxNotConfirmedError } from '../../errors.ts'
 import {
   type PoolGroupPackItem,
   SOLANA_MAX_TRACE_ENTRIES,
@@ -350,9 +350,16 @@ describe('executePoolGroupTransactions', () => {
 
   type Net = {
     /** What a send of token `t` does: land, land but the transport fails, or never land. */
-    send: (t: string, attempt: number) => 'ok' | 'lost-after-landing' | 'lost' | 'failed-on-chain'
+    send: (
+      t: string,
+      attempt: number,
+    ) => 'ok' | 'lost-after-landing' | 'lost' | 'failed-on-chain' | 'confirm-lost' | 'late'
     /** Simulations refused, by token. */
     refuse?: string
+    /** Every status poll throws. */
+    pollFails?: boolean
+    /** Polls a `'late'` send takes to land. */
+    latePolls?: number
   }
   /** A cluster: signatures that landed, a block height that passes expiry once polled twice. */
   function cluster(net: Net) {
@@ -360,6 +367,8 @@ describe('executePoolGroupTransactions', () => {
     const sends: string[] = []
     const attempts = new Map<string, number>()
     let height = 100
+    const late = new Map<string, number>()
+    let polls = 0
     const conn = {
       simulateTransaction: async (t: VersionedTransaction) => ({
         context: { slot: 1 },
@@ -385,35 +394,69 @@ describe('executePoolGroupTransactions', () => {
         sends.push(t)
         const sig = bs58.encode(VersionedTransactionOf(raw).signatures[0]!)
         const what = net.send(t, n)
-        if (what === 'ok' || what === 'lost-after-landing' || what === 'failed-on-chain')
+        if (what === 'late') late.set(sig, net.latePolls ?? 3)
+        if (
+          what === 'ok' ||
+          what === 'lost-after-landing' ||
+          what === 'failed-on-chain' ||
+          what === 'confirm-lost'
+        )
           landed.set(sig, {
             err: what === 'failed-on-chain' ? { InstructionError: [0, { Custom: 7 }] } : null,
           })
         if (what === 'lost' || what === 'lost-after-landing') throw new Error('socket hang up')
         return sig
       },
-      confirmTransaction: async ({ signature }: { signature: string }) => ({
-        context: { slot: 1 },
-        value: { err: landed.get(signature)?.err ?? null },
-      }),
-      getBlockHeight: async () => (height += 30),
-      getSignatureStatuses: async (sigs: string[]) => ({
-        context: { slot: 1 },
-        value: sigs.map((s) =>
-          landed.has(s)
-            ? {
-                slot: 1,
-                confirmations: 1,
-                err: landed.get(s)!.err,
-                confirmationStatus: 'confirmed',
-              }
-            : null,
-        ),
-      }),
+      confirmTransaction: async ({ signature }: { signature: string }) => {
+        if (late.has(signature) || net.send(tokenOfSig.get(signature) ?? '', 1) === 'confirm-lost')
+          throw new Error('confirmation socket closed')
+        return { context: { slot: 1 }, value: { err: landed.get(signature)?.err ?? null } }
+      },
+      // a late signature keeps the height under expiry until it lands
+      getBlockHeight: async () => (late.size ? height : (height += 30)),
+      getSignatureStatuses: async (sigs: string[]) => {
+        polls++
+        if (net.pollFails) throw new Error('status RPC unavailable')
+        for (const [sig, left] of late)
+          if (left <= 1) {
+            late.delete(sig)
+            landed.set(sig, { err: null })
+          } else late.set(sig, left - 1)
+        return statuses(sigs)
+      },
     }
-    return { chain: { connection: conn as unknown as Connection, logger: silent }, sends, landed }
+    const tokenOfSig = new Map<string, string>()
+    const send = conn.sendRawTransaction
+    conn.sendRawTransaction = async (raw: Buffer) => {
+      tokenOfSig.set(bs58.encode(VersionedTransactionOf(raw).signatures[0]!), tokenOf(raw))
+      return send(raw)
+    }
+    const statuses = (sigs: string[]) => ({
+      context: { slot: 1 },
+      value: sigs.map((s) =>
+        landed.has(s)
+          ? {
+              slot: 1,
+              confirmations: 1,
+              err: landed.get(s)!.err,
+              confirmationStatus: 'confirmed',
+            }
+          : null,
+      ),
+    })
+    return {
+      chain: { connection: conn as unknown as Connection, logger: silent },
+      sends,
+      landed,
+      polls: () => polls,
+    }
   }
-  const run = (net: Net, done = new Set<string>(), tokens = ['a', 'b', 'c']) => {
+  const run = (
+    net: Net,
+    done = new Set<string>(),
+    tokens = ['a', 'b', 'c'],
+    pollTimeoutMs?: number,
+  ) => {
     const c = cluster(net)
     let builds = 0
     const result = executePoolGroupTransactions({
@@ -421,6 +464,7 @@ describe('executePoolGroupTransactions', () => {
       chain: c.chain,
       wallet,
       pollMs: 0,
+      ...(pollTimeoutMs !== undefined && { pollTimeoutMs }),
       build: async () => {
         builds++
         // chain state: what landed is done
@@ -489,6 +533,92 @@ describe('executePoolGroupTransactions', () => {
         build: async () => ({ transactions: [tx(['a']), other] }),
       }),
       /transaction 1 also needs/,
+    )
+    assert.deepEqual(c.sends, [])
+  })
+
+  it('a confirmation that fails in transport is resolved by the status, never resent', async () => {
+    const { result, c, builds } = run({ send: (t) => (t === 'b' ? 'confirm-lost' : 'ok') })
+    const r = await result
+    assert.equal(builds(), 1)
+    assert.deepEqual(c.sends, ['a', 'b', 'c'])
+    assert.equal(r.transactions.length, 3)
+  })
+
+  it('a transaction that lands only after several polls is counted, never rebuilt', async () => {
+    const { result, c, builds } = run({ send: (t) => (t === 'b' ? 'late' : 'ok'), latePolls: 4 })
+    const r = await result
+    assert.equal(builds(), 1)
+    assert.ok(c.polls() >= 4)
+    assert.deepEqual(c.sends, ['a', 'b', 'c'])
+    assert.deepEqual(
+      r.transactions.map((t) => t.tokenAddresses[0]),
+      ['a', 'b', 'c'],
+    )
+  })
+
+  it('a poll that keeps failing stops the write as not confirmed, with what landed and the pending signature', async () => {
+    const { result, c, builds } = run(
+      { send: (t) => (t === 'b' ? 'lost' : 'ok'), pollFails: true },
+      new Set(),
+      ['a', 'b', 'c'],
+      20,
+    )
+    await assert.rejects(result, (e: unknown) => {
+      assert.ok(e instanceof CCTTxNotConfirmedError)
+      assert.equal((e.context.committedHashes as string[]).length, 1)
+      assert.equal(typeof e.context.pendingSignature, 'string')
+      assert.match(String((e.cause as Error).message), /status RPC unavailable/)
+      return true
+    })
+    assert.equal(builds(), 1)
+    assert.deepEqual(c.sends, ['a', 'b'])
+  })
+
+  it('a wallet that replaces the blockhash is confirmed against its own blockhash', async () => {
+    const c = cluster({ send: () => 'ok' })
+    const replaced = PublicKey_default()
+    const reblock = {
+      ...wallet,
+      signTransaction: async <T>(t: T) => {
+        ;(t as VersionedTransaction).message.recentBlockhash = replaced
+        ;(t as VersionedTransaction).sign([signer])
+        return t
+      },
+    }
+    const conn = c.chain.connection as unknown as Record<string, (...a: unknown[]) => unknown>
+    const confirm = conn.confirmTransaction!
+    const seen: unknown[] = []
+    conn.confirmTransaction = (arg: unknown, ...rest: unknown[]) => {
+      seen.push((arg as { blockhash: string }).blockhash)
+      return confirm(arg, ...rest)
+    }
+    await executePoolGroupTransactions({
+      operation: 'test',
+      chain: c.chain,
+      wallet: reblock,
+      pollMs: 0,
+      build: async () => ({ transactions: [tx(['a'])] }),
+    })
+    assert.deepEqual(seen, [replaced])
+  })
+
+  it('refuses a durable nonce before the first send', async () => {
+    const c = cluster({ send: () => 'ok' })
+    const withNonce = tx(['n'])
+    withNonce.durableNonce = {
+      nonceAccount: PublicKey_default(),
+      nonceAuthority: signer.publicKey.toBase58(),
+    }
+    await assert.rejects(
+      executePoolGroupTransactions({
+        operation: 'test',
+        chain: c.chain,
+        wallet,
+        pollMs: 0,
+        build: async () => ({ transactions: [tx(['a']), withNonce] }),
+      }),
+      (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'durableNonces',
     )
     assert.deepEqual(c.sends, [])
   })

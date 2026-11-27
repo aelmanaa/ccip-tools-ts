@@ -40,7 +40,7 @@ import {
   simulateTransaction,
 } from '../../../solana/utils.ts'
 import type { WithLogger } from '../../../types.ts'
-import { CCTParamsInvalidError, CCTTxFailedError } from '../../errors.ts'
+import { CCTParamsInvalidError, CCTTxFailedError, CCTTxNotConfirmedError } from '../../errors.ts'
 import type { SolanaDurableNonce } from '../serialize.ts'
 import { createCCTSubmitError } from '../submit.ts'
 import type {
@@ -577,6 +577,18 @@ export function hasComputeBudget(instructions: readonly TransactionInstruction[]
 
 /** How often the runner polls a signature whose send or confirmation failed in transport. */
 const SIGNATURE_POLL_MS = 2_000
+/**
+ * How long the runner polls one signature at most: the blockhash lifetime (150 blocks, about 60-90 s)
+ * plus a margin for a lagging node. Past it the signature's fate is still unknown, so the write stops
+ * with `CCTTxNotConfirmedError` instead of rebuilding.
+ */
+const SIGNATURE_POLL_TIMEOUT_MS = 150_000
+/**
+ * Consecutive "absent past expiry" reads needed before a signature counts as never landed. Behind a
+ * load balancer the height and the status may come from different nodes; a lagging status node
+ * could miss a landed signature once, rarely twice in a row.
+ */
+const ABSENT_READS_FOR_EXPIRY = 2
 
 /** Input of {@link executePoolGroupTransactions}. @internal */
 export type ExecutePoolGroupInput = {
@@ -589,12 +601,16 @@ export type ExecutePoolGroupInput = {
   /**
    * Builds the remaining transactions from current chain state: items already done must not be in
    * it. Called again only after a transaction is known not to have landed (its blockhash expired).
+   * It must read at `confirmed` commitment or later from an up-to-date node: a read that lags a
+   * transaction the runner counted as landed would build that transaction again.
    */
   build: () => Promise<PoolGroupUnsignedResult>
   /** Rebuilds allowed after transactions that expired unlanded; defaults to 3. */
   maxRebuilds?: number
   /** Poll interval while a signature's fate is unknown; defaults to 2 s (tests set 0). */
   pollMs?: number
+  /** Longest poll of one signature, in ms; defaults to 150 s (the blockhash lifetime plus a margin). */
+  pollTimeoutMs?: number
 }
 
 /** What became of one sent transaction. */
@@ -602,27 +618,61 @@ type SendOutcome = { landed: true; hash: string } | { landed: false; reason: str
 
 /**
  * Whether a signature landed, after a send or confirmation that failed in transport: polls
- * `getSignatureStatuses` (with history) until the signature is found, or the block height passes
- * the blockhash's `lastValidBlockHeight` with it still absent (then it can never land).
+ * `getSignatureStatuses` (with history) until the signature is found at `confirmed` or later, or
+ * the block height passes the blockhash's `lastValidBlockHeight` with the signature still absent on
+ * {@link ABSENT_READS_FOR_EXPIRY} consecutive reads (then it can never land). Height and status are
+ * read through the same connection; behind a load balancer they may still come from different
+ * nodes, which the consecutive reads guard against. A failing read is retried until `timeoutMs`.
  * @returns the status's `err` (`null`: success) when found, `undefined` when expired unlanded
+ * @throws the last read error, or a timeout error, when the fate is still unknown at `timeoutMs`
  */
 async function resolveSignature(
   connection: Connection,
   signature: string,
   lastValidBlockHeight: number,
-  pollMs: number,
+  { pollMs, timeoutMs }: { pollMs: number; timeoutMs: number },
 ): Promise<{ err: unknown } | undefined> {
+  const deadline = Date.now() + timeoutMs
+  let absentPastExpiry = 0
+  let lastError: unknown
   for (;;) {
-    // read the height first: a signature absent at a height past expiry can no longer land
-    const height = await connection.getBlockHeight('confirmed')
-    const { value } = await connection.getSignatureStatuses([signature], {
-      searchTransactionHistory: true,
-    })
-    const status = value[0]
-    if (status && status.confirmationStatus !== 'processed') return { err: status.err ?? null }
-    if (!status && height > lastValidBlockHeight) return undefined
+    try {
+      // read the height first: a signature absent at a height past expiry can no longer land
+      const height = await connection.getBlockHeight('confirmed')
+      const { value } = await connection.getSignatureStatuses([signature], {
+        searchTransactionHistory: true,
+      })
+      const status = value[0]
+      if (status && status.confirmationStatus !== 'processed') return { err: status.err ?? null }
+      absentPastExpiry = !status && height > lastValidBlockHeight ? absentPastExpiry + 1 : 0
+      if (absentPastExpiry >= ABSENT_READS_FOR_EXPIRY) return undefined
+      lastError = undefined
+    } catch (err) {
+      lastError = err
+    }
+    if (Date.now() >= deadline)
+      throw (
+        lastError ?? new Error(`the status of ${signature} is still unknown after ${timeoutMs} ms`)
+      )
     await new Promise((resolve) => setTimeout(resolve, pollMs))
   }
+}
+
+/**
+ * The blockhash a signed transaction carries and its expiry height. A wallet may replace the
+ * runner's blockhash when it signs; its own is then at most as new as the latest one, so the latest
+ * one's `lastValidBlockHeight`, read after signing, bounds the expiry from above (safe: the runner
+ * waits longer, never shorter).
+ */
+async function signedBlockhash(
+  connection: Connection,
+  signed: VersionedTransaction,
+  built: { blockhash: string; lastValidBlockHeight: number },
+): Promise<{ blockhash: string; lastValidBlockHeight: number }> {
+  const blockhash = signed.message.recentBlockhash
+  if (blockhash === built.blockhash) return built
+  const latest = await connection.getLatestBlockhash('confirmed')
+  return { blockhash, lastValidBlockHeight: latest.lastValidBlockHeight }
 }
 
 /**
@@ -630,13 +680,21 @@ async function resolveSignature(
  * sends and confirms one transaction. A transport failure of the send or the confirmation is
  * resolved by the signature's status, never by a resend.
  * @throws {@link CCTTxFailedError} if the simulation refuses it, or it landed and failed on chain
+ * @throws {@link CCTTxNotConfirmedError} if its status cannot be read before the poll timeout
+ *   (`context.pendingSignature`; it may still land, so the write is not rebuilt)
  */
 async function sendOne(
   input: ExecutePoolGroupInput,
   tx: PoolGroupUnsignedTx,
   committedHashes: readonly string[],
 ): Promise<SendOutcome> {
-  const { operation, chain, wallet, pollMs = SIGNATURE_POLL_MS } = input
+  const {
+    operation,
+    chain,
+    wallet,
+    pollMs = SIGNATURE_POLL_MS,
+    pollTimeoutMs = SIGNATURE_POLL_TIMEOUT_MS,
+  } = input
   const { connection } = chain
   const context = { committedHashes: [...committedHashes] }
   try {
@@ -650,14 +708,15 @@ async function sendOne(
     // refused before sending: nothing landed, the write fails as it would on chain
     throw createCCTSubmitError(operation, err, context)
   }
-  const blockhash = await connection.getLatestBlockhash('confirmed')
+  const built = await connection.getLatestBlockhash('confirmed')
   const message = new TransactionMessage({
     payerKey: wallet.publicKey,
-    recentBlockhash: blockhash.blockhash,
+    recentBlockhash: built.blockhash,
     instructions: tx.instructions,
   }).compileToV0Message(tx.lookupTables ?? [])
   const signed = await wallet.signTransaction(new VersionedTransaction(message))
   const signature = bs58.encode(signed.signatures[0]!)
+  const blockhash = await signedBlockhash(connection, signed, built)
   let err: unknown
   try {
     // the simulation above ran the preflight; a duplicate send of these bytes is the same tx
@@ -671,12 +730,19 @@ async function sendOne(
     chain.logger?.warn(
       `${operation}: the send of ${signature} failed in transport (${transport instanceof Error ? transport.message : String(transport)}); waiting for its status`,
     )
-    const found = await resolveSignature(
-      connection,
-      signature,
-      blockhash.lastValidBlockHeight,
-      pollMs,
-    )
+    let found: { err: unknown } | undefined
+    try {
+      found = await resolveSignature(connection, signature, blockhash.lastValidBlockHeight, {
+        pollMs,
+        timeoutMs: pollTimeoutMs,
+      })
+    } catch (poll) {
+      // its fate is unknown: it may still land, so neither a resend nor a rebuild is safe
+      throw new CCTTxNotConfirmedError(operation, signature, {
+        cause: poll instanceof Error ? poll : undefined,
+        context: { ...context, pendingSignature: signature },
+      })
+    }
     if (!found) return { landed: false, reason: `${signature} expired without landing` }
     err = found.err
   }
@@ -728,6 +794,9 @@ function assertWalletSendable(
  *   wallet, or carries a durable nonce (checked before the first send of that build)
  * @throws {@link CCTTxFailedError} if a simulation refuses a transaction, a transaction failed on
  *   chain, or the rebuilds run out; `context.committedHashes` lists the transactions that landed
+ * @throws {@link CCTTxNotConfirmedError} if a transaction's status cannot be read before the poll
+ *   timeout: `context.pendingSignature` may still land, `context.committedHashes` landed; re-run the
+ *   op (it re-reads chain state) only once that signature is known to have landed or expired
  * @internal
  */
 export async function executePoolGroupTransactions(

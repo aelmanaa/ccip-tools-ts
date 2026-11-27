@@ -528,6 +528,9 @@ class SimulationFailedError extends SendTransactionError {
   }
 }
 
+/** The most compute units a transaction may request (`SetComputeUnitLimit`). */
+export const MAX_COMPUTE_UNIT_LIMIT = 1_400_000
+
 /**
  * Simulates a Solana transaction to estimate compute units.
  *
@@ -538,9 +541,6 @@ class SimulationFailedError extends SendTransactionError {
  * @param params - Simulation parameters including connection and payer.
  * @returns Simulation result with estimated compute units.
  */
-/** The most compute units a transaction may request (`SetComputeUnitLimit`). */
-export const MAX_COMPUTE_UNIT_LIMIT = 1_400_000
-
 export async function simulateTransaction(
   { connection, logger = console }: { connection: Connection } & WithLogger,
   {
