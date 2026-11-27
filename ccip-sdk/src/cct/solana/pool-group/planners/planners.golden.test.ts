@@ -15,6 +15,7 @@ import '../../../../index.ts'
 import { networkInfo } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { selectReady } from '../../../multi-token-pool-plan-engine.ts'
 import type {
   GetPoolGroupChainResult,
   GetPoolGroupLaneResult,
@@ -23,7 +24,6 @@ import type {
 } from '../types.ts'
 import type { PlannerContext } from './context.ts'
 import { type EnablementInputs, expandEnablementFrom, parseEnablement } from './enable-chain.ts'
-import { selectReady } from './engine.ts'
 import type { PlanState } from './flow-common.ts'
 import {
   type OnboardingInputs,

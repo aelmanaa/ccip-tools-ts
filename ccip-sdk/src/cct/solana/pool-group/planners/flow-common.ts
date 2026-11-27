@@ -10,6 +10,7 @@ import { PublicKey } from '@solana/web3.js'
 
 import type { ChainGetter } from '../../../../chain.ts'
 import { canonicalJson } from '../../../canonical.ts'
+import { type PlannedStepFields, stableChunks } from '../../../multi-token-pool-plan-engine.ts'
 import type {
   MultiTokenPoolLaneFinding,
   MultiTokenPoolPlanBlock,
@@ -54,7 +55,6 @@ import {
   specOf,
   stepId,
 } from './context.ts'
-import { type PlannedStepFields, stableChunks } from './engine.ts'
 
 /** Lanes per materialize, assign or sync step (the op packs them into as many transactions as fit). @internal */
 export const LANES_PER_STEP = 24

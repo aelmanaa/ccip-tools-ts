@@ -12,6 +12,12 @@ import type { ChainGetter } from '../../../../chain.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import type { UnsignedSolanaTx, Wallet } from '../../../../solana/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import {
+  type PlannedStepFields,
+  newRunId,
+  planStep,
+  resolveActor,
+} from '../../../multi-token-pool-plan-engine.ts'
 import type {
   MultiTokenPoolActors,
   MultiTokenPoolLaneFinding,
@@ -30,7 +36,6 @@ import type {
   PoolGroupUnsignedTx,
   SolanaTxBudget,
 } from '../write-types.ts'
-import { type PlannedStepFields, newRunId, planStep, resolveActor } from './engine.ts'
 
 /** The parsed context of one planner call. @internal */
 export type PlannerContext = {

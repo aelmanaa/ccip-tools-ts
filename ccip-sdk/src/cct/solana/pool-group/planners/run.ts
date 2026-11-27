@@ -8,6 +8,7 @@
  */
 
 import type { Wallet } from '../../../../solana/types.ts'
+import { evaluateExpansion, runSignedPlan } from '../../../multi-token-pool-plan-engine.ts'
 import type {
   MultiTokenPoolExecutedStep,
   MultiTokenPoolLaneFinding,
@@ -16,7 +17,6 @@ import type {
 import { refreshAccountState } from '../../operation.ts'
 import type { PoolGroupFollowUp } from '../write-types.ts'
 import type { Expansion, LandedStep, PlannerContext, StepSpec } from './context.ts'
-import { evaluateExpansion, runSignedPlan } from './engine.ts'
 import type {
   ExecutePoolGroupPlanResult,
   GeneratePoolGroupPlanResult,

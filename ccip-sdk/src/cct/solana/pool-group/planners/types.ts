@@ -9,6 +9,7 @@
 import type { TokenTransferFeeConfig } from '../../../../chain.ts'
 import type { FinalityAllowed } from '../../../../extra-args.ts'
 import type {
+  MultiTokenPoolChainRemoteToken,
   MultiTokenPoolLaneFinding,
   MultiTokenPoolLaneKey,
   MultiTokenPoolPlan,
@@ -16,6 +17,7 @@ import type {
   MultiTokenPoolPlanStep,
   MultiTokenPoolRateLimits,
   MultiTokenPoolRemotePool,
+  MultiTokenPoolRemoteToken,
   MultiTokenPoolSnapshot,
   PoolDataFormat,
 } from '../../../multi-token-pool.ts'
@@ -183,18 +185,6 @@ export type ExecutePoolGroupPlanResult<Name extends string> = PoolGroupRunIds & 
 
 // ─── Flat params (public) ────────────────────────────────────────────────────────────────────
 
-/**
- * Run options of the Solana planners. X1 moves `runId` into the shared `MultiTokenPoolPlanOptions`.
- */
-export type SolanaMultiTokenPoolPlannerRunOptions = {
-  /**
-   * The run this call belongs to: the `runId` a plan of this run returned. Omitted: a new run. Pause
-   * step ids carry it, so `landedStepIds` only lifts pauses this run set; pass both on every call of
-   * one run (also from enable to onboard), and discard both once the run completes.
-   */
-  runId?: string
-}
-
 /** Solana execution options of the shared planners. */
 export type SolanaMultiTokenPoolPlannerExecutionOptions = {
   /**
@@ -208,25 +198,11 @@ export type SolanaMultiTokenPoolPlannerExecutionOptions = {
   crankPayer?: string
 }
 
-/** A token's counterpart on one remote chain. */
-export type SolanaMultiTokenPoolRemoteToken = {
-  /** CCIP selector of the remote chain. */
-  remoteChainSelector: bigint
-  /** The counterpart token, in the remote chain's own format (`0x…` for EVM, base58 for Solana). */
-  remoteTokenAddress: string
-  /** Decimals of the token on the remote chain, not on this chain. */
-  remoteTokenDecimals: number
-}
+/** A token's counterpart on one remote chain (the shared type). */
+export type SolanaMultiTokenPoolRemoteToken = MultiTokenPoolRemoteToken
 
-/** A local token's counterpart on the chain being enabled. */
-export type SolanaMultiTokenPoolChainRemoteToken = {
-  /** The local mint; it must be admitted by `tokenAddresses`. */
-  tokenAddress: string
-  /** The counterpart token, in the remote chain's own format. */
-  remoteTokenAddress: string
-  /** Decimals of the token on the remote chain. */
-  remoteTokenDecimals: number
-}
+/** A local token's counterpart on the chain being enabled (the shared type). */
+export type SolanaMultiTokenPoolChainRemoteToken = MultiTokenPoolChainRemoteToken
 
 /** One chain `solana.create` adds, with its sections and the lane mode it starts in. */
 export type PoolGroupOnboardingCreateChain = {
@@ -294,7 +270,6 @@ export type SolanaMultiTokenPoolOnboardingToken = {
 
 /** Parameters of `onboardMultiTokenPoolTokens` (Solana pool group). */
 export type SolanaOnboardMultiTokenPoolTokensParams = MultiTokenPoolPlanOptions &
-  SolanaMultiTokenPoolPlannerRunOptions &
   PoolGroupProgramRef & {
     /**
      * The pool group. With `solana.create`, required on the plan and unsigned forms (any fresh
@@ -361,7 +336,6 @@ export type SolanaMultiTokenPoolRemoteChainConfig = {
 
 /** Parameters of `enableMultiTokenPoolChain` (Solana pool group). */
 export type SolanaEnableMultiTokenPoolChainParams = MultiTokenPoolPlanOptions &
-  SolanaMultiTokenPoolPlannerRunOptions &
   PoolGroupRef & {
     /**
      * Omitted: the values go to the pool group chain record only. Given (a policy id): also to the
@@ -415,7 +389,6 @@ export type ExecuteEnableMultiTokenPoolChainParams = SolanaEnableMultiTokenPoolC
 
 /** Parameters of `removeMultiTokenPoolToken` (Solana: the token leaves the pool group). Destructive. */
 export type SolanaRemoveMultiTokenPoolTokenParams = MultiTokenPoolPlanOptions &
-  SolanaMultiTokenPoolPlannerRunOptions &
   PoolGroupRef & {
     /** The mint that leaves (with `solana.tokenAddresses`, the first of them). */
     tokenAddress: string

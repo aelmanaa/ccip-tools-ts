@@ -15,6 +15,7 @@ import { PublicKey } from '@solana/web3.js'
 
 import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { stableChunks } from '../../../multi-token-pool-plan-engine.ts'
 import {
   type MultiTokenPoolLane,
   type MultiTokenPoolLaneKey,
@@ -48,7 +49,6 @@ import {
   stepId,
   toPlannerTx,
 } from './context.ts'
-import { stableChunks } from './engine.ts'
 import { membersAmong, opBase, opStep, poolOwnerSigner } from './flow-common.ts'
 import { MEMBERS_PER_STEP } from './onboard.ts'
 import type { GenerateRemoveMultiTokenPoolTokenParams, PoolGroupLeaveStepName } from './types.ts'

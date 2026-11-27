@@ -13,6 +13,11 @@ import { AddressLookupTableProgram, PublicKey } from '@solana/web3.js'
 import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
+  mergeBlocks,
+  stableChunks,
+  unpauseDecision,
+} from '../../../multi-token-pool-plan-engine.ts'
+import {
   type MultiTokenPoolLaneFinding,
   type MultiTokenPoolPlanBlock,
   type MultiTokenPoolRateLimits,
@@ -46,7 +51,6 @@ import {
   stepId,
   toPlannerTx,
 } from './context.ts'
-import { mergeBlocks, stableChunks, unpauseDecision } from './engine.ts'
 import {
   type LaneCheckInputs,
   type PlanState,

@@ -11,8 +11,6 @@ import '../../../../index.ts'
 import { networkInfo } from '../../../../networks.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import type { Expansion, PlannerContext, StepSpec } from './context.ts'
-import { parseEnablement } from './enable-chain.ts'
 import {
   planStep,
   resolveActor,
@@ -20,7 +18,9 @@ import {
   stableChunks,
   stepsConflict,
   unpauseDecision,
-} from './engine.ts'
+} from '../../../multi-token-pool-plan-engine.ts'
+import type { Expansion, PlannerContext, StepSpec } from './context.ts'
+import { parseEnablement } from './enable-chain.ts'
 import { memberRemoteTokensOf, parseOnboarding } from './onboard.ts'
 import { parseRemoval } from './remove-token.ts'
 import { evaluatePlan, executeFlow } from './run.ts'
