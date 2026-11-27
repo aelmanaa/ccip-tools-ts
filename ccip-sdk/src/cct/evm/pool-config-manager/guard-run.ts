@@ -63,6 +63,7 @@ import {
   multiTokenPoolChainLanes,
   multiTokenPoolDroppedPools,
   multiTokenPoolLaneTransitions,
+  multiTokenPoolMakesLive,
   multiTokenPoolPcmCheckedLanes,
   multiTokenPoolPcmLaneCheck,
   requiredMultiTokenPoolGuardFacts,
@@ -186,6 +187,8 @@ export async function runMultiTokenPoolGuards(
   // an unpause judges only the lanes it makes live: one still held by another pause or a stop
   // sends nothing, so it never blocks the recovery of the others
   const live = new Set(multiTokenPoolLaneTransitions(lanes).goingLive.map((l) => guardLaneKey(l)))
+  // derived from the projection, so every op and the snapshot re-check apply it alike
+  const makesLive = input.makesLive === true || multiTokenPoolMakesLive(lanes)
   const judged =
     scope === 'none'
       ? []
@@ -214,7 +217,7 @@ export async function runMultiTokenPoolGuards(
         ...(input.getChain && { getChain: input.getChain }),
         ...(input.remoteAttestations && { remoteAttestations: input.remoteAttestations }),
         now: BigInt(Math.floor(Date.now() / 1000)),
-        ...(input.makesLive && { makesLive: true }),
+        ...(makesLive && { makesLive: true }),
         ...(profiles.providers.size && { providerOverrides: profiles.providers }),
         storedProviders: new Map(
           before.tokens.flatMap((t) =>

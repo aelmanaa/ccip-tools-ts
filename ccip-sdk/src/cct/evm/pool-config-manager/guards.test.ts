@@ -31,6 +31,7 @@ import {
   multiTokenPoolChainLanes,
   multiTokenPoolDroppedPools,
   multiTokenPoolLaneTransitions,
+  multiTokenPoolMakesLive,
   multiTokenPoolPcmCheckedLanes,
   multiTokenPoolPcmLaneCheck,
   validateMultiTokenPoolGuardOptions,
@@ -433,6 +434,39 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     assert.equal(isLaneStopped(before, 'outbound'), true) // the NO_REMOTE_POOL waiver applies before
     assert.equal(isLaneStopped(after, 'outbound'), false) // FTF sends flow after
     assert.equal(loosensRateLimits(before, after), true) // so the write is judged
+  })
+
+  it('derives "makes lanes live" from the projection: a lifted stop or an unpause, not an opening (R1 m4, R3 m3)', () => {
+    const stop = { enabled: true, capacity: 0n, rate: 0n } as const
+    const rateLimits = (outbound: RateLimitConfig): MultiTokenPoolRecordChange => ({
+      kind: 'setInline',
+      type: 'rateLimit',
+      record: {
+        tokenAddress: T1,
+        remoteChainSelector: C1,
+        rateLimits: {
+          outbound,
+          inbound: on(true),
+          fastFinalityOutbound: on(false),
+          fastFinalityInbound: on(false),
+        },
+      },
+    })
+    const key = { tokenAddress: T1, remoteChainSelector: C1 }
+    const lanesOf = (before: MultiTokenPoolRecordState, after: MultiTokenPoolRecordState) => {
+      const [b] = resolveMultiTokenPoolLanes(before, [key])
+      const [a] = resolveMultiTokenPoolLanes(after, [key])
+      return [{ before: b!, after: a! }]
+    }
+    const stopped = applyMultiTokenPoolRecordChanges(empty(), [...inlineLane(T1), rateLimits(stop)])
+    // a bucket or record write that lifts the stop makes the lane live: no attestations
+    const lifted = applyMultiTokenPoolRecordChanges(stopped, [rateLimits(on(true))])
+    assert.equal(multiTokenPoolMakesLive(lanesOf(stopped, lifted)), true)
+    // stopping, or a write that keeps it stopped, does not
+    assert.equal(multiTokenPoolMakesLive(lanesOf(lifted, stopped)), false)
+    // opening a new lane does not (its remote side may be attested)
+    const opened = applyMultiTokenPoolRecordChanges(empty(), inlineLane(T1))
+    assert.equal(multiTokenPoolMakesLive(lanesOf(empty(), opened)), false)
   })
 
   it('reports a lifted stop as going live (stops are part of liveness)', () => {

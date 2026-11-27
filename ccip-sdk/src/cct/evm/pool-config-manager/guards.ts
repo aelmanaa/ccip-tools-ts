@@ -917,3 +917,17 @@ export function multiTokenPoolPcmCheckedLanes(
   }
   return [...keys.values()]
 }
+
+/**
+ * Whether a write makes an existing lane live again in some direction: an unpause, a lift, or a
+ * bucket or record write that lifts a stop. Such a write always reads the remote side (no
+ * attestations). A newly opened lane does not count: attesting the remote side of a lane being
+ * opened toward a family the SDK cannot read is what attestations are for.
+ * @internal
+ */
+export function multiTokenPoolMakesLive(
+  lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
+): boolean {
+  const live = new Set(multiTokenPoolLaneTransitions(lanes).goingLive.map((l) => guardLaneKey(l)))
+  return lanes.some((l) => l.before.connection.hasConnection && live.has(guardLaneKey(l.after)))
+}
