@@ -152,6 +152,8 @@ export type StackState = {
    * call; a write with no entry succeeds.
    */
   writes?: Record<string, (args: readonly unknown[], to: string, from: string | undefined) => void>
+  /** Addresses with no code at any block (EOAs). */
+  eoas?: string[]
 }
 
 /** A consistent default stack: one owner everywhere, PCM authorized on every store. */
@@ -370,9 +372,10 @@ export function stackChain(state: StackState = defaultStack()) {
       if (!holder) return word(ZeroAddress)
       return word(slot === 1n ? holder.owner : holder.pendingOwner)
     },
-    getCode: async (address: string, block: number) => {
+    getCode: async (address: string, block?: number) => {
       calls.push(`getCode:${getAddress(address)}:${block}`)
-      return block >= state.deploymentBlock ? '0x60806040' : '0x'
+      if (state.eoas?.includes(getAddress(address))) return '0x'
+      return (block ?? state.latestBlock) >= state.deploymentBlock ? '0x60806040' : '0x'
     },
     getBlockNumber: async () => {
       calls.push('getBlockNumber')

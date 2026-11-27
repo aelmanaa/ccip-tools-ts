@@ -185,11 +185,29 @@ export async function assertPolicyEngineContract(
   chain: EVMChain,
   policyEngine: string,
 ): Promise<void> {
-  if ((await chain.provider.getCode(policyEngine)) !== '0x') return
+  await assertDeployedContract(operation, param, chain, policyEngine, 'policy engine')
+}
+
+/**
+ * Refuses an address with no deployed code, where the hooks need a contract (a policy engine, an
+ * external blocklist): the call would bind an EOA and every check through it would revert.
+ * @param what - The contract's role, for the reason (`'policy engine'`, `'blocklist'`).
+ * @throws {@link CCTParamsInvalidError} if the address has no deployed code.
+ * @internal
+ */
+export async function assertDeployedContract(
+  operation: string,
+  param: string,
+  chain: EVMChain,
+  address: string,
+  what: string,
+  blockTag?: number,
+): Promise<void> {
+  if ((await chain.provider.getCode(address, blockTag)) !== '0x') return
   throw new CCTParamsInvalidError(
     operation,
     param,
-    'must be a deployed policy engine contract, not an EOA',
+    `must be a deployed ${what} contract, not an EOA`,
   )
 }
 
