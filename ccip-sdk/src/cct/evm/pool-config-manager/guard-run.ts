@@ -9,7 +9,7 @@
  * @packageDocumentation
  */
 
-import { type Result, getAddress, keccak256, toBeHex } from 'ethers'
+import { getAddress, keccak256, toBeHex } from 'ethers'
 
 import type { ChainGetter } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
@@ -36,6 +36,7 @@ import {
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
+  policyStoresOf,
   poolConfigManagerContract,
 } from '../multi-token-pool/contracts.ts'
 import { decodeError, simulateEVMTx } from '../simulate.ts'
@@ -61,12 +62,14 @@ import {
   multiTokenPoolChainLanes,
   multiTokenPoolDroppedPools,
   multiTokenPoolLaneTransitions,
+  multiTokenPoolPcmCheckedLanes,
   multiTokenPoolPcmLaneCheck,
   requiredMultiTokenPoolGuardFacts,
 } from './guards.ts'
 import { decodeLaneRecordLevels } from './operations/get-multi-token-pool-lane-record-levels.ts'
 import { decodeLaneVerification } from './operations/get-multi-token-pool-lane-verifications.ts'
 import {
+  type MultiTokenPoolRecordChange,
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
   applyMultiTokenPoolRecordChanges,
@@ -326,7 +329,7 @@ export async function runMultiTokenPoolGuards(
   // without a sender, the PCM's own post-write lane checks join the bundle after the store calls
   const bundle = sender
     ? writes
-    : [...writes, ...pcmLaneChecks(poolConfigManager, version, data, staticConfig)]
+    : [...writes, ...pcmLaneChecks(poolConfigManager, version, decoded.changes, staticConfig)]
   const projectionVerified = writes.length
     ? await crossCheckWithSimulateV1(chain, input, bundle, afterLanes, blockNumber)
     : false
@@ -628,13 +631,7 @@ function forwardedStoreCalls(
       },
     ]
   const selector = data.slice(0, 10)
-  return (
-    [
-      ['ConnectionPolicyStore', stores.connectionPolicyStore],
-      ['FeePolicyStore', stores.feePolicyStore],
-      ['SecurityPolicyStore', stores.securityPolicyStore],
-    ] as const
-  )
+  return policyStoresOf(stores)
     .filter(([type]) => getMultiTokenPoolInterface(type, version).getFunction(selector) !== null)
     .map(([, to]) => ({ from, to, data }))
 }
@@ -672,38 +669,24 @@ const PAUSE_STORE_CALLS: Record<
 function pcmLaneChecks(
   poolConfigManager: string,
   version: MultiTokenPoolVersion,
-  data: string,
+  changes: readonly MultiTokenPoolRecordChange[],
   stores: Pick<
     PoolConfigManagerStaticConfig,
     'connectionPolicyStore' | 'feePolicyStore' | 'securityPolicyStore'
   >,
 ): WriteCall[] {
-  const tx = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).parseTransaction({
-    data,
-  })
-  const lanes =
-    tx?.name === 'applyInlineConnectionConfigUpdates' || tx?.name === 'applySubsetTokenUpdates'
-      ? (tx.args[1] as Result).map(
-          (r) => resultToObject(r) as { localToken: string; remoteChainSelector: bigint },
-        )
-      : []
   const from = getAddress(poolConfigManager)
-  return lanes.flatMap(({ localToken, remoteChainSelector }) =>
-    (
-      [
-        ['ConnectionPolicyStore', stores.connectionPolicyStore],
-        ['FeePolicyStore', stores.feePolicyStore],
-        ['SecurityPolicyStore', stores.securityPolicyStore],
-      ] as const
-    ).map(([type, to]) => ({
-      from,
-      to,
-      data: getMultiTokenPoolInterface(type, version).encodeFunctionData('checkLaneRecords', [
-        localToken,
-        remoteChainSelector,
-      ]),
-      label: `the PoolConfigManager's post-write lane check of ${getAddress(localToken)} → ${remoteChainSelector} (${type})`,
-    })),
+  return multiTokenPoolPcmCheckedLanes(changes).flatMap(
+    ({ tokenAddress: localToken, remoteChainSelector }) =>
+      policyStoresOf(stores).map(([type, to]) => ({
+        from,
+        to,
+        data: getMultiTokenPoolInterface(type, version).encodeFunctionData('checkLaneRecords', [
+          localToken,
+          remoteChainSelector,
+        ]),
+        label: `the PoolConfigManager's post-write lane check of ${getAddress(localToken)} → ${remoteChainSelector} (${type})`,
+      })),
   )
 }
 

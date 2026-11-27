@@ -85,6 +85,20 @@ export const POLICY_STORE_TYPES = [
 /** A policy store contract type. */
 export type PolicyStoreType = (typeof POLICY_STORE_TYPES)[number]
 
+/** The PCM's static-config field holding each store's address. @internal */
+const POLICY_STORE_FIELDS = {
+  ConnectionPolicyStore: 'connectionPolicyStore',
+  FeePolicyStore: 'feePolicyStore',
+  SecurityPolicyStore: 'securityPolicyStore',
+} as const satisfies Record<PolicyStoreType, string>
+
+/** The three stores behind a PCM, in {@link POLICY_STORE_TYPES} order, as `[type, address]`. @internal */
+export function policyStoresOf(
+  stores: Record<(typeof POLICY_STORE_FIELDS)[PolicyStoreType], string>,
+): (readonly [PolicyStoreType, string])[] {
+  return POLICY_STORE_TYPES.map((type) => [type, stores[POLICY_STORE_FIELDS[type]]] as const)
+}
+
 /** The two hook contract types a security record can name. */
 export const MULTI_TOKEN_POOL_HOOKS_TYPES = [
   'MultiTokenPoolHooks',
