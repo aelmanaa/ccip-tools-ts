@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import { execSync } from 'node:child_process'
 import { Console } from 'node:console'
+import { type AddressInfo, createServer } from 'node:net'
 import { after, before, describe, it } from 'node:test'
 
 import type { JsonRpcProvider } from 'ethers'
@@ -16,7 +17,7 @@ import { Instance } from 'prool'
 
 import { reachableRpcEndpoint, rpcEndpoint } from '../../../../../../scripts/test-endpoints.ts'
 import type { ChainGetter } from '../../../../chain.ts'
-import { forkProvider } from '../../../../evm/fork-retry.test.helpers.ts'
+import { forkProvider, withForkRetry } from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { EVMTokenManager } from '../../index.ts'
@@ -25,6 +26,15 @@ import {
   LiftMultiTokenPoolLaneStops,
   StopMultiTokenPoolLanes,
 } from './stop-multi-token-pool-lanes.ts'
+
+/** A port the OS reports free right now (the fork binds it immediately after). */
+async function freePort(): Promise<number> {
+  const server = createServer()
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as AddressInfo
+  await new Promise((resolve) => server.close(resolve))
+  return port
+}
 
 function isAnvilAvailable(): boolean {
   try {
@@ -61,7 +71,8 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
       {
         forkUrl: rpcEndpoint('RPC_SEPOLIA'),
         chainId: 11155111,
-        port: 8661,
+        // a free port: several sessions run these forks on one machine, a fixed one collides
+        port: await freePort(),
         retries: 8,
         timeout: 15_000,
         forkRetryBackoff: 1_000,
@@ -92,11 +103,9 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
 
   const signer = (account: string) => (chain.provider as JsonRpcProvider).getSigner(account)
   const laneView = async (poolAddress: string, tokenAddress: string) => {
-    const { sources, stopped, rateLimits } = await cct.getMultiTokenPoolLane({
-      poolAddress,
-      tokenAddress,
-      remoteChainSelector: FUJI,
-    })
+    const { sources, stopped, rateLimits } = await withForkRetry(() =>
+      cct.getMultiTokenPoolLane({ poolAddress, tokenAddress, remoteChainSelector: FUJI }),
+    )
     return { sources: sources.rateLimit, stopped, rateLimits }
   }
   const mined = async (write: Promise<{ hash: string }>) =>
@@ -184,5 +193,43 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
         e instanceof CCTParamsInvalidError &&
         (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
     )
+  })
+
+  it('lifts only the direction asked for: a lane stopped both ways keeps its other stop', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: POLICY_TOKEN, remoteChainSelector: FUJI }]
+    const before = await laneView(CORE_POOL, POLICY_TOKEN)
+    const wallet = await signer(CORE_CONFIG)
+    const target = { poolAddress: CORE_POOL, lanes, wallet, getChain }
+    await mined(stop.execute(chain, { ...target, direction: 'both' }))
+    // from chain state, removing the inline record would lift inbound too: refused
+    await assert.rejects(
+      lift.generate(chain, { poolAddress: CORE_POOL, lanes, direction: 'outbound', getChain }),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        e.context.param === 'lanes[0]' &&
+        /also stopped inbound/.test(e.message),
+    )
+    // with rateLimits, only outbound is taken from them: inbound stays stopped
+    const open = { enabled: true, capacity: 10n ** 21n, rate: 10n ** 18n } as const
+    await mined(
+      lift.execute(chain, {
+        ...target,
+        direction: 'outbound',
+        rateLimits: {
+          outbound: open,
+          inbound: open,
+          fastFinalityOutbound: { enabled: false },
+          fastFinalityInbound: { enabled: false },
+        },
+      }),
+    )
+    const half = await laneView(CORE_POOL, POLICY_TOKEN)
+    assert.deepEqual(half.stopped, { outbound: false, inbound: true })
+    // then inbound, from chain state: back on the policy, as before
+    await mined(lift.execute(chain, { ...target, direction: 'inbound' }))
+    const after = await laneView(CORE_POOL, POLICY_TOKEN)
+    assert.equal(after.sources.kind, 'policy')
+    assert.deepEqual(after, before)
   })
 })

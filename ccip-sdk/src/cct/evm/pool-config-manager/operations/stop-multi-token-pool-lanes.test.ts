@@ -3,13 +3,17 @@ import { describe, it } from 'node:test'
 
 import { getAddress } from 'ethers'
 
+import { canonicalHash } from '../../../canonical.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import type { MultiTokenPoolRateLimits } from '../../../multi-token-pool.ts'
+import {
+  type MultiTokenPoolRateLimits,
+  type MultiTokenPoolSnapshot,
+  isLaneStopped,
+} from '../../../multi-token-pool.ts'
 import { POOL, stackChain } from '../../multi-token-pool/stack.test.helpers.ts'
 import {
   LiftMultiTokenPoolLaneStops,
   StopMultiTokenPoolLanes,
-  isStoppedIn,
   stoppedRateLimits,
 } from './stop-multi-token-pool-lanes.ts'
 
@@ -25,16 +29,27 @@ const limits: MultiTokenPoolRateLimits = {
   fastFinalityInbound: on,
 }
 
+/** A snapshot with its real hash, as an op builds it. */
+const snapshot = (operation: string, expected: Record<string, unknown>): MultiTokenPoolSnapshot => {
+  const fields = { observedAt: 1n, operation, expected, guardInputsHash: '0x', calldataHash: '0x' }
+  return { ...fields, hash: canonicalHash(fields) }
+}
+/** The paths a stop seals for the lane: no prior inline record, and the buckets it copied. */
+const covering = {
+  [`inline.rateLimit.${T}:${FUJI}`]: null,
+  [`lanes.rateLimit.${T}:${FUJI}`]: limits,
+}
+
 describe('lane stops (cct/evm pool-config-manager)', () => {
   it('stops both buckets of a direction and keeps the others', () => {
     const out = stoppedRateLimits(limits, 'outbound')
     assert.deepEqual(out.outbound, { enabled: true, capacity: 0n, rate: 0n })
     assert.deepEqual(out.fastFinalityOutbound, { enabled: true, capacity: 0n, rate: 0n })
     assert.deepEqual([out.inbound, out.fastFinalityInbound], [on, on])
-    assert.equal(isStoppedIn(out, 'outbound'), true)
-    assert.equal(isStoppedIn(out, 'inbound'), false)
-    assert.equal(isStoppedIn(out, 'both'), false)
-    assert.equal(isStoppedIn(stoppedRateLimits(limits, 'both'), 'inbound'), true)
+    assert.equal(isLaneStopped(out, 'outbound'), true)
+    assert.equal(isLaneStopped(out, 'inbound'), false)
+    assert.equal(isLaneStopped(out, 'both'), false)
+    assert.equal(isLaneStopped(stoppedRateLimits(limits, 'both'), 'inbound'), true)
     // the input is not mutated
     assert.deepEqual(limits.outbound, on)
   })
@@ -52,23 +67,38 @@ describe('lane stops (cct/evm pool-config-manager)', () => {
         { ...base, lanes: [lane, { ...lane, tokenAddress: T.toLowerCase() }] },
         'lanes[1]',
       ],
+      // not a snapshot at all, an edited one, another op's, one that does not cover the lane
+      [new LiftMultiTokenPoolLaneStops(), { ...base, restore: { operation: 'x' } }, 'restore'],
       [
         new LiftMultiTokenPoolLaneStops(),
-        { ...base, restore: { operation: 'pauseMultiTokenPoolTokens', expected: {} } },
+        { ...base, restore: { ...snapshot('stopMultiTokenPoolLanes', covering), hash: '0x00' } },
+        'restore.hash',
+      ],
+      [
+        new LiftMultiTokenPoolLaneStops(),
+        { ...base, restore: snapshot('pauseMultiTokenPoolTokens', covering) },
         'restore',
       ],
       [
         new LiftMultiTokenPoolLaneStops(),
-        { ...base, restore: { operation: 'stopMultiTokenPoolLanes', expected: {} } },
+        { ...base, restore: snapshot('stopMultiTokenPoolLanes', {}) },
         'lanes[0]',
       ],
+      // the buckets read back out of a snapshot are parsed
       [
         new LiftMultiTokenPoolLaneStops(),
         {
           ...base,
-          restore: { operation: 'stopMultiTokenPoolLanes', expected: {} },
-          rateLimits: limits,
+          restore: snapshot('stopMultiTokenPoolLanes', {
+            ...covering,
+            [`lanes.rateLimit.${T}:${FUJI}`]: { outbound: 'lots' },
+          }),
         },
+        `restore.lanes.rateLimit.${T}:${FUJI}.outbound`,
+      ],
+      [
+        new LiftMultiTokenPoolLaneStops(),
+        { ...base, restore: snapshot('stopMultiTokenPoolLanes', covering), rateLimits: limits },
         'rateLimits',
       ],
     ] as const)
