@@ -18,6 +18,7 @@ import type {
 } from '../../multi-token-pool.ts'
 import type { RateLimitConfig } from '../../rate-limit.ts'
 import type { MultiTokenPoolLaneKey, PolicyName } from './contracts.ts'
+import { TRANSFER_DIRECTIONS } from './projection.ts'
 
 /** One policy record: a policy and a remote chain (`0n` = the policy's default record). */
 export type PolicyRecordKey = {
@@ -95,8 +96,7 @@ export type PauseDirection = TransferDirection | 'both'
 
 /** `ConnectionPolicyStore.PauseDirection` on chain: `Outbound` 0, `Inbound` 1, `Both` 2. @internal */
 export const PAUSE_DIRECTIONS = [
-  'outbound',
-  'inbound',
+  ...TRANSFER_DIRECTIONS,
   'both',
 ] as const satisfies readonly PauseDirection[]
 

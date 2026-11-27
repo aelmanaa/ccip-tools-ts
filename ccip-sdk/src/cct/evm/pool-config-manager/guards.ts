@@ -50,6 +50,7 @@ import {
   type MultiTokenPoolRecordChange,
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
+  TRANSFER_DIRECTIONS,
   laneKey,
   multiTokenPoolRecordChains,
   multiTokenPoolSupportedChains,
@@ -686,11 +687,8 @@ export function multiTokenPoolChainLanes(
   return resolveMultiTokenPoolLanes(state, lanes)
 }
 
-/** Both transfer directions, outbound first. @internal */
-export const TRANSFER_DIRECTIONS = [
-  'outbound',
-  'inbound',
-] as const satisfies readonly TransferDirection[]
+// one owner (projection.ts); re-exported for the importers of the guard
+export { TRANSFER_DIRECTIONS }
 const DIRECTIONS = TRANSFER_DIRECTIONS
 
 /**

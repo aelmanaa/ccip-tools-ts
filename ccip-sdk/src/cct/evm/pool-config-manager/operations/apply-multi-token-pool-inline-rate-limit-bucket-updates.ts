@@ -24,7 +24,7 @@ import {
   validateOneOf,
   validateUint64,
 } from '../../validate.ts'
-import { MESSAGE_DIRECTIONS, inlineRecordOf, laneKey, rateLimitBucketOf } from '../projection.ts'
+import { TRANSFER_DIRECTIONS, inlineRecordOf, laneKey, rateLimitBucketOf } from '../projection.ts'
 import type { InlineRateLimitBucketUpdate } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -61,7 +61,7 @@ export class ApplyMultiTokenPoolInlineRateLimitBucketUpdates extends PoolConfigM
       const at = `updates[${i}]`
       validateAddress(this.name, `${at}.tokenAddress`, u.tokenAddress)
       validateUint64(this.name, `${at}.remoteChainSelector`, u.remoteChainSelector)
-      validateOneOf(this.name, `${at}.direction`, u.direction, MESSAGE_DIRECTIONS)
+      validateOneOf(this.name, `${at}.direction`, u.direction, TRANSFER_DIRECTIONS)
       validateBoolean(this.name, `${at}.fastFinality`, u.fastFinality)
       return { ...u, config: parseRateLimitConfig(this.name, `${at}.config`, u.config, null) }
     })
@@ -107,7 +107,7 @@ export class ApplyMultiTokenPoolInlineRateLimitBucketUpdates extends PoolConfigM
         updates.map((u) => ({
           localToken: getAddress(u.tokenAddress),
           remoteChainSelector: u.remoteChainSelector,
-          direction: MESSAGE_DIRECTIONS.indexOf(u.direction),
+          direction: TRANSFER_DIRECTIONS.indexOf(u.direction),
           fastFinality: u.fastFinality,
           config: toAbiRateLimitConfig({
             enabled: u.config.enabled,

@@ -164,8 +164,12 @@ export function rateLimitBucketOf(
   return direction
 }
 
-/** `IPoolV2.MessageDirection` on chain: `Outbound` is 0, `Inbound` is 1. @internal */
-export const MESSAGE_DIRECTIONS = [
+/**
+ * Both transfer directions, outbound first: also `IPoolV2.MessageDirection` on chain (`Outbound` is 0,
+ * `Inbound` is 1), so an index here is the ABI value.
+ * @internal
+ */
+export const TRANSFER_DIRECTIONS = [
   'outbound',
   'inbound',
 ] as const satisfies readonly TransferDirection[]

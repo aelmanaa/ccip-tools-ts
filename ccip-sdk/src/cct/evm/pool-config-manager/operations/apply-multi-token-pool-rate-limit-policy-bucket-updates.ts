@@ -16,7 +16,7 @@ import {
 import { parseRateLimitConfig, toAbiRateLimitConfig } from '../../token-pool/rate-limit.ts'
 import { assertUnique, validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
 import { encodePolicyName, validatePolicyRecordKey } from '../contracts.ts'
-import { MESSAGE_DIRECTIONS, policyKey, rateLimitBucketOf, recordKey } from '../projection.ts'
+import { TRANSFER_DIRECTIONS, policyKey, rateLimitBucketOf, recordKey } from '../projection.ts'
 import type { RateLimitPolicyBucketUpdate } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -52,7 +52,7 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
     const updates = Array.from(params.updates, (u, i) => {
       const at = `updates[${i}]`
       validatePolicyRecordKey(this.name, at, u)
-      validateOneOf(this.name, `${at}.direction`, u.direction, MESSAGE_DIRECTIONS)
+      validateOneOf(this.name, `${at}.direction`, u.direction, TRANSFER_DIRECTIONS)
       validateBoolean(this.name, `${at}.fastFinality`, u.fastFinality)
       return { ...u, config: parseRateLimitConfig(this.name, `${at}.config`, u.config, null) }
     })
@@ -103,7 +103,7 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
         updates.map((u) => ({
           policyName: encodePolicyName(this.name, 'policyName', u.policyName),
           remoteChainSelector: u.remoteChainSelector,
-          direction: MESSAGE_DIRECTIONS.indexOf(u.direction),
+          direction: TRANSFER_DIRECTIONS.indexOf(u.direction),
           fastFinality: u.fastFinality,
           config: toAbiRateLimitConfig({
             enabled: u.config.enabled,
