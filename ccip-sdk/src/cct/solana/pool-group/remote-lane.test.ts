@@ -389,6 +389,26 @@ describe('readSolanaRemoteLaneFacts', () => {
     )
     // no lane back: not read
     assert.equal(await length(lane()), undefined)
+    // memoized per chain, Router and source: a second call does no new OffRamp discovery
+    let discoveries = 0
+    const counting = async () => {
+      discoveries++
+      return [OFFRAMP.toBase58()]
+    }
+    const chain = chainWith(base(), { offRamps: counting })
+    for (let i = 0; i < 3; i++) await readSolanaRemoteLaneFacts(chain, query())
+    assert.equal(discoveries, 1)
+    // a failed discovery is not kept
+    let attempts = 0
+    const flaky = async () => {
+      if (attempts++ === 0) throw new Error('fetch failed: 503')
+      return [OFFRAMP.toBase58()]
+    }
+    const retry = chainWith(base(), { offRamps: flaky })
+    await assert.rejects(readSolanaRemoteLaneFacts(retry, query()), /503/)
+    const again = await readSolanaRemoteLaneFacts(retry, query())
+    assert.equal(again.status === 'known' && again.sourcePoolAddressLength, 20)
+    assert.equal(attempts, 2)
     // transport errors propagate
     await assert.rejects(
       readSolanaRemoteLaneFacts(chainWith(base(), { failOn: SOURCE_CHAIN }), query()),

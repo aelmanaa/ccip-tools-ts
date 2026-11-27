@@ -12,6 +12,7 @@
 import { Buffer } from 'buffer'
 
 import { type AccountInfo, PublicKey } from '@solana/web3.js'
+import { memoize } from 'micro-memoize'
 
 import type { Chain, RateLimiterState } from '../../../chain.ts'
 import {
@@ -245,7 +246,7 @@ function decodeLegacyAddressLength(data: Buffer): number | undefined {
  * The `legacy_address_length` the Router's 2.x OffRamps configure for `source` (the existing
  * `getOffRampsForRouter` discovery, then each OffRamp's `source_chain_state`).
  */
-async function readSourcePoolAddressLength(
+async function discoverSourcePoolAddressLength(
   solana: SolanaChain,
   router: PublicKey,
   source: bigint,
@@ -278,6 +279,32 @@ async function readSourcePoolAddressLength(
     if (length !== undefined) lengths.add(length)
   }
   return lengths.size === 1 ? [...lengths][0]! : null
+}
+
+const sourcePoolAddressLengths = new WeakMap<
+  SolanaChain,
+  (router: string, source: bigint) => Promise<number | null>
+>()
+
+/**
+ * {@link discoverSourcePoolAddressLength}, memoized per chain, Router and EVM source selector: the
+ * OffRamp discovery scans the Router's markers and their transactions (about 13 s on a public
+ * Devnet RPC). Only successful reads are kept (a rejected promise is dropped), for 10 minutes.
+ */
+function readSourcePoolAddressLength(
+  solana: SolanaChain,
+  router: PublicKey,
+  source: bigint,
+): Promise<number | null> {
+  let cached = sourcePoolAddressLengths.get(solana)
+  if (!cached) {
+    cached = memoize(
+      (r: string, s: bigint) => discoverSourcePoolAddressLength(solana, new PublicKey(r), s),
+      { async: true, maxArgs: 2, maxSize: 50, expires: 600e3 },
+    )
+    sourcePoolAddressLengths.set(solana, cached)
+  }
+  return cached(router.toBase58(), source)
 }
 
 /** The registry entry of `mint`: its pool and interface, with transport errors propagating. */
