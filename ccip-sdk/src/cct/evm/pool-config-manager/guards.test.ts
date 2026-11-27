@@ -490,7 +490,8 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     assert.equal(loosensRateLimits(null, null), false)
     // the scope is read from the calldata's function
     assert.equal(laneJudgingOf('pauseTokens'), 'none')
-    assert.equal(laneJudgingOf('unpauseTokens'), 'all')
+    for (const fn of ['unpauseTokens', 'unpauseChains', 'unpauseGlobally'])
+      assert.equal(laneJudgingOf(fn), 'goingLive')
     assert.equal(laneJudgingOf('applyRateLimitPolicyBucketUpdates'), 'loosened')
     assert.equal(laneJudgingOf('applyInlineRateLimitBucketUpdates'), 'loosened')
     assert.equal(laneJudgingOf('applyInlineRateLimitConfigUpdates'), 'loosened')

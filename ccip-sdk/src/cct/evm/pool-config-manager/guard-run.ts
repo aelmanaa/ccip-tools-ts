@@ -182,12 +182,17 @@ export async function runMultiTokenPoolGuards(
   // wrong with the lanes it stops (it is still gated, simulated and sealed); a bucket write judges
   // only the lanes it loosens
   const scope = laneJudgingOf(decoded.functionName)
+  // an unpause judges only the lanes it makes live: one still held by another pause or a stop
+  // sends nothing, so it never blocks the recovery of the others
+  const live = new Set(multiTokenPoolLaneTransitions(lanes).goingLive.map((l) => guardLaneKey(l)))
   const judged =
     scope === 'none'
       ? []
       : scope === 'loosened'
         ? lanes.filter((l) => loosensRateLimits(l.before.rateLimits, l.after.rateLimits))
-        : lanes
+        : scope === 'goingLive'
+          ? lanes.filter((l) => live.has(guardLaneKey(l.after)))
+          : lanes
   const judge = judged.length > 0
   const facts: MultiTokenPoolGuardFacts = !judge
     ? {
@@ -820,14 +825,19 @@ async function crossCheckWithSimulateV1(
  *   `'loosened'`, only the lanes whose rate limits it loosens (a stop lifted, a bucket disabled, more
  *   capacity or rate, a lane left with no limit), so a write that only tightens or stops a lane is
  *   never refused by a lane rule and an operator can always clamp a broken lane;
+ * - an unpause: `'goingLive'`, only the lanes it makes live in some direction (a lane still held by
+ *   another pause or a stop is not judged, so it cannot block the recovery of the rest);
  * - any other write: `'all'`, every lane it changes.
  * @internal
  */
-export function laneJudgingOf(functionName: string): 'all' | 'loosened' | 'none' {
+export function laneJudgingOf(functionName: string): 'all' | 'loosened' | 'goingLive' | 'none' {
   return LANE_JUDGING[functionName] ?? 'all'
 }
 
-const LANE_JUDGING: Readonly<Record<string, 'loosened' | 'none'>> = {
+const LANE_JUDGING: Readonly<Record<string, 'loosened' | 'goingLive' | 'none'>> = {
+  [multiTokenPoolFunctionOf('unpauseMultiTokenPoolGlobally')]: 'goingLive',
+  [multiTokenPoolFunctionOf('unpauseMultiTokenPoolTokens')]: 'goingLive',
+  [multiTokenPoolFunctionOf('unpauseMultiTokenPoolChains')]: 'goingLive',
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolGlobally')]: 'none',
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolTokens')]: 'none',
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolChains')]: 'none',

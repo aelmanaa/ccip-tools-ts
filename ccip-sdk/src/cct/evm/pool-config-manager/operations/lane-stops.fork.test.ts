@@ -315,4 +315,39 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     assert.equal(check.ok, false)
     assert.ok(check.changed.some((c) => c.path === 'guardInputsHash'))
   })
+
+  it('an unpause judges only the lanes it makes live (R3 M2: token-paused lanes never block it)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const wallet = await signer(V5V9_OPERATOR)
+    // every registered token, some with lanes to Solana Devnet (which getChain cannot read)
+    const { tokens } = await withForkRetry(() =>
+      cct.getMultiTokenPoolConfiguredTokens({ poolAddress: V5V9_POOL }),
+    )
+    const v5 = { poolAddress: V5V9_POOL, wallet }
+    await mined(cct.pauseMultiTokenPoolTokens({ ...v5, tokenAddresses: tokens, direction: 'both' }))
+    await mined(cct.pauseMultiTokenPoolGlobally(v5))
+    // every lane stays held by its token pause, so no lane goes live: nothing is judged, and a
+    // getChain that serves only Fuji (no Devnet) is enough; before the fix, a Devnet lane that stays
+    // paused refused it
+    const unsigned = await cct.generateUnsignedUnpauseMultiTokenPoolGlobally({
+      poolAddress: V5V9_POOL,
+      sender: V5V9_OPERATOR,
+      getChain,
+    })
+    assert.deepEqual(unsigned.goingLive, [])
+    // lifting a broken lane's own token pause makes it live: judged, refused
+    await mined(cct.unpauseMultiTokenPoolGlobally({ ...v5, getChain }))
+    await assert.rejects(
+      cct.generateUnsignedUnpauseMultiTokenPoolTokens({
+        poolAddress: V5V9_POOL,
+        sender: V5V9_OPERATOR,
+        tokenAddresses: [V5V9_FUJI_TOKEN],
+        direction: 'outbound',
+        getChain,
+      }),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
+    )
+  })
 })
