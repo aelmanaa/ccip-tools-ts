@@ -6,45 +6,42 @@
  */
 
 import type { EVMChain } from '../../../evm/index.ts'
-import type { UnsignedEVMTx } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import type {
   MultiTokenPoolExpectedSnapshot,
-  MultiTokenPoolLaneFinding,
   MultiTokenPoolRemoteCheckOptions,
-  MultiTokenPoolSnapshot,
 } from '../../multi-token-pool.ts'
-import type { TransactionResult } from '../../operation.ts'
 import {
   type MultiTokenPoolVersion,
   type PoolConfigManagerRole,
   assertPoolConfigManagerRole,
 } from '../multi-token-pool/contracts.ts'
-import { type EVMExecuteParams, EVMOperation } from '../operation.ts'
-import { submit } from '../submit.ts'
 import {
-  type MultiTokenPoolLaneDirections,
-  type MultiTokenPoolLaneKey,
+  type MultiTokenPoolUnsignedTx,
+  MultiTokenPoolWriteOperation,
+} from '../multi-token-pool/write-operation.ts'
+import {
   type PoolConfigManagerTarget,
   readPoolConfigManagerStaticConfig,
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from './contracts.ts'
-import {
-  type MultiTokenPoolSimulatedFrom,
-  runMultiTokenPoolGuards,
-  snapshotChanges,
-} from './guard-run.ts'
+import { runMultiTokenPoolGuards } from './guard-run.ts'
 import {
   type MultiTokenPoolRecordStateRead,
   readMultiTokenPoolRecordState,
 } from './record-state.ts'
 
 export type { MultiTokenPoolSimulatedFrom } from './guard-run.ts'
+export type {
+  MultiTokenPoolFollowUp,
+  MultiTokenPoolTransactionResult,
+  MultiTokenPoolUnsignedTx,
+  MultiTokenPoolWriteImpact,
+} from '../multi-token-pool/write-operation.ts'
 export type { MultiTokenPoolGuardOptions } from './guards.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
-import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
-import { latestBlock, noteMinedBlock } from '../mined-block.ts'
+import { latestBlock } from '../mined-block.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
 /** Common fields of every PoolConfigManager write. */
@@ -65,43 +62,6 @@ export type PoolConfigManagerWriteParams = PoolConfigManagerTarget & {
 export type MultiTokenPoolWriteGuards = MultiTokenPoolRemoteCheckOptions &
   MultiTokenPoolExpectedSnapshot &
   MultiTokenPoolGuardOptions
-
-/**
- * Unsigned output of a multi-token pool write: one transaction, plus its impact on the lanes for a
- * reviewer of a multisig proposal. The new values are in the calldata; `snapshot.expected` holds the
- * values the write replaces, as they were when it was built.
- */
-export type MultiTokenPoolUnsignedTx = UnsignedEVMTx & {
-  /**
-   * `true` when the projection was cross-checked with `eth_simulateV1` (the write plus the lane views,
-   * one block); `false` when the RPC lacks it, or the write was not simulated.
-   */
-  projectionVerified: boolean
-  /**
-   * Who the write was simulated from: `'sender'` (the PCM role gate included), or, with no `sender`,
-   * `'pcm'`: each store call the PCM forwards, from the PCM, so every store-level revert is caught
-   * but the PCM role gate is not checked. `'none'`: a write that reaches no store, not simulated.
-   */
-  simulatedFrom: MultiTokenPoolSimulatedFrom
-  /** Lanes the write changes. */
-  affectedLanes: MultiTokenPoolLaneKey[]
-  /** Lanes live in a direction after the write that were not before, with those directions. */
-  goingLive: MultiTokenPoolLaneDirections[]
-  /** Warning findings on the state after the write (error findings refuse the write). */
-  warnings: MultiTokenPoolLaneFinding[]
-  /** The state the write was judged on: pass it back as `expectedSnapshot`, or to `checkMultiTokenPoolSnapshot`. */
-  snapshot: MultiTokenPoolSnapshot
-}
-
-/** Result of a signed multi-token pool write. */
-export type MultiTokenPoolTransactionResult = TransactionResult &
-  Pick<
-    MultiTokenPoolUnsignedTx,
-    'projectionVerified' | 'simulatedFrom' | 'affectedLanes' | 'goingLive' | 'warnings' | 'snapshot'
-  > & {
-    /** The block the write mined in; every later MTTP read or build on the provider is at or after it. */
-    blockNumber: number
-  }
 
 /**
  * A resolved PCM, the block a write is built at, and the PCM's stored records read once at that
@@ -136,7 +96,7 @@ export type PoolConfigManagerWrite = {
 export abstract class PoolConfigManagerWriteOperation<
   P extends PoolConfigManagerWriteParams & MultiTokenPoolWriteGuards,
   Parsed extends P = P,
-> extends EVMOperation<P, Parsed, MultiTokenPoolUnsignedTx> {
+> extends MultiTokenPoolWriteOperation<P, Parsed> {
   /** The roles the PCM accepts for this write (any one suffices). */
   protected abstract gate(params: Parsed): readonly PoolConfigManagerRole[]
 
@@ -146,11 +106,6 @@ export abstract class PoolConfigManagerWriteOperation<
     params: Parsed,
     ctx: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> | PoolConfigManagerWrite
-
-  /** Context every refusal of this op carries (e.g. a merged op's kind). */
-  protected errorContext(_params: Parsed): Record<string, unknown> | undefined {
-    return undefined
-  }
 
   /**
    * Whether the write changes stored records. A role, admin or withdrawal write changes none: its
@@ -181,15 +136,6 @@ export abstract class PoolConfigManagerWriteOperation<
       ctx.blockTag,
       this.errorContext(params),
     )
-  }
-
-  /**
-   * A refusal of this op at `param`, carrying its {@link errorContext} (pass `params` when the op's
-   * context depends on them).
-   */
-  protected refuse(param: string, reason: string, params?: Parsed): CCTParamsInvalidError {
-    const context = this.errorContext(params as Parsed)
-    return new CCTParamsInvalidError(this.name, param, reason, context && { context })
   }
 
   /** Validates the target, sender and guard options; subclasses validate their own fields after it. */
@@ -250,46 +196,6 @@ export abstract class PoolConfigManagerWriteOperation<
       warnings: result.warnings,
       snapshot: result.snapshot,
     }
-  }
-
-  /**
-   * Builds, then rebuilds with the first build's snapshot right before sending (any movement in
-   * between throws `CCTStateChangedError`), then signs and submits.
-   */
-  override async execute(
-    chain: EVMChain,
-    params: EVMExecuteParams<P>,
-  ): Promise<MultiTokenPoolTransactionResult> {
-    const sender = await this.resolveWalletSender(params.wallet, params.sender)
-    const first = await this.generate(chain, { ...params, sender })
-    // the rebuild right before sending: with the caller's snapshot it must hold; without one, any
-    // move since the first build (the state-derived calldata included) is a state change
-    const unsigned = await this.generate(
-      chain,
-      params.expectedSnapshot
-        ? { ...params, sender }
-        : { ...params, sender, expectedSnapshot: undefined },
-    )
-    if (!params.expectedSnapshot) {
-      const changed = snapshotChanges(first.snapshot, unsigned.snapshot)
-      if (first.snapshot.calldataHash !== unsigned.snapshot.calldataHash)
-        changed.unshift({
-          path: 'calldataHash',
-          expected: first.snapshot.calldataHash,
-          actual: unsigned.snapshot.calldataHash,
-        })
-      if (changed.length)
-        throw new CCTStateChangedError(
-          this.name,
-          `${changed.map((c) => c.path).join(', ')} moved between the build and the send`,
-          { context: { ...this.errorContext(params as unknown as Parsed), changed } },
-        )
-    }
-    const { response, receipt } = await submit(chain, params.wallet, unsigned, this.name)
-    // the next read or build on this provider never pins before this write (ethers' block cache)
-    noteMinedBlock(chain, receipt.blockNumber)
-    const { family: _, transactions: __, ...impact } = unsigned
-    return { hash: response.hash, blockNumber: receipt.blockNumber, ...impact }
   }
 }
 
