@@ -198,8 +198,8 @@ export const POOL_GROUP_SNAPSHOT_RECHECKS: ReadonlyMap<
     snapshot: MultiTokenPoolSnapshot,
     transactions: readonly PoolGroupProposalTx[],
   ) => Promise<MultiTokenPoolSnapshotCheck>
-> = new Map(
-  (
+> = new Map([
+  ...(
     [
       'createPoolGroup',
       'setPoolGroupRoles',
@@ -207,15 +207,72 @@ export const POOL_GROUP_SNAPSHOT_RECHECKS: ReadonlyMap<
       'transferPoolGroupOwnership',
       'acceptPoolGroupOwnership',
     ] as const
-  ).map((name) => [
-    name,
-    async (chain, ref, snapshot, transactions) => {
-      // loaded on first use: the write ops import this module's neighbours
-      const { POOL_GROUP_LIFECYCLE_OPERATIONS } = await import('./lifecycle.ts')
-      return POOL_GROUP_LIFECYCLE_OPERATIONS[name].recheck(chain, ref, snapshot, transactions)
-    },
-  ]),
-)
+  ).map(
+    (name) =>
+      [
+        name,
+        async (
+          chain: SolanaChain,
+          ref: ParsedPoolGroupRef,
+          snapshot: MultiTokenPoolSnapshot,
+          transactions: readonly PoolGroupProposalTx[],
+        ) => {
+          // loaded on first use: the write ops import this module's neighbours
+          const { POOL_GROUP_LIFECYCLE_OPERATIONS } = await import('./lifecycle.ts')
+          return POOL_GROUP_LIFECYCLE_OPERATIONS[name].recheck(chain, ref, snapshot, transactions)
+        },
+      ] as const,
+  ),
+  ...(
+    [
+      'addPoolGroupChain',
+      'removePoolGroupChain',
+      'setPoolGroupChainPolicy',
+      'inheritPoolGroupDefault',
+      'setPoolGroupDefault',
+    ] as const
+  ).map(
+    (name) =>
+      [
+        name,
+        async (
+          chain: SolanaChain,
+          ref: ParsedPoolGroupRef,
+          snapshot: MultiTokenPoolSnapshot,
+          transactions: readonly PoolGroupProposalTx[],
+        ) => {
+          const { POOL_GROUP_CHAIN_OPERATIONS } = await import('./chains.ts')
+          return POOL_GROUP_CHAIN_OPERATIONS[name].recheck(chain, ref, snapshot, transactions)
+        },
+      ] as const,
+  ),
+  ...(
+    [
+      'createPoolGroupPolicy',
+      'closePoolGroupPolicy',
+      'initPoolGroupPolicyChainRecord',
+      'closePoolGroupPolicyChainRecord',
+      'editPoolGroupPolicyChainRecord',
+      'setPoolGroupPolicyDefault',
+      'assignPoolGroupLanePolicies',
+      'resetPoolGroupLaneBuckets',
+    ] as const
+  ).map(
+    (name) =>
+      [
+        name,
+        async (
+          chain: SolanaChain,
+          ref: ParsedPoolGroupRef,
+          snapshot: MultiTokenPoolSnapshot,
+          transactions: readonly PoolGroupProposalTx[],
+        ) => {
+          const { POOL_GROUP_POLICY_OPERATIONS } = await import('./policies.ts')
+          return POOL_GROUP_POLICY_OPERATIONS[name].recheck(chain, ref, snapshot, transactions)
+        },
+      ] as const,
+  ),
+])
 
 /**
  * The proposal's transactions: `transaction`, or `transactions` (every transaction of the write, in

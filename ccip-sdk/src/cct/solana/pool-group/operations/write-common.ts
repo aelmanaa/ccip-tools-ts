@@ -214,4 +214,15 @@ export function requireClassWriter(
 }
 
 /** `PolicyClass` as the IDL enum value. @internal */
-export const idlPolicyClass = (cls: PoolGroupPolicyClass) => ({ [cls]: {} })
+export function idlPolicyClass(cls: PoolGroupPolicyClass) {
+  switch (cls) {
+    case 'connection':
+      return { connection: {} }
+    case 'fee':
+      return { fee: {} }
+    case 'rateLimit':
+      return { rateLimit: {} }
+    case 'security':
+      return { security: {} }
+  }
+}

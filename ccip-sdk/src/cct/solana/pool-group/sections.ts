@@ -10,8 +10,9 @@
 
 import { Buffer } from 'buffer'
 
-import { BN } from '@coral-xyz/anchor'
+import { type IdlTypes, BN } from '@coral-xyz/anchor'
 
+import type { BurnmintTokenPoolGroups } from '../../../solana/idl/pool-groups-7558722/BURN_MINT_TOKEN_POOL.ts'
 import { getAddressBytes } from '../../../utils.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import type { RateLimitConfig } from '../../rate-limit.ts'
@@ -56,10 +57,13 @@ export type ParsedSectionUpdate =
       buckets: Partial<Record<(typeof BUCKETS)[number][1], RateLimitConfig>>
     }
 
+/** The `PolicySection` instruction argument. @internal */
+export type IdlPolicySection = IdlTypes<BurnmintTokenPoolGroups>['PolicySection']
+
 /** A section to write: an update to merge, or the exact section a proposal carries. @internal */
 export type SectionWrite =
   | { kind: 'update'; update: ParsedSectionUpdate }
-  | { kind: 'exact'; policyClass: WritableClass; idl: Record<string, unknown> }
+  | { kind: 'exact'; policyClass: WritableClass; idl: IdlPolicySection }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -226,7 +230,7 @@ export function sectionArg(
   write: SectionWrite,
   current: IdlPolicySections,
   maxBpsFee: number,
-): Record<string, unknown> {
+): IdlPolicySection {
   if (write.kind === 'exact') return write.idl
   const u = write.update
   if (u.policyClass === 'connection') {
@@ -281,6 +285,12 @@ export function sectionArg(
   }
 }
 
+/** Whether a decoded instruction argument is a `PolicySection` (one variant key, decoded by the IDL coder). */
+const isPolicySection = (v: unknown): v is IdlPolicySection =>
+  isRecord(v) &&
+  Object.keys(v).length === 1 &&
+  ['connection', 'fee', 'rateLimit', 'security'].includes(Object.keys(v)[0]!)
+
 /** The class of a section write. @internal */
 export const sectionClass = (write: SectionWrite): WritableClass =>
   write.kind === 'exact' ? write.policyClass : write.update.policyClass
@@ -291,9 +301,9 @@ export const sectionClass = (write: SectionWrite): WritableClass =>
  * @internal
  */
 export function exactSection(operation: string, decoded: unknown): SectionWrite {
-  if (isRecord(decoded))
+  if (isPolicySection(decoded))
     for (const cls of WRITABLE_CLASSES)
-      if (decoded[cls] !== undefined) return { kind: 'exact', policyClass: cls, idl: decoded }
+      if (cls in decoded) return { kind: 'exact', policyClass: cls, idl: decoded }
   throw new CCTParamsInvalidError(
     operation,
     'transactions',
