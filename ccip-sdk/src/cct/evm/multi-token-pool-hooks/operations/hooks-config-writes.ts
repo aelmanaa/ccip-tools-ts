@@ -57,7 +57,7 @@ export type SetMultiTokenPoolHooksPolicyEngineParams = {
    * New engine, or `ZeroAddress` to detach. A non-zero engine must have deployed code and implement
    * `attach()` / `detach()`.
    */
-  policyEngine: string
+  newPolicyEngine: string
   /**
    * Use `setPolicyEngineAllowFailedDetach`: the new engine is attached even when the old one's
    * `detach()` reverts (the recovery from a broken engine). Defaults to `false`.
@@ -141,7 +141,7 @@ export class SetMultiTokenPoolHooksPolicyEngine extends MultiTokenPoolOwnedWrite
     params: SetMultiTokenPoolHooksPolicyEngineParams,
   ): SetMultiTokenPoolHooksPolicyEngineParams {
     super.prepare(params)
-    validateAddress(this.name, 'policyEngine', params.policyEngine)
+    validateAddress(this.name, 'newPolicyEngine', params.newPolicyEngine)
     return params
   }
 
@@ -151,9 +151,9 @@ export class SetMultiTokenPoolHooksPolicyEngine extends MultiTokenPoolOwnedWrite
     params: SetMultiTokenPoolHooksPolicyEngineParams,
     ctx: MultiTokenPoolOwnedWriteContext,
   ): Promise<string> {
-    const engine = getAddress(params.policyEngine)
+    const engine = getAddress(params.newPolicyEngine)
     if (engine !== ZeroAddress)
-      await assertPolicyEngineContract(this.name, 'policyEngine', chain, engine)
+      await assertPolicyEngineContract(this.name, 'newPolicyEngine', chain, engine)
     return ownedTargetInterface(ctx).encodeFunctionData(
       params.allowFailedDetach
         ? 'setPolicyEngineAllowFailedDetach'

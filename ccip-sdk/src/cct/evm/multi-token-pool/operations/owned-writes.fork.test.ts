@@ -277,15 +277,18 @@ describe('MTTP owner-gated writes (Sepolia and Fuji forks)', { skip, timeout: 90
     it('refuses a policy engine that is an EOA, or that reverts attach() when simulated', async () => {
       const op = new SetMultiTokenPoolHooksPolicyEngine()
       const eoa = await refusal(() =>
-        op.generate(fuji.chain, { hooks: FUJI_HOOKS, policyEngine: Wallet.createRandom().address }),
+        op.generate(fuji.chain, {
+          hooks: FUJI_HOOKS,
+          newPolicyEngine: Wallet.createRandom().address,
+        }),
       )
-      assert.ok(eoa instanceof CCTParamsInvalidError && eoa.context.param === 'policyEngine')
+      assert.ok(eoa instanceof CCTParamsInvalidError && eoa.context.param === 'newPolicyEngine')
       // a contract without attach(): the write reverts from the owner, named before any signature
       const { owner } = await withForkRetry(() => readOwnership(fuji.chain, FUJI_HOOKS))
       const reverted = await refusal(() =>
         op.generate(fuji.chain, {
           hooks: FUJI_HOOKS,
-          policyEngine: FUJI_BLOCKLIST_HOOKS,
+          newPolicyEngine: FUJI_BLOCKLIST_HOOKS,
           sender: owner,
         }),
       )

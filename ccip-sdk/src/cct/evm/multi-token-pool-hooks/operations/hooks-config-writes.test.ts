@@ -117,11 +117,15 @@ describe('MTTP hook settings', () => {
     it('encodes setPolicyEngine, or setPolicyEngineAllowFailedDetach on request', async () => {
       const { chain } = hooksStack()
       assert.equal(
-        decode(await op.generate(chain, { hooks: HOOKS, policyEngine: ENGINE })).name,
+        decode(await op.generate(chain, { hooks: HOOKS, newPolicyEngine: ENGINE })).name,
         'setPolicyEngine',
       )
       const detach = decode(
-        await op.generate(chain, { hooks: HOOKS, policyEngine: ENGINE, allowFailedDetach: true }),
+        await op.generate(chain, {
+          hooks: HOOKS,
+          newPolicyEngine: ENGINE,
+          allowFailedDetach: true,
+        }),
       )
       assert.equal(detach.name, 'setPolicyEngineAllowFailedDetach')
       assert.equal(detach.args[0], ENGINE)
@@ -130,16 +134,16 @@ describe('MTTP hook settings', () => {
     it("detaches with ZeroAddress; refuses an EOA engine with main's message", async () => {
       const { chain } = hooksStack()
       assert.equal(
-        decode(await op.generate(chain, { hooks: HOOKS, policyEngine: ZeroAddress })).args[0],
+        decode(await op.generate(chain, { hooks: HOOKS, newPolicyEngine: ZeroAddress })).args[0],
         ZeroAddress,
       )
       await assert.rejects(
-        op.generate(chain, { hooks: HOOKS, policyEngine: EOA }),
-        refusedAt('policyEngine', /^must be a deployed policy engine contract, not an EOA$/),
+        op.generate(chain, { hooks: HOOKS, newPolicyEngine: EOA }),
+        refusedAt('newPolicyEngine', /^must be a deployed policy engine contract, not an EOA$/),
       )
       await assert.rejects(
-        op.generate(chain, { hooks: HOOKS, policyEngine: '0x12' }),
-        refusedAt('policyEngine'),
+        op.generate(chain, { hooks: HOOKS, newPolicyEngine: '0x12' }),
+        refusedAt('newPolicyEngine'),
       )
     })
   })
