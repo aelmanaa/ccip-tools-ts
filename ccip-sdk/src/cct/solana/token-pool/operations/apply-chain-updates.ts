@@ -310,7 +310,7 @@ export class ApplyChainUpdates extends SolanaOperation<
       poolProgramAddress: poolProgram.toBase58(),
       payer: params.payer,
       authority: params.authority,
-      // the standard multi-chain flow reads nothing per chain (one program resolution per batch)
+      // safe without the gate: init refuses an existing ChainConfig and delete a marked lane on chain
       [SKIP_POOL_GROUP_GATE]: true,
     }
     const groups: InstructionGroup[] = []

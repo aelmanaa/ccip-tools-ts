@@ -14,6 +14,7 @@ import {
 import {
   type ParsedLaneOpOptions,
   type PoolGroupLaneOpOptions,
+  type PoolGroupLaneOpResult,
   parseLaneOpOptions,
 } from '../../pool-group/lane-op-options.ts'
 import {
@@ -42,7 +43,7 @@ export type GenerateEditChainConfigV2Params = SolanaGenerateParams<
 >
 
 /** Unsigned Solana token pool chain config v2 replacement result. */
-export type GenerateEditChainConfigV2Result = UnsignedSolanaTx
+export type GenerateEditChainConfigV2Result = UnsignedSolanaTx & PoolGroupLaneOpResult
 
 /** Parameters for executing Solana token pool chain config v2 replacement. */
 export type ExecuteEditChainConfigV2Params = SolanaExecuteParams<
@@ -50,7 +51,7 @@ export type ExecuteEditChainConfigV2Params = SolanaExecuteParams<
 >
 
 /** Result of executing Solana token pool chain config v2 replacement. */
-export type ExecuteEditChainConfigV2Result = TransactionResult
+export type ExecuteEditChainConfigV2Result = TransactionResult & PoolGroupLaneOpResult
 
 /** Parsed edit params: config fields are unset when omitted, to be kept from the lane. */
 type ParsedEditChainConfigV2Params = Omit<
@@ -87,7 +88,7 @@ function remoteNetworkName(selector: bigint): string {
  */
 export class EditChainConfigV2 extends SolanaOperation<
   ChainConfigV2Params & PoolGroupLaneOpOptions,
-  UnsignedSolanaTx,
+  UnsignedSolanaTx & PoolGroupLaneOpResult,
   ParsedEditChainConfigV2Params
 > {
   readonly name = 'editChainConfigV2'
@@ -179,9 +180,15 @@ export class EditChainConfigV2 extends SolanaOperation<
           payer: opts.payer,
           instruction,
           options: opts.laneOptions,
+          setsCcvs: opts.ccvConfig !== undefined,
         })
-      : instruction
-    return { family: ChainFamily.Solana, instructions: [sent], mainIndex: 0 }
+      : { instruction }
+    return {
+      family: ChainFamily.Solana,
+      instructions: [sent.instruction],
+      mainIndex: 0,
+      ...(sent.poolGroup && { poolGroup: sent.poolGroup }),
+    }
   }
 
   /** Generate, sign, simulate, send, and confirm with the pool owner wallet. */

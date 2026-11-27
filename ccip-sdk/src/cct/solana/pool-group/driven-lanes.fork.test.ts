@@ -70,6 +70,7 @@ describe(
     let chain: SolanaChain
     let getChain: ChainGetter
     const owner = Keypair.generate()
+    let sdkLiftRefused = false
     const wallet = () => new AnchorWallet(owner)
     const g = { poolProgramAddress: PROGRAM, poolGroupAddress: G2 }
     const lane = (tokenAddress: string) => ({ tokenAddress, remoteChainSelector: SEPOLIA })
@@ -204,7 +205,7 @@ describe(
       assert.deepEqual(again.transactions, [])
     })
 
-    it('make-live: the lift needs the admission acknowledged and runs the lane check; it lands', async (t) => {
+    it('make-live: the SDK lift op lands (fails when the op is refused)', async () => {
       const c = { ...g, remoteChainSelector: SEPOLIA }
       // the subset keeps D only: E's lane stays closed when the chain runs
       const { poolGroupMembers } = await cct.getPoolGroupMembers(g)
@@ -224,93 +225,96 @@ describe(
         }),
         isParam('acknowledgeLiveAdmission'),
       )
-      const lift = {
-        ...c,
-        drivenLanesPaused: false,
-        acknowledgeLiveAdmission: [lane(D)],
-        getChain,
-      }
-      let landed = false
+      let r
       try {
-        const r = await cct.setPoolGroupChainLanes({ ...lift, wallet: wallet() })
-        assert.ok(r.goingLive.some((l) => l.tokenAddress === D))
-        landed = true
-        t.diagnostic('the SDK op landed the lift: its lane check passed on the post-state')
-      } catch (err) {
-        // the fork's Router cannot run: only its artifacts may refuse the lift
-        assert.ok(err instanceof CCTParamsInvalidError, String(err))
-        const findings = (err.context.findings ?? []) as Parameters<
-          typeof isForkRouterArtifact
-        >[0][]
-        assert.ok(findings.length > 0, err.message)
-        assert.deepEqual(
-          findings.filter((f) => !isForkRouterArtifact(f)),
-          [],
-          `only fork artifacts refuse the lift: ${err.message}`,
-        )
-      }
-      if (!landed) {
-        t.diagnostic(
-          'fork Router artifacts refused the SDK op: judged with the real check minus them',
-        )
-        const program = new PublicKey(PROGRAM)
-        const group = new PublicKey(G2)
-        const ix = await createPoolGroupProgram(chain, program, owner.publicKey)
-          .methods.setGroupChainLanes(new BN(SEPOLIA.toString()), {
-            mode: { subset: {} },
-            drivenLanesPaused: false,
-            bitmapWrite: null,
-            remove: [],
-            add: [],
-          })
-          .accountsStrict({
-            group,
-            groupChainPolicy: poolGroupPdas.groupChain(program, group, SEPOLIA),
-            groupRegistry: poolGroupPdas.groupRegistry(program, group),
-            authority: owner.publicKey,
-            systemProgram: PublicKey.default,
-            ...eventAccounts(program),
-          })
-          .instruction()
-        const { judgement } = await judgeAndLand({
-          chain,
-          program,
-          group,
-          signer: owner,
-          instructions: [ix],
+        r = await cct.setPoolGroupChainLanes({
+          ...c,
+          drivenLanesPaused: false,
+          acknowledgeLiveAdmission: [lane(D)],
           getChain,
+          wallet: wallet(),
         })
-        // D goes live from the post-state; E stays out of the subset
-        assert.deepEqual(
-          judgement.goingLive.map((l) => l.tokenAddress),
-          [D],
-        )
-        assert.ok(
-          !judgement.findings.some((f) => f.check === 'LANE_PAUSED' && f.severity === 'error'),
+      } catch (err) {
+        const findings = err instanceof CCTParamsInvalidError ? (err.context.findings ?? []) : []
+        sdkLiftRefused = true
+        assert.fail(
+          `the SDK lift was refused: ${String(err)}; findings ${JSON.stringify(findings, (_, v: unknown) => (typeof v === 'bigint' ? String(v) : v))}`,
         )
       }
+      assert.ok(r.goingLive.some((l) => l.tokenAddress === D))
+    })
+
+    it('make-live fallback (fork Router artifacts only): the op instruction, judged with the real check minus them, lands', async (t) => {
+      // only for the later tests: runs when the SDK lift above was refused on this fork
+      if (!sdkLiftRefused) return t.skip('the SDK lift landed')
+      const program = new PublicKey(PROGRAM)
+      const group = new PublicKey(G2)
+      const ix = await createPoolGroupProgram(chain, program, owner.publicKey)
+        .methods.setGroupChainLanes(new BN(SEPOLIA.toString()), {
+          mode: { subset: {} },
+          drivenLanesPaused: false,
+          bitmapWrite: null,
+          remove: [],
+          add: [],
+        })
+        .accountsStrict({
+          group,
+          groupChainPolicy: poolGroupPdas.groupChain(program, group, SEPOLIA),
+          groupRegistry: poolGroupPdas.groupRegistry(program, group),
+          authority: owner.publicKey,
+          systemProgram: PublicKey.default,
+          ...eventAccounts(program),
+        })
+        .instruction()
+      const { judgement } = await judgeAndLand({
+        chain,
+        program,
+        group,
+        signer: owner,
+        instructions: [ix],
+        getChain,
+      })
+      assert.ok(judgement.findings.every((f) => f.severity !== 'error' || isForkRouterArtifact(f)))
+      assert.deepEqual(
+        judgement.goingLive.map((l) => l.tokenAddress),
+        [D],
+      )
       const lanes = await cct.getPoolGroupLanes({
         ...g,
         remoteChainSelector: SEPOLIA,
         kind: 'driven',
       })
-      const dl = lanes.find((l) => l.tokenAddress === D)!
-      const el = lanes.find((l) => l.tokenAddress === E)!
-      assert.equal(dl.admitted, true)
-      assert.equal(dl.pausedOutbound || dl.pausedInbound, false)
-      assert.equal(el.admitted, false)
+      assert.equal(lanes.find((l) => l.tokenAddress === D)!.admitted, true)
+      assert.equal(lanes.find((l) => l.tokenAddress === E)!.admitted, false)
     })
 
-    it('close: refused on a running lane without the drain confirmed; E closes once confirmed', async () => {
+    it('close: refused while outbound runs, refused paused but unconfirmed (a pause is not a drain), lands paused and confirmed', async () => {
       const c = { ...g, remoteChainSelector: SEPOLIA }
-      // E is out of the subset (closable), but the chain runs: in-flight inbound must be drained
+      // E is out of the subset (closable), and its outbound runs
+      await assert.rejects(
+        cct.generateUnsignedClosePoolGroupLanes({
+          ...c,
+          tokenAddresses: [E],
+          confirmInFlightDrained: [lane(E)],
+          payer: owner.publicKey.toBase58(),
+        }),
+        (e: unknown) => isParam('confirmInFlightDrained')(e) && /outbound runs/.test(String(e)),
+      )
+      await cct.setPoolGroupLanePause({
+        ...g,
+        tokenAddress: E,
+        remoteChainSelectors: [SEPOLIA],
+        pausedOutbound: true,
+        wallet: wallet(),
+      })
       await assert.rejects(
         cct.generateUnsignedClosePoolGroupLanes({
           ...c,
           tokenAddresses: [E],
           payer: owner.publicKey.toBase58(),
         }),
-        isParam('confirmInFlightDrained'),
+        (e: unknown) =>
+          isParam('confirmInFlightDrained')(e) && /a pause is not a drain/.test(String(e)),
       )
       // a lane still admitted is refused
       await assert.rejects(
@@ -323,6 +327,20 @@ describe(
         (err: unknown) =>
           isParam('tokenAddresses')(err) && /GroupLaneStillEnabled/.test(String(err)),
       )
+      // a re-check runs the gate again with the sealed confirmation: it holds
+      const built = await cct.generateUnsignedClosePoolGroupLanes({
+        ...c,
+        tokenAddresses: [E],
+        confirmInFlightDrained: [lane(E)],
+        payer: owner.publicKey.toBase58(),
+      })
+      const check = await cct.checkPoolGroupSnapshot({
+        ...g,
+        snapshot: built.snapshot!,
+        transactions: built.transactions,
+        getChain,
+      })
+      assert.equal(check.ok, true, JSON.stringify(check.changed))
       const r = await cct.closePoolGroupLanes({
         ...c,
         tokenAddresses: [E],
@@ -354,10 +372,21 @@ describe(
         isParam('confirmDroppedLanes'),
       )
       await cct.setPoolGroupChainLanes({ ...c, drivenLanesPaused: true, wallet: wallet() })
+      // paused is not drained: the close in the same write still needs the confirmation
+      await assert.rejects(
+        cct.generateUnsignedSetPoolGroupMemberRemoteTokens({
+          ...g,
+          removeChains: [lane(D)],
+          closeDroppedLanes: true,
+          payer: owner.publicKey.toBase58(),
+        }),
+        isParam('confirmInFlightDrained'),
+      )
       const r = await cct.setPoolGroupMemberRemoteTokens({
         ...g,
         removeChains: [lane(D)],
         closeDroppedLanes: true,
+        confirmInFlightDrained: [lane(D)],
         getChain,
         wallet: wallet(),
       })
@@ -375,6 +404,116 @@ describe(
       assert.ok(closed.transactions.length >= 1)
       const { poolGroupMembers } = await cct.getPoolGroupMembers(g)
       assert.ok(!poolGroupMembers.some((m) => m.tokenAddress === D || m.tokenAddress === E))
+    })
+
+    it('linked lanes (M7): init, pool data long with a UID, unlink refused without confirmDropped and on a lane that trusts no pool', async () => {
+      const c = { ...g, remoteChainSelector: SEPOLIA }
+      // the chain paused both ways: no linked lane goes live, so no make-live check runs
+      await cct.setPoolGroupChainPause({
+        ...c,
+        pausedOutbound: true,
+        pausedInbound: true,
+        wallet: wallet(),
+      })
+      const classSource = {
+        connection: 'default',
+        fee: 'default',
+        rateLimit: 'default',
+        security: 'default',
+      } as const
+      const init = await cct.initPoolGroupLanes({
+        ...c,
+        lanes: [
+          {
+            tokenAddress: D,
+            remoteTokenAddress: TKD,
+            remoteTokenDecimals: 18,
+            remotePoolAddresses: [],
+          },
+        ],
+        classSource,
+        getChain,
+        wallet: wallet(),
+      })
+      assert.deepEqual(init.goingLive, [])
+      let l = await cct.getPoolGroupLane({ poolProgramAddress: PROGRAM, ...lane(D) })
+      assert.equal(l.kind, 'linked')
+      assert.equal(l.poolGroupAddress, G2)
+      // long data with a UID needs a FEE destBytesOverhead of 224 on the record the lane uses
+      await cct.setPoolGroupRoles({
+        ...g,
+        roles: { feeAdmin: owner.publicKey.toBase58() },
+        wallet: wallet(),
+      })
+      await cct.setPoolGroupChainPolicy({
+        ...c,
+        section: {
+          policyClass: 'fee',
+          tokenTransferFeeConfig: { isEnabled: true, destBytesOverhead: 224 },
+        },
+        detachFromPoolGroupDefault: true,
+        getChain,
+        wallet: wallet(),
+      })
+      const uid = `0x${'ab'.repeat(32)}`
+      await cct.setPoolGroupLanePoolData({
+        poolProgramAddress: PROGRAM,
+        ...lane(D),
+        poolDataFormat: 'long',
+        uid,
+        getChain,
+        wallet: wallet(),
+      })
+      l = await cct.getPoolGroupLane({ poolProgramAddress: PROGRAM, ...lane(D) })
+      assert.equal(l.uid, uid)
+      // unlinked, the lane sends long data with its UID on its own fields: its own fee must cover it
+      await cct.editChainConfigV2({
+        poolProgramAddress: PROGRAM,
+        ...lane(D),
+        tokenTransferFeeConfig: {
+          destGasOverhead: 200_000,
+          destBytesOverhead: 224,
+          finalityFeeUSDCents: 0,
+          fastFinalityFeeUSDCents: 0,
+          finalityTransferFeeBps: 0,
+          fastFinalityTransferFeeBps: 0,
+          isEnabled: true,
+        },
+        getChain,
+        wallet: wallet(),
+      })
+      // unlinked, the lane trusts only its own pools (none): the group's are dropped (A21)
+      const record = await cct.getPoolGroupChain(c)
+      const dropped = record.policy.connection.remotePools.map((p) => p.address)
+      await assert.rejects(
+        cct.generateUnsignedUnlinkPoolGroupLanes({
+          ...c,
+          tokenAddresses: [D],
+          payer: owner.publicKey.toBase58(),
+        }),
+        isParam('confirmDropped'),
+      )
+      // unlinked, the lane is a standard lane that trusts no pool: the guard refuses it (a real
+      // finding), besides the fork's Router artifacts; linking back needs an unlink that lands
+      await assert.rejects(
+        cct.unlinkPoolGroupLanes({
+          ...c,
+          tokenAddresses: [D],
+          confirmDropped: [{ lane: lane(D), remotePools: dropped }],
+          getChain,
+          wallet: wallet(),
+        }),
+        (e: unknown) => {
+          const findings = (
+            e instanceof CCTParamsInvalidError ? e.context.findings : []
+          ) as Parameters<typeof isForkRouterArtifact>[0][]
+          return (
+            isParam('guards')(e) &&
+            findings.some((f) => f.check === 'NO_REMOTE_POOL') &&
+            findings.every((f) => f.check === 'NO_REMOTE_POOL' || isForkRouterArtifact(f))
+          )
+        },
+      )
     })
   },
 )

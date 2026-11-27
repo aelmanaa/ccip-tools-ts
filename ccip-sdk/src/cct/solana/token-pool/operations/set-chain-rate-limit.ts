@@ -15,6 +15,7 @@ import {
 import {
   type ParsedLaneOpOptions,
   type PoolGroupLaneOpOptions,
+  type PoolGroupLaneOpResult,
   parseLaneOpOptions,
 } from '../../pool-group/lane-op-options.ts'
 import {
@@ -125,13 +126,13 @@ type ParsedSetChainRateLimitParams = {
 export type GenerateSetChainRateLimitParams = SolanaGenerateParams<SetChainRateLimitParams>
 
 /** Unsigned Solana token pool rate-limit configuration result. */
-export type GenerateSetChainRateLimitResult = UnsignedSolanaTx
+export type GenerateSetChainRateLimitResult = UnsignedSolanaTx & PoolGroupLaneOpResult
 
 /** Parameters for executing Solana token pool rate-limit configuration. */
 export type ExecuteSetChainRateLimitParams = SolanaExecuteParams<SetChainRateLimitParams>
 
 /** Result of executing Solana token pool rate-limit configuration. */
-export type ExecuteSetChainRateLimitResult = TransactionResult
+export type ExecuteSetChainRateLimitResult = TransactionResult & PoolGroupLaneOpResult
 
 /**
  * Sets inbound and outbound rate limits for an initialized remote-chain config.
@@ -141,7 +142,7 @@ export type ExecuteSetChainRateLimitResult = TransactionResult
  */
 export class SetChainRateLimit extends SolanaOperation<
   SetChainRateLimitParams,
-  UnsignedSolanaTx,
+  UnsignedSolanaTx & PoolGroupLaneOpResult,
   ParsedSetChainRateLimitParams
 > {
   readonly name = 'setChainRateLimit'
@@ -230,8 +231,13 @@ export class SetChainRateLimit extends SolanaOperation<
           instruction,
           options: opts.laneOptions,
         })
-      : instruction
-    return { family: ChainFamily.Solana, instructions: [sent], mainIndex: 0 }
+      : { instruction }
+    return {
+      family: ChainFamily.Solana,
+      instructions: [sent.instruction],
+      mainIndex: 0,
+      ...(sent.poolGroup && { poolGroup: sent.poolGroup }),
+    }
   }
 
   /** Generate, sign, simulate, send, and confirm with the pool owner or rate-limit admin wallet. */

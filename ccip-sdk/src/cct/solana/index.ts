@@ -4756,8 +4756,9 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * Builds the unsigned `set_group_pause` transactions: sets or clears the pool group pause.
    * @remarks Passes every chain record. Clearing a flag makes lanes live, so the op runs the lane
    * check on every lane it makes live (needs `getChain`, no attestations) and refuses an error
-   * finding; `goingLive` and `findings` are returned. Signer: owner or pauser to set; owner or
-   * unpauser to clear. Each transaction lists `requiredSigners` and carries its compute estimate.
+   * finding; `goingLive` and `findings` are returned. A lift that re-opens admission (members
+   * admitted on a chain whose driven lanes run again) needs those pairs in
+   * `acknowledgeLiveAdmission`. Signer: owner or pauser to set; owner or unpauser to clear. Each transaction lists `requiredSigners` and carries its compute estimate.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
    * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
    * fix
@@ -5988,7 +5989,7 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * Builds the unsigned `set_member_remote_tokens` transactions: adds, replaces or drops a
    * member's remote tokens by chain.
    * @remarks A dropped live driven lane needs `confirmDroppedLanes`; `closeDroppedLanes` closes
-   * them in the same transaction (each paused both ways or in `confirmInFlightDrained`). A
+   * them in the same transaction (each paused outbound and listed in `confirmInFlightDrained`: a pause is not a drain, design §7.6). A
    * re-pointed lane keeps its token until re-synced (a follow-up). Signer: the pool owner. Each
    * transaction lists `requiredSigners` and carries its compute estimate.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
@@ -6019,7 +6020,7 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * Signs and sends `set_member_remote_tokens` with `opts.wallet` as payer and default
    * authority: adds, replaces or drops a member's remote tokens by chain.
    * @remarks A dropped live driven lane needs `confirmDroppedLanes`; `closeDroppedLanes` closes
-   * them in the same transaction (each paused both ways or in `confirmInFlightDrained`). A
+   * them in the same transaction (each paused outbound and listed in `confirmInFlightDrained`: a pause is not a drain, design §7.6). A
    * re-pointed lane keeps its token until re-synced (a follow-up). Signer: the pool owner.
    * Re-reads merged and snapshotted state right before sending.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
@@ -6230,8 +6231,8 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   /**
    * Builds the unsigned `close_group_lanes` transactions: closes driven lanes the pool group no
    * longer admits or the member no longer lists (permissionless).
-   * @remarks Closing strands inbound in-flight messages: each lane must be paused in both
-   * directions or in `confirmInFlightDrained`. Rent goes back to the lane's payer. A refused
+   * @remarks Closing strands inbound in-flight messages: each lane must be paused outbound and
+   * listed in `confirmInFlightDrained` (a pause is not a drain, design §7.6). Rent goes back to the lane's payer. A refused
    * lane is left out and reported. Signer: anyone. Each transaction lists `requiredSigners` and
    * carries its compute estimate.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
@@ -6258,8 +6259,8 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * Signs and sends `close_group_lanes` with `opts.wallet` as payer and default authority:
    * closes driven lanes the pool group no longer admits or the member no longer lists
    * (permissionless).
-   * @remarks Closing strands inbound in-flight messages: each lane must be paused in both
-   * directions or in `confirmInFlightDrained`. Rent goes back to the lane's payer. A refused
+   * @remarks Closing strands inbound in-flight messages: each lane must be paused outbound and
+   * listed in `confirmInFlightDrained` (a pause is not a drain, design §7.6). Rent goes back to the lane's payer. A refused
    * lane is left out and reported. Signer: anyone. Re-reads merged and snapshotted state right
    * before sending.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does

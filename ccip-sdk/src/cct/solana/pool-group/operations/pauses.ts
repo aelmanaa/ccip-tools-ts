@@ -27,11 +27,16 @@ import { CCTParamsInvalidError, CCTStateChangedError } from '../../../errors.ts'
 import type { SolanaGenerateParams } from '../../operation.ts'
 import { deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { parsePublicKey } from '../../validate.ts'
-import { poolGroupPdas } from '../accounts.ts'
+import {
+  type GroupChainPolicyAccount,
+  GROUP_CHAIN_POLICY_FIXED_LEN,
+  poolGroupPdas,
+} from '../accounts.ts'
 import { decodeRoles, toBigInt } from '../decode.ts'
 import { isUnread } from '../lane.ts'
 import { readPoolState } from '../multi-token-pool-lane.ts'
 import { createPoolGroupProgram } from '../program.ts'
+import type { PoolGroupLaneKey } from '../types.ts'
 import { type PoolGroupWritePlan, PoolGroupWriteOperation } from '../write-operation.ts'
 import type {
   PoolGroupGuardOptions,
@@ -41,6 +46,7 @@ import type {
 } from '../write-types.ts'
 import { type ParsedPoolGroupRef, decodeOwned, readPoolGroup, validateSelector } from './common.ts'
 import { readPoolGroupLaneStates } from './lane.ts'
+import { reopenedAdmissions, requireAdmissionAcknowledged } from './members-common.ts'
 import {
   type ParsedGroupWrite,
   bigField,
@@ -50,8 +56,11 @@ import {
   field,
   laneItems,
   parseGroupWrite,
+  parseLaneKeys,
   proposalBase,
+  sealLanes,
   signerRole,
+  unsealLanes,
 } from './write-common.ts'
 
 /** The pause roles of a decoded group. */
@@ -142,9 +151,20 @@ const selectorOf = (data: unknown) => bigField(field(data, 'params', 'remoteChai
 /** A proposal's flag (`params.<name>`), as a boolean. */
 const flagOf = (data: unknown, name: string) => field(data, 'params', name) === true
 
+/** What a lift's admission gate reads of each chain record: mode, driven pause and bitmap. */
+const admissionOf = (
+  records: readonly { selector: bigint; record: GroupChainPolicyAccount; data: Buffer }[],
+) =>
+  records.map(({ selector, record, data }) => [
+    selector,
+    Object.keys(record.laneMode)[0],
+    record.drivenLanesPaused,
+    data.subarray(GROUP_CHAIN_POLICY_FIXED_LEN).toString('hex'),
+  ])
+
 // ─── the group pause ─────────────────────────────────────────────────────────────────────────
 
-type ParsedGroupPause = ParsedGroupWrite & { paused: boolean }
+type ParsedGroupPause = ParsedGroupWrite & { paused: boolean; acknowledged: PoolGroupLaneKey[] }
 
 /** Sets or clears the pool group pause (every chain record's `group_paused`). */
 export class SetPoolGroupPause extends PoolGroupWriteOperation<
@@ -160,7 +180,15 @@ export class SetPoolGroupPause extends PoolGroupWriteOperation<
     const paused = optionalFlag(this.name, 'paused', params.paused)
     if (paused === undefined)
       throw new CCTParamsInvalidError(this.name, 'paused', 'must be a boolean')
-    return { ...parseGroupWrite(this.name, params), paused }
+    return {
+      ...parseGroupWrite(this.name, params),
+      paused,
+      acknowledged: parseLaneKeys(
+        this.name,
+        'acknowledgeLiveAdmission',
+        params.acknowledgeLiveAdmission,
+      ),
+    }
   }
 
   /**
@@ -190,24 +218,40 @@ export class SetPoolGroupPause extends PoolGroupWriteOperation<
         this.name,
         'the pool group chain list moved while it was read: run it again',
       )
-    const extras = read
-    const recordFlags = extras.map((info, i) => {
+    const records = read.map((info, i) => {
       if (!info)
         throw new CCTParamsInvalidError(
           this.name,
           'poolGroupAddress',
           `the pool group lists chain ${toBigInt(group.chainSelectors[i]!)} but has no record for it`,
         )
-      return decodeOwned('groupChainPolicy', info, metas[i]!.pubkey, ref.program).groupPaused
+      return {
+        selector: toBigInt(group.chainSelectors[i]!),
+        record: decodeOwned('groupChainPolicy', info, metas[i]!.pubkey, ref.program),
+        data: info.data,
+      }
     })
+    const recordFlags = records.map((r) => r.record.groupPaused)
     requirePauseGate(this.name, group, authority, [group.paused], [paused], 'set_group_pause')
     const expected = {
       'group.paused': group.paused,
       'group.chainSelectors': group.chainSelectors.map(toBigInt),
       'groupChains.groupPaused': recordFlags,
+      // the admission a lift re-opens reads these (S5 review M3)
+      'groupChains.admission': admissionOf(records),
+      ...sealLanes('acknowledgeLiveAdmission', parsed.acknowledged),
     }
     if (group.paused === paused && recordFlags.every((f) => f === paused))
       return { group: ref.group, items: [], judge: null, expected, extra: {} }
+    const reopened = paused
+      ? []
+      : await reopenedAdmissions(
+          this.name,
+          chain,
+          ref,
+          records.map((r) => ({ ...r, after: { ...r.record, groupPaused: false } })),
+        )
+    requireAdmissionAcknowledged(this.name, reopened, parsed.acknowledged)
     const ix = await createPoolGroupProgram(chain, ref.program, parsed.payer)
       .methods.setGroupPause({ paused })
       .accountsStrict({ group: ref.group, authority, ...eventAccounts(ref.program) })
@@ -228,20 +272,23 @@ export class SetPoolGroupPause extends PoolGroupWriteOperation<
         current.map(() => paused),
       ),
       expected,
+      goingLive: reopened,
       extra: {},
     }
   }
 
-  /** The flag a proposal sets. */
+  /** The flag a proposal sets, with the admissions the caller acknowledged. */
   protected fromInstructions(
     ref: ParsedPoolGroupRef,
     instructions: readonly TransactionInstruction[],
     guardOptions: PoolGroupGuardOptions,
+    sealed: Readonly<Record<string, unknown>>,
   ): ParsedGroupPause {
     const [one] = decodeOne(this.name, instructions, ['setGroupPause'])
     return {
       ...proposalBase(ref, one!.ix.keys[1]!.pubkey, guardOptions),
       paused: flagOf(one!.data, 'paused'),
+      acknowledged: unsealLanes(sealed, 'acknowledgeLiveAdmission'),
     }
   }
 }
@@ -252,6 +299,7 @@ type ParsedChainPause = ParsedGroupWrite & {
   selector: bigint
   pausedOutbound?: boolean
   pausedInbound?: boolean
+  acknowledged: PoolGroupLaneKey[]
 }
 
 /** Sets one or both direction flags of a chain record; an omitted direction keeps its flag. */
@@ -279,6 +327,11 @@ export class SetPoolGroupChainPause extends PoolGroupWriteOperation<
       selector: validateSelector(this.name, 'remoteChainSelector', params.remoteChainSelector),
       ...(pausedOutbound !== undefined && { pausedOutbound }),
       ...(pausedInbound !== undefined && { pausedInbound }),
+      acknowledged: parseLaneKeys(
+        this.name,
+        'acknowledgeLiveAdmission',
+        params.acknowledgeLiveAdmission,
+      ),
     }
   }
 
@@ -311,9 +364,22 @@ export class SetPoolGroupChainPause extends PoolGroupWriteOperation<
     const expected = {
       [`groupChain.${selector}.pausedOutbound`]: record.pausedOutbound,
       [`groupChain.${selector}.pausedInbound`]: record.pausedInbound,
+      [`groupChain.${selector}.admission`]: admissionOf([
+        { selector, record, data: extras[0].data },
+      ]),
+      ...sealLanes('acknowledgeLiveAdmission', parsed.acknowledged),
     }
     if (current[0] === requested[0] && current[1] === requested[1])
       return { group: ref.group, items: [], judge: null, expected, extra: {} }
+    const reopened = await reopenedAdmissions(this.name, chain, ref, [
+      {
+        selector,
+        record,
+        data: extras[0].data,
+        after: { ...record, pausedOutbound: requested[0], pausedInbound: requested[1] },
+      },
+    ])
+    requireAdmissionAcknowledged(this.name, reopened, parsed.acknowledged)
     const ix = await createPoolGroupProgram(chain, ref.program, parsed.payer)
       .methods.setGroupChainPause({
         remoteChainSelector: new BN(selector.toString()),
@@ -338,15 +404,17 @@ export class SetPoolGroupChainPause extends PoolGroupWriteOperation<
       ],
       judge: pauseJudge(current, requested),
       expected,
+      goingLive: reopened,
       extra: {},
     }
   }
 
-  /** The exact flags a proposal writes. */
+  /** The exact flags a proposal writes, with the admissions the caller acknowledged. */
   protected fromInstructions(
     ref: ParsedPoolGroupRef,
     instructions: readonly TransactionInstruction[],
     guardOptions: PoolGroupGuardOptions,
+    sealed: Readonly<Record<string, unknown>>,
   ): ParsedChainPause {
     const [one] = decodeOne(this.name, instructions, ['setGroupChainPause'])
     return {
@@ -354,6 +422,7 @@ export class SetPoolGroupChainPause extends PoolGroupWriteOperation<
       selector: selectorOf(one!.data),
       pausedOutbound: flagOf(one!.data, 'pausedOutbound'),
       pausedInbound: flagOf(one!.data, 'pausedInbound'),
+      acknowledged: unsealLanes(sealed, 'acknowledgeLiveAdmission'),
     }
   }
 }

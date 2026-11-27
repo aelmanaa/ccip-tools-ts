@@ -311,13 +311,16 @@ export abstract class PoolGroupWriteOperation<
 
   /**
    * The parsed params a proposal's pool-program instructions encode (payer = authority), so the
-   * snapshot check re-plans against current state and judges those exact instructions.
+   * snapshot check re-plans against current state and judges those exact instructions. `sealed` is
+   * the snapshot's `expected`: an op reads back the confirmations it sealed there (`sealLanes`), so
+   * its gates run again on the re-check with exactly what the caller confirmed.
    * @throws {@link CCTParamsInvalidError} if the instructions are not this op's
    */
   protected abstract fromInstructions(
     ref: ParsedPoolGroupRef,
     instructions: readonly TransactionInstruction[],
     guardOptions: PoolGroupGuardOptions,
+    sealed: Readonly<Record<string, unknown>>,
   ): Parsed
 
   /** The pool group an instruction of this op names: its first account (overridden where not). */
@@ -576,7 +579,7 @@ export abstract class PoolGroupWriteOperation<
       confirmDropped: Reflect.get(options, 'confirmDropped'),
       confirmCCVChanges: Reflect.get(options, 'confirmCCVChanges'),
     })
-    const parsed = this.fromInstructions(ref, instructions, guardOptions)
+    const parsed = this.fromInstructions(ref, instructions, guardOptions, snapshot.expected)
     let plan: PoolGroupWritePlan<X>
     try {
       plan = await this.plan(chain, parsed)

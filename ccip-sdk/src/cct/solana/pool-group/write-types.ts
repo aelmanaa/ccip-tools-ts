@@ -744,6 +744,12 @@ export type ExecuteResetPoolGroupLaneBucketsResult = PoolGroupExecuteResult
 export type SetPoolGroupPauseParams = PoolGroupWriteParams & {
   /** `true` to pause every lane of the group, `false` to lift the group pause. */
   paused: boolean
+  /**
+   * The (member, chain) pairs a lift re-opens: on every chain record whose driven lanes run again,
+   * each member it admits that lists the chain (their lanes go live, or become materializable live
+   * by anyone). A lift is refused unless each is listed here; sealed into the snapshot.
+   */
+  acknowledgeLiveAdmission?: PoolGroupLaneKey[]
 }
 /** `set_group_chain_pause`. Omitted directions keep their flag (merged, snapshotted). */
 export type SetPoolGroupChainPauseParams = PoolGroupWriteParams & {
@@ -753,6 +759,11 @@ export type SetPoolGroupChainPauseParams = PoolGroupWriteParams & {
   pausedOutbound?: boolean
   /** The inbound flag; kept when omitted. */
   pausedInbound?: boolean
+  /**
+   * The (member, chain) pairs a lift re-opens when the record's driven lanes run again (both
+   * directions were paused): refused unless each is listed here; sealed into the snapshot.
+   */
+  acknowledgeLiveAdmission?: PoolGroupLaneKey[]
 }
 /** `set_lane_pause`. Omitted directions keep their flag per lane. */
 export type SetPoolGroupLanePauseParams = PoolGroupWriteParams & {
@@ -1247,7 +1258,7 @@ export type SetPoolGroupMemberRemoteTokensParams = PoolGroupWriteParams & {
   confirmDroppedLanes?: PoolGroupLaneKey[]
   /**
    * Close the dropped lanes in the same transaction (`close_group_lanes`). Refused unless each lane
-   * is paused in both directions or listed in `confirmInFlightDrained`.
+   * is paused outbound and listed in `confirmInFlightDrained` (a pause is not a drain: an inbound pause makes in-flight messages fail, design §7.6).
    */
   closeDroppedLanes?: boolean
   /** Lanes whose inbound in-flight messages the caller confirms drained. */
@@ -1328,7 +1339,7 @@ export type MaterializePoolGroupLanesParams = PoolGroupWriteParams & {
 /**
  * `close_group_lanes` (permissionless): closes driven lanes the group no longer admits, or whose
  * member no longer lists the chain. Closing strands inbound in-flight messages, so each lane must be
- * paused in both directions or listed in `confirmInFlightDrained`.
+ * paused outbound and listed in `confirmInFlightDrained`: a pause is not a drain (design §7.6).
  */
 export type ClosePoolGroupLanesParams = PoolGroupWriteParams & {
   /** The chain. */

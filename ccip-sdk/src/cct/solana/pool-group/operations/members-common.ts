@@ -14,6 +14,7 @@ import { BN } from '@coral-xyz/anchor'
 import { type AccountInfo, type AccountMeta, PublicKey } from '@solana/web3.js'
 
 import { encodeAddressToAny } from '../../../../shared/codec.ts'
+import type { SolanaChain } from '../../../../solana/index.ts'
 import {
   deriveTokenPoolChainConfigOverridePda,
   deriveTokenPoolChainConfigV2Pda,
@@ -29,7 +30,7 @@ import {
 } from '../accounts.ts'
 import type { PoolGroupLaneState } from '../lane.ts'
 import type { PoolGroupLaneKey, PoolGroupMemberRemoteToken } from '../types.ts'
-import { validateSelector } from './common.ts'
+import { type ParsedPoolGroupRef, listPoolGroupMembers, validateSelector } from './common.ts'
 import { meta } from './lanes.ts'
 import { laneId } from './write-common.ts'
 
@@ -81,6 +82,12 @@ export function parseMemberChains(operation: string, param: string, value: unkno
         Reflect.get(Object(e), 'token'),
         selector,
       )
+      if (encodeAddressToAny(token).every((b) => b === 0))
+        throw new CCTParamsInvalidError(
+          operation,
+          `${at}.token`,
+          'must not be the zero address (InvalidMemberRemoteTokens)',
+        )
       if (out.has(selector))
         throw new CCTParamsInvalidError(
           operation,
@@ -201,6 +208,45 @@ export const admitsLive = (
 ): boolean => chainRunsDriven(gcp) && poolGroupChainAdmits(gcp, data, memberIndex)
 
 /**
+ * The (member, chain) pairs a write re-opens: on each chain record whose driven lanes go from held
+ * (group pause, driven-lanes pause, both directions paused) to running, every member the record
+ * admits that lists the chain. Their lanes become live, or materializable live by anyone, with no
+ * further write of theirs (design §7.6 live admission; S5 review M3). Reads the members with
+ * `getProgramAccounts` only when a record re-opens, and fails closed when it is refused.
+ * @internal
+ */
+export async function reopenedAdmissions(
+  operation: string,
+  chain: SolanaChain,
+  ref: Pick<ParsedPoolGroupRef, 'program' | 'group'>,
+  records: readonly {
+    selector: bigint
+    record: GroupChainPolicyAccount
+    data: Buffer
+    after: Pick<
+      GroupChainPolicyAccount,
+      'groupPaused' | 'drivenLanesPaused' | 'pausedOutbound' | 'pausedInbound'
+    >
+  }[],
+): Promise<PoolGroupLaneKey[]> {
+  const reopened = records.filter((r) => !chainRunsDriven(r.record) && chainRunsDriven(r.after))
+  if (!reopened.length) return []
+  const members = await listPoolGroupMembers(operation, chain, ref.program, ref.group, {
+    param: 'acknowledgeLiveAdmission',
+    fix: 'finding the members a lift re-opens needs it; use an RPC that serves getProgramAccounts',
+  })
+  return reopened.flatMap(({ selector, record, data }) =>
+    members
+      .filter(
+        ({ member }) =>
+          memberChainsOf(member).has(selector) &&
+          poolGroupChainAdmits(record, data, member.memberIndex),
+      )
+      .map(({ member }) => ({ tokenAddress: member.mint, remoteChainSelector: selector })),
+  )
+}
+
+/**
  * Refuses pairs the write makes materializable or live on a running chain unless acknowledged
  * (§7.6, live admission).
  * @throws {@link CCTParamsInvalidError} (param `acknowledgeLiveAdmission`) otherwise
@@ -224,10 +270,9 @@ export function requireAdmissionAcknowledged(
 }
 
 /**
- * The drain gate of a close: the lane is paused in both directions (its own flags, the chain's, the
- * group's or the chain's driven lanes), or the caller confirms its inbound in-flight messages are
- * drained. Admission is not a pause: a lane that is no longer admitted still has messages in flight.
- * @internal
+ * Whether a lane's driven transfers are paused in both directions (its own flags, the chain's, the
+ * group's or the chain's driven lanes): such a lane is not live. Not a drain: an inbound pause makes
+ * in-flight messages fail on arrival (design §7.6). @internal
  */
 export function pausedBothWays(state: PoolGroupLaneState): boolean {
   const gcp = state.groupChain?.record
@@ -241,8 +286,25 @@ export function pausedBothWays(state: PoolGroupLaneState): boolean {
 }
 
 /**
- * Refuses closing lanes that are neither paused both ways nor confirmed drained: a close strands
- * inbound in-flight messages.
+ * Whether no new outbound transfer can start on a lane: its own outbound flag, the chain's outbound
+ * pause, the group pause or the chain's driven-lanes pause. @internal
+ */
+export function pausedOutbound(state: PoolGroupLaneState): boolean {
+  const gcp = state.groupChain?.record
+  return (
+    !!state.ext?.pausedOutbound ||
+    !!gcp?.groupPaused ||
+    !!gcp?.drivenLanesPaused ||
+    !!gcp?.pausedOutbound
+  )
+}
+
+/**
+ * The drain gate of a close (design §7.6, "drain before close"): each lane must be paused outbound
+ * here and listed in `confirmInFlightDrained`, the caller's statement that the remote side stopped
+ * sending and no inbound message is still in flight. A pause is never a drain: pausing inbound is
+ * exactly what makes in-flight messages fail on arrival, and after the close they can never execute.
+ * Until the SDK can check in-flight messages itself (design §17 Q8), the confirmation is required.
  * @throws {@link CCTParamsInvalidError} (param `confirmInFlightDrained`) otherwise
  * @internal
  */
@@ -252,12 +314,20 @@ export function requireDrained(
   confirmed: readonly PoolGroupLaneKey[],
 ): void {
   const ok = new Set(confirmed.map(laneId))
-  const open = lanes.filter((l) => !pausedBothWays(l.state) && !ok.has(laneId(l.key)))
+  const sending = lanes.filter((l) => !pausedOutbound(l.state))
+  if (sending.length)
+    throw new CCTParamsInvalidError(
+      operation,
+      'confirmInFlightDrained',
+      `closing ${sending.map((l) => laneId(l.key)).join(', ')} while outbound runs: pause each lane's outbound first (setPoolGroupLanePause pausedOutbound), wait for the remote side to stop and the inbound messages in flight to drain, then list it in confirmInFlightDrained`,
+      { context: { lanes: sending.map((l) => l.key) } },
+    )
+  const open = lanes.filter((l) => !ok.has(laneId(l.key)))
   if (open.length)
     throw new CCTParamsInvalidError(
       operation,
       'confirmInFlightDrained',
-      `closing ${open.map((l) => laneId(l.key)).join(', ')} strands inbound messages still in flight: pause each lane in both directions first and wait for the drain, or list it in confirmInFlightDrained`,
+      `closing ${open.map((l) => laneId(l.key)).join(', ')} strands inbound messages still in flight: a pause is not a drain (an inbound pause makes them fail on arrival). Once the remote side stopped and none is in flight, list each lane in confirmInFlightDrained`,
       { context: { lanes: open.map((l) => l.key) } },
     )
 }
