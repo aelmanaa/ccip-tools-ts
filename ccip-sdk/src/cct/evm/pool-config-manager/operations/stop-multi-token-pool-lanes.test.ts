@@ -16,6 +16,7 @@ import {
   getMultiTokenPoolInterface,
 } from '../../multi-token-pool/contracts.ts'
 import { POOL, stackChain } from '../../multi-token-pool/stack.test.helpers.ts'
+import { decodeMultiTokenPoolWrite } from '../calldata.ts'
 import { C1, empty, inlineLane } from '../projection.test.helpers.ts'
 import {
   type MultiTokenPoolRecordChange,
@@ -171,11 +172,18 @@ describe('lane stops (cct/evm pool-config-manager)', () => {
       }
     }
     class Stop extends StopMultiTokenPoolLanes {
-      run(
+      /** The encoded write, with what the build seals from its calldata. */
+      async run(
         state: MultiTokenPoolRecordState,
         direction: 'outbound' | 'inbound' | 'both' = 'outbound',
       ) {
-        return this.encode({} as never, { poolAddress: POOL, lanes: [key], direction }, ctx(state))
+        const { data } = await this.encode(
+          {} as never,
+          { poolAddress: POOL, lanes: [key], direction },
+          ctx(state),
+        )
+        const decodedWrite = decodeMultiTokenPoolWrite(data, MultiTokenPoolVersion.V2_1_0_DEV)
+        return { data, expected: this.sealedFrom({} as never, decodedWrite, ctx(state)) }
       }
       runLane(state: MultiTokenPoolRecordState, lane: typeof key) {
         return this.encode(

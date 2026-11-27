@@ -190,6 +190,11 @@ abstract class RoleWriteOperation<
     return false
   }
 
+  // it touches no record: what it is judged on is its facts (`readFacts`)
+  protected sealedFrom(): Record<string, unknown> {
+    return {}
+  }
+
   /** The calldata. */
   protected calldata(version: PoolConfigManagerWriteContext['version'], args: unknown[]): string {
     return getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(

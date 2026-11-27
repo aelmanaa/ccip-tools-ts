@@ -25,6 +25,7 @@ import {
 } from '../../multi-token-pool/contracts.ts'
 import { readContractTypeOrNull } from '../../query.ts'
 import { assertUnique, validateArray } from '../../validate.ts'
+import type { DecodedMultiTokenPoolWrite } from '../calldata.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PolicyName,
@@ -302,7 +303,7 @@ export abstract class PolicyRecordWriteOperation<
     params: P,
     ctx: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
-    const { state, version } = ctx
+    const { version } = ctx
     checkPolicyRecordWrite(this.name, ctx, this.recordType, params)
     await this.checkState(chain, params, ctx)
     const word = (name: PolicyName, at: string) => encodePolicyName(this.name, at, name)
@@ -320,14 +321,34 @@ export abstract class PolicyRecordWriteOperation<
       multiTokenPoolFunctionOf(this.name),
       [remove, policies, set],
     )
-    // the values the write replaces: each touched record as stored (absent: `null`)
-    const expected = Object.fromEntries(
-      [...(params.recordsToRemove ?? []), ...(params.recordsToSet ?? [])].map((k) => [
-        `policies.${this.recordType}.${recordKey(k.policyName, k.remoteChainSelector)}`,
-        policyRecordOf(state, this.recordType, k) ?? null,
-      ]),
+    return { data }
+  }
+
+  /** Each record the calldata removes or sets, as stored (absent: `null`). */
+  protected sealedFrom(
+    _chain: EVMChain,
+    { changes }: DecodedMultiTokenPoolWrite,
+    { state }: PoolConfigManagerWriteContext,
+  ): Record<string, unknown> {
+    const type = this.recordType
+    return Object.fromEntries(
+      changes.flatMap((c) => {
+        const key =
+          c.kind === 'removePolicyRecord' && c.type === type
+            ? c
+            : c.kind === 'setPolicyRecord' && c.type === type
+              ? c.record
+              : undefined
+        return key
+          ? [
+              [
+                `policies.${type}.${recordKey(key.policyName, key.remoteChainSelector)}`,
+                policyRecordOf(state, type, key) ?? null,
+              ],
+            ]
+          : []
+      }),
     )
-    return { data, expected }
   }
 }
 
@@ -401,16 +422,50 @@ export abstract class InlineRecordWriteOperation<
         (params.set ?? []).map((r) => this.encodeRecord(r)),
       ],
     )
-    // the values the write replaces: each touched lane's inline record (absent: `null`)
-    const current = (l: MultiTokenPoolLaneKey) => inlineRecordOf(state, this.recordType, l) ?? null
-    const expected = Object.fromEntries(
-      [...(params.remove ?? []), ...(params.set ?? [])].map((l) => [
-        `inline.${this.recordType}.${laneKey(l.tokenAddress, l.remoteChainSelector)}`,
-        current(l),
-      ]),
-    )
-    return { data, expected }
+    return { data }
   }
+
+  /** Each lane whose inline record the calldata removes or sets, as stored (absent: `null`). */
+  protected sealedFrom(
+    _chain: EVMChain,
+    decoded: DecodedMultiTokenPoolWrite,
+    { state }: PoolConfigManagerWriteContext,
+  ): Record<string, unknown> {
+    return inlineRecordsSealed(state, this.recordType, inlineLanesOf(decoded, this.recordType))
+  }
+}
+
+/** The lanes whose inline record of `type` a write removes or sets. @internal */
+export function inlineLanesOf(
+  { changes }: DecodedMultiTokenPoolWrite,
+  type: LaneRecordType,
+): MultiTokenPoolLaneKey[] {
+  return changes.flatMap((c) =>
+    c.kind === 'removeInline' && c.type === type
+      ? [{ tokenAddress: c.tokenAddress, remoteChainSelector: c.remoteChainSelector }]
+      : c.kind === 'setInline' && c.type === type
+        ? [
+            {
+              tokenAddress: c.record.tokenAddress,
+              remoteChainSelector: c.record.remoteChainSelector,
+            },
+          ]
+        : [],
+  )
+}
+
+/** Each lane's inline record of `type`, as stored (absent: `null`), by snapshot path. @internal */
+export function inlineRecordsSealed(
+  state: MultiTokenPoolRecordState,
+  type: LaneRecordType,
+  lanes: readonly MultiTokenPoolLaneKey[],
+): Record<string, unknown> {
+  return Object.fromEntries(
+    lanes.map((l) => [
+      `inline.${type}.${laneKey(l.tokenAddress, l.remoteChainSelector)}`,
+      inlineRecordOf(state, type, l) ?? null,
+    ]),
+  )
 }
 
 /**

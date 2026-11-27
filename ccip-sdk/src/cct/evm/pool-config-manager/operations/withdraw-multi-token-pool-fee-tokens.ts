@@ -102,6 +102,11 @@ export class WithdrawMultiTokenPoolFeeTokens extends PoolConfigManagerWriteOpera
     return false
   }
 
+  // it touches no record: what it is judged on is its facts (`readFacts`)
+  protected sealedFrom(): Record<string, unknown> {
+    return {}
+  }
+
   /**
    * What the withdrawal moves, sealed: the PCM the pool calls, and each fee token's balance at the
    * pool (the whole of it is withdrawn).

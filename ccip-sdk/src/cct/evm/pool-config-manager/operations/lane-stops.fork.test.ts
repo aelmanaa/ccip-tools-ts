@@ -24,9 +24,14 @@ import {
 } from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { canonicalHash } from '../../../canonical.ts'
-import { CCTParamsInvalidError, CCTStateChangedError } from '../../../errors.ts'
+import {
+  CCTParamsInvalidError,
+  CCTStateChangedError,
+  CCTTxNotConfirmedError,
+} from '../../../errors.ts'
 import type { RateLimitConfig } from '../../../rate-limit.ts'
 import { EVMTokenManager } from '../../index.ts'
+import { noteMinedBlock } from '../../mined-block.ts'
 import { ApplyMultiTokenPoolInlineRateLimitBucketUpdates } from './apply-multi-token-pool-inline-rate-limit-bucket-updates.ts'
 import { ApplyMultiTokenPoolRateLimitPolicyBucketUpdates } from './apply-multi-token-pool-rate-limit-policy-bucket-updates.ts'
 import { mined as minedOn } from './fork.test.helpers.ts'
@@ -372,31 +377,37 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     if (!deployed) return t.skip('mttp-core not deployed')
     const lanes = [{ tokenAddress: INLINE_TOKEN, remoteChainSelector: FUJI }]
     const wallet = await signer(CORE_CONFIG)
-    const stopped = await cct.stopMultiTokenPoolLanes({
-      poolAddress: CORE_POOL,
-      lanes,
-      direction: 'outbound',
-      wallet,
-    })
+    const stop = { poolAddress: CORE_POOL, lanes, direction: 'outbound' } as const
+    // the stop's snapshot, built first: a send the fork confirms late keeps it
+    let { snapshot } = await withForkRetry(() =>
+      cct.generateUnsignedStopMultiTokenPoolLanes({ ...stop, sender: CORE_CONFIG }),
+    )
+    let blockNumber: number
+    try {
+      ;({ snapshot, blockNumber } = await cct.stopMultiTokenPoolLanes({ ...stop, wallet }))
+    } catch (err) {
+      // the fork's upstream fetch outran the confirmation timeout: recover by the hash, never
+      // resubmit, and record the block as the error's recovery says a caller does
+      if (!(err instanceof CCTTxNotConfirmedError)) throw err
+      const receipt = await (chain.provider as JsonRpcProvider).waitForTransaction(
+        String(err.context.txHash),
+        1,
+        180_000,
+      )
+      assert.equal(receipt?.status, 1)
+      blockNumber = receipt!.blockNumber
+      noteMinedBlock(chain, blockNumber)
+    }
     // immediately: before the fix this read the block before the stop ("not stopped: nothing to lift")
-    const lift = await cct.generateUnsignedLiftMultiTokenPoolLaneStops({
-      poolAddress: CORE_POOL,
-      lanes,
-      direction: 'outbound',
-      getChain,
-      restore: stopped.snapshot,
-    })
-    assert.ok(lift.snapshot.observedAt >= BigInt(stopped.blockNumber))
-    await mined(
-      cct.liftMultiTokenPoolLaneStops({
-        poolAddress: CORE_POOL,
-        lanes,
-        direction: 'outbound',
-        wallet,
+    const lift = await withForkRetry(() =>
+      cct.generateUnsignedLiftMultiTokenPoolLaneStops({
+        ...stop,
         getChain,
-        restore: stopped.snapshot,
+        restore: snapshot,
       }),
     )
+    assert.ok(lift.snapshot.observedAt >= BigInt(blockNumber))
+    await mined(cct.liftMultiTokenPoolLaneStops({ ...stop, wallet, getChain, restore: snapshot }))
   })
 
   it('a state move between the build and the send raises CCTStateChangedError (R1 m1)', async (t) => {
