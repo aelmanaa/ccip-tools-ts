@@ -18,7 +18,7 @@ import {
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateAddress, validateArray, validateUint64 } from '../../validate.ts'
 import { encodePolicyName } from '../contracts.ts'
-import { policyKey } from '../projection.ts'
+import { policyKey, recordKey, subsetKey } from '../projection.ts'
 import type { PolicyRecordKey } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -112,9 +112,8 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
         )
     })
     const removed = new Set(
-      (params.remove ?? []).map(
-        (e) =>
-          `${policyKey(e.policyName, 'policyName')}:${e.remoteChainSelector}:${getAddress(e.tokenAddress)}`,
+      (params.remove ?? []).map((e) =>
+        subsetKey(e.policyName, e.remoteChainSelector, e.tokenAddress),
       ),
     )
     ;(params.add ?? []).forEach((e, i) => {
@@ -136,7 +135,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
           `${token} is not assigned connection policy ${e.policyName} (TokenNotInPolicy): assign it with applyMultiTokenPoolTokenPolicyUpdates({ recordType: 'connection', ... }) first`,
           { context },
         )
-      const key = `${policyKey(e.policyName, 'policyName')}:${e.remoteChainSelector}:${token}`
+      const key = subsetKey(e.policyName, e.remoteChainSelector, token)
       if (isMember(e) && !removed.has(key))
         throw new CCTParamsInvalidError(
           this.name,
@@ -158,7 +157,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
     // the values the write replaces: each touched membership as it was
     const expected = Object.fromEntries(
       [...(params.remove ?? []), ...(params.add ?? [])].map((e) => [
-        `subsets.${policyKey(e.policyName, 'policyName')}:${e.remoteChainSelector}.${getAddress(e.tokenAddress)}`,
+        `subsets.${recordKey(e.policyName, e.remoteChainSelector)}.${getAddress(e.tokenAddress)}`,
         isMember(e),
       ]),
     )

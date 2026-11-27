@@ -22,7 +22,7 @@ import {
   validateUint64,
 } from '../../validate.ts'
 import { encodePolicyName } from '../contracts.ts'
-import { MESSAGE_DIRECTIONS, policyKey, rateLimitBucketOf } from '../projection.ts'
+import { MESSAGE_DIRECTIONS, policyKey, rateLimitBucketOf, recordKey } from '../projection.ts'
 import type { RateLimitPolicyBucketUpdate } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -68,7 +68,7 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
       'updates',
       updates,
       (u) =>
-        `${policyKey(u.policyName, 'policyName')}:${u.remoteChainSelector}:${u.direction}:${String(u.fastFinality)}`,
+        `${recordKey(u.policyName, u.remoteChainSelector)}:${u.direction}:${String(u.fastFinality)}`,
       'bucket',
     )
     return { ...params, updates }
@@ -123,7 +123,7 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
     // the values the write replaces: each bucket as stored
     const expected = Object.fromEntries(
       updates.map((u) => [
-        `policies.rateLimit.${policyKey(u.policyName, 'policyName')}:${u.remoteChainSelector}.${rateLimitBucketOf(u.direction, u.fastFinality)}`,
+        `policies.rateLimit.${recordKey(u.policyName, u.remoteChainSelector)}.${rateLimitBucketOf(u.direction, u.fastFinality)}`,
         recordOf(u)!.rateLimits[rateLimitBucketOf(u.direction, u.fastFinality)],
       ]),
     )

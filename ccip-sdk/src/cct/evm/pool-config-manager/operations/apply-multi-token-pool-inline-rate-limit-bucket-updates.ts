@@ -24,7 +24,7 @@ import {
   validateOneOf,
   validateUint64,
 } from '../../validate.ts'
-import { MESSAGE_DIRECTIONS, rateLimitBucketOf } from '../projection.ts'
+import { MESSAGE_DIRECTIONS, laneKey, rateLimitBucketOf } from '../projection.ts'
 import type { InlineRateLimitBucketUpdate } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -70,7 +70,7 @@ export class ApplyMultiTokenPoolInlineRateLimitBucketUpdates extends PoolConfigM
       'updates',
       updates,
       (u) =>
-        `${getAddress(u.tokenAddress)}:${u.remoteChainSelector}:${u.direction}:${String(u.fastFinality)}`,
+        `${laneKey(u.tokenAddress, u.remoteChainSelector)}:${u.direction}:${String(u.fastFinality)}`,
       'bucket',
     )
     return { ...params, updates }
@@ -123,7 +123,7 @@ export class ApplyMultiTokenPoolInlineRateLimitBucketUpdates extends PoolConfigM
     // the values the write replaces: each bucket as stored
     const expected = Object.fromEntries(
       updates.map((u) => [
-        `inline.rateLimit.${getAddress(u.tokenAddress)}:${u.remoteChainSelector}.${rateLimitBucketOf(u.direction, u.fastFinality)}`,
+        `inline.rateLimit.${laneKey(u.tokenAddress, u.remoteChainSelector)}.${rateLimitBucketOf(u.direction, u.fastFinality)}`,
         recordOf(u)!.rateLimits[rateLimitBucketOf(u.direction, u.fastFinality)],
       ]),
     )

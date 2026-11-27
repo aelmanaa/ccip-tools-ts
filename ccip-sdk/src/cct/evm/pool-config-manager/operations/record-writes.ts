@@ -28,7 +28,7 @@ import {
   toAbiLaneKey,
   validateLaneKeys,
 } from '../contracts.ts'
-import { type MultiTokenPoolRecordState, policyKey } from '../projection.ts'
+import { type MultiTokenPoolRecordState, laneKey, policyKey, recordKey } from '../projection.ts'
 import type { PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -115,8 +115,7 @@ export function checkPolicyRecordWrite(
   { recordsToRemove = [], policiesToRemove = [] }: PolicyRecordWrite,
 ): void {
   const records = state.policies[type] as readonly PolicyRecordKey[]
-  const key = (k: PolicyRecordKey) =>
-    `${policyKey(k.policyName, 'policyName')}:${k.remoteChainSelector}`
+  const key = (k: PolicyRecordKey) => recordKey(k.policyName, k.remoteChainSelector)
   const stored = new Set(records.map(key))
   recordsToRemove.forEach((k, i) => {
     if (!stored.has(key(k)))
@@ -201,7 +200,7 @@ export function validateInlineRecordWrite(
       operation,
       param,
       list,
-      (l) => `${getAddress(l.tokenAddress)}:${l.remoteChainSelector}`,
+      (l) => laneKey(l.tokenAddress, l.remoteChainSelector),
       'lane',
     )
   }
@@ -333,8 +332,7 @@ export abstract class PolicyRecordWriteOperation<
     )
     // the values the write replaces: each touched record as stored (absent: `null`)
     const stored = state.policies[this.recordType] as readonly PolicyRecordKey[]
-    const keyOf = (k: PolicyRecordKey) =>
-      `${policyKey(k.policyName, 'policyName')}:${k.remoteChainSelector}`
+    const keyOf = (k: PolicyRecordKey) => recordKey(k.policyName, k.remoteChainSelector)
     const expected = Object.fromEntries(
       [...(params.recordsToRemove ?? []), ...(params.recordsToSet ?? [])].map((k) => [
         `policies.${this.recordType}.${keyOf(k)}`,
@@ -424,7 +422,7 @@ export abstract class InlineRecordWriteOperation<
       )?.find((r) => r.remoteChainSelector === l.remoteChainSelector) ?? null
     const expected = Object.fromEntries(
       [...(params.remove ?? []), ...(params.set ?? [])].map((l) => [
-        `inline.${this.recordType}.${getAddress(l.tokenAddress)}:${l.remoteChainSelector}`,
+        `inline.${this.recordType}.${laneKey(l.tokenAddress, l.remoteChainSelector)}`,
         current(l),
       ]),
     )
