@@ -863,8 +863,10 @@ const LANE_JUDGING: Readonly<Record<string, 'loosened' | 'goingLive' | 'none'>> 
 /**
  * The refusal of a write whose simulation reverts, single `eth_call` or `eth_simulateV1` bundle
  * alike: the decoded revert (`errorName`, `errorArgs`, `revertData`) and who it was simulated from.
+ * Every MTTP write refuses a reverting simulation with it.
+ * @internal
  */
-function revertRefusal(
+export function revertRefusal(
   input: Pick<RunMultiTokenPoolGuardsInput, 'operation' | 'errorOperation' | 'errorContext'>,
   param: string,
   reason: string,

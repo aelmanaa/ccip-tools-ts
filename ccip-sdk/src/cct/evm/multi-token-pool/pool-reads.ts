@@ -41,6 +41,8 @@ export function isMultiTokenPoolRefusal(err: unknown): err is CCTContractTypeInv
  * Rethrows `resolveTokenPool`'s refusal of a multi-token pool with a reason naming the multi-token
  * pool op to use instead; any other error propagates unchanged. A single-token op keeps its target
  * contract and authorization model, so it never silently becomes a PCM write (design §4.5).
+ * `perToken: false` for a pool-wide setting (ownership, the Router), which the multi-token pool keeps
+ * too, behind its own op.
  * With `alsoHooks`, a refusal of a multi-token pool's hooks contract (`MultiTokenPoolHooks…`, given
  * where `AdvancedPoolHooks` was expected) is redirected too.
  * @throws {@link CCTContractTypeInvalidError} always
@@ -50,7 +52,7 @@ export function redirectMultiTokenPool(
   err: unknown,
   instead: string,
   how: string,
-  { alsoHooks = false }: { alsoHooks?: boolean } = {},
+  { alsoHooks = false, perToken = true }: { alsoHooks?: boolean; perToken?: boolean } = {},
 ): never {
   const hooks =
     alsoHooks &&
@@ -62,7 +64,9 @@ export function redirectMultiTokenPool(
     String(address),
     String(expected),
     String(actual),
-    `a multi-token pool configures this per token: use ${instead} (${how})`,
+    perToken
+      ? `a multi-token pool configures this per token: use ${instead} (${how})`
+      : `a multi-token pool has its own op for this: use ${instead} (${how})`,
     { cause: err },
   )
 }

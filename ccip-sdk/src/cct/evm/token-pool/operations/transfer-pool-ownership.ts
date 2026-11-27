@@ -17,6 +17,7 @@ import { type Interface, getAddress } from 'ethers'
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { redirectMultiTokenPool } from '../../multi-token-pool/pool-reads.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import { validateAddress, validateNonZeroAddress } from '../../validate.ts'
 import {
@@ -111,7 +112,17 @@ export class TransferPoolOwnership extends EVMOperation<TransferPoolOwnershipPar
     chain: EVMChain,
     params: TransferPoolOwnershipParams,
   ): Promise<UnsignedEVMTx> {
-    const { type, version } = await resolveTokenPool(chain, params.poolAddress)
+    const { type, version } = await resolveTokenPool(chain, params.poolAddress).catch(
+      (err: unknown) =>
+        redirectMultiTokenPool(
+          err,
+          'transferMultiTokenPoolOwnership',
+          'the same poolAddress and newOwner; the pool is Ownable2Step, so the new owner then calls acceptMultiTokenPoolOwnership',
+          {
+            perToken: false,
+          },
+        ),
+    )
     const encode = resolveEncoder(this.encoders, version, this.name)
     const unsigned = encode(getTokenPoolInterface(type, version), params)
     await assertPoolOwnershipTransfer(

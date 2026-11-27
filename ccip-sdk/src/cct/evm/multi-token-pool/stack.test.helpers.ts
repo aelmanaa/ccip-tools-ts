@@ -77,6 +77,21 @@ export const AUX_IFACE = new Interface([
   'function getTokenFactory() view returns (address)',
   'function getAdditionalPoolData(address localToken, uint64 remoteChainSelector, bytes4 finality, bytes extraArgs) view returns (bytes)',
 ])
+/**
+ * The owner-gated writes of the pool, the stores and the hooks, as a simulation sees them: served by
+ * `state.writes` (a throw reverts), else they succeed.
+ */
+export const WRITE_IFACE = new Interface([
+  'function transferOwnership(address to)',
+  'function acceptOwnership()',
+  'function setRouter(address newRouter)',
+  'function setPoolConfigManager(address newPoolConfigManager)',
+  'function applyAuthorizedCallerUpdates(tuple(address[] addedCallers, address[] removedCallers) authorizedCallerArgs)',
+  'function applyAllowListUpdates(address[] removes, address[] adds)',
+  'function setPolicyEngine(address newPolicyEngine)',
+  'function setPolicyEngineAllowFailedDetach(address newPolicyEngine)',
+  'function setBlocklist(address blocklist)',
+])
 /** The TokenAdminRegistry view the registry reads use. */
 export const TAR_IFACE = new Interface([
   'function getTokenConfig(address token) view returns ((address administrator, address pendingAdministrator, address tokenPool))',
@@ -132,6 +147,11 @@ export type StackState = {
   auxOwners: Record<string, { owner: string; pendingOwner: string }>
   /** Raw logs served by `getLogs` besides the role logs. */
   logs: { address: string; topics: string[]; data: string; blockNumber: number }[]
+  /**
+   * Simulated owner-gated writes ({@link WRITE_IFACE}), keyed by function name: throwing reverts the
+   * call; a write with no entry succeeds.
+   */
+  writes?: Record<string, (args: readonly unknown[], to: string, from: string | undefined) => void>
 }
 
 /** A consistent default stack: one owner everywhere, PCM authorized on every store. */
@@ -238,9 +258,30 @@ export function stackChain(state: StackState = defaultStack()) {
         ? state.pcm.typeAndVersion
         : (state.stores[to]?.typeAndVersion ?? state.others[to])
   const provider = {
-    call: async ({ to, data, blockTag }: { to: string; data: string; blockTag?: unknown }) => {
+    call: async ({
+      to,
+      data,
+      blockTag,
+      from,
+    }: {
+      to: string
+      data: string
+      blockTag?: unknown
+      from?: string
+    }) => {
       const addr = getAddress(to)
       calls.push(`call:${addr}:${data.slice(0, 10)}`)
+      const write = WRITE_IFACE.parseTransaction({ data })
+      if (write) {
+        callBlocks.push({ name: write.name, blockTag })
+        try {
+          state.writes?.[write.name]?.(write.args, addr, from)
+        } catch (err) {
+          const revertData = (err as { revertData?: string }).revertData
+          throw revertData ? Object.assign(callException(), { data: revertData }) : callException()
+        }
+        return '0x'
+      }
       const fn = [POOL_IFACE, PCM_IFACE, STORE_IFACE]
         .map((i) => i.getFunction(data.slice(0, 10)))
         .find(Boolean)
@@ -340,6 +381,8 @@ export function stackChain(state: StackState = defaultStack()) {
   }
   const chain = {
     provider,
+    // Ethereum Sepolia: `generate` pins every transaction to it
+    network: { chainId: 11155111 },
     typeAndVersion: async (address: string) => {
       const addr = getAddress(address)
       calls.push(`typeAndVersion:${addr}`)
