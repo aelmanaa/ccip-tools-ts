@@ -47,7 +47,7 @@ import {
 
 export type { MultiTokenPoolSimulatedFrom } from './guard-run.ts'
 export type { MultiTokenPoolGuardOptions } from './guards.ts'
-import type { Result } from 'ethers'
+import type { Result, TransactionReceipt } from 'ethers'
 
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
@@ -378,10 +378,22 @@ export abstract class PoolConfigManagerWriteOperation<
    * Builds, then rebuilds with the first build's snapshot right before sending (any movement in
    * between throws `CCTStateChangedError`), then signs and submits.
    */
-  override async execute(
+  override execute(
     chain: EVMChain,
     params: EVMExecuteParams<P>,
   ): Promise<MultiTokenPoolTransactionResult> {
+    return this.executeWith(chain, params, () => ({}))
+  }
+
+  /**
+   * {@link execute}, with result fields of the op's own derived from the mined receipt `submit`
+   * returns: no RPC runs after the send, so nothing that could fail without the hash.
+   */
+  protected async executeWith<X extends object>(
+    chain: EVMChain,
+    params: EVMExecuteParams<P>,
+    fromReceipt: (receipt: TransactionReceipt) => X,
+  ): Promise<MultiTokenPoolTransactionResult & X> {
     const sender = await this.resolveWalletSender(params.wallet, params.sender)
     const first = await this.generate(chain, { ...params, sender })
     // the rebuild right before sending: with the caller's snapshot it must hold; without one, any
@@ -411,7 +423,12 @@ export abstract class PoolConfigManagerWriteOperation<
     // the next read or build on this provider never pins before this write (ethers' block cache)
     noteMinedBlock(chain, receipt.blockNumber)
     const { family: _, transactions: __, ...impact } = unsigned
-    return { hash: response.hash, blockNumber: receipt.blockNumber, ...impact }
+    return {
+      hash: response.hash,
+      blockNumber: receipt.blockNumber,
+      ...impact,
+      ...fromReceipt(receipt),
+    }
   }
 }
 

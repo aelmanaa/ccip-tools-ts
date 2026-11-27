@@ -5,7 +5,7 @@
  * @packageDocumentation
  */
 
-import { type Result, getAddress } from 'ethers'
+import { type Interface, type Result, getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
@@ -171,26 +171,40 @@ export class WithdrawMultiTokenPoolFeeTokens extends PoolConfigManagerWriteOpera
     return this.generate(chain, params as Parsed)
   }
 
-  /** Signs and submits, then reads the amounts from the pool's `FeeTokenWithdrawn` logs. */
+  /**
+   * Signs and submits, then reads the amounts from the pool's `FeeTokenWithdrawn` logs in the mined
+   * receipt. The pool's event ABI is resolved before sending, so no RPC runs after the money moved.
+   * A token with nothing to withdraw emits no log (`FeeTokenHandler` sends only a positive balance),
+   * so it is absent from `withdrawn`.
+   */
   override async execute(
     chain: EVMChain,
     params: EVMExecuteParams<WithdrawMultiTokenPoolFeeTokensParams>,
   ): Promise<WithdrawMultiTokenPoolFeeTokensResult> {
-    const result = await super.execute(chain, params as EVMExecuteParams<Parsed>)
-    const receipt = await chain.provider.getTransactionReceipt(result.hash)
     const { type, version } = await resolveMultiTokenPool(chain, params.poolAddress)
     const pool = getMultiTokenPoolInterface(type, version)
-    const event = pool.getEvent('FeeTokenWithdrawn')!
-    const withdrawn = (receipt?.logs ?? [])
-      .filter(
-        (log) =>
-          getAddress(log.address) === getAddress(params.poolAddress) &&
-          log.topics[0] === event.topicHash,
-      )
-      .map((log) => {
-        const { args } = pool.parseLog(log)!
-        return { token: getAddress(String(args.feeToken)), amount: BigInt(args.amount) }
-      })
-    return { ...result, withdrawn }
+    return this.executeWith(chain, params as EVMExecuteParams<Parsed>, (receipt) => ({
+      withdrawn: feeTokensWithdrawn(receipt.logs, params.poolAddress, pool),
+    }))
   }
+}
+
+/**
+ * The amounts a withdrawal sent, from the pool's own `FeeTokenWithdrawn` logs: a log with the same
+ * topic from any other address (another pool, a token) is not one of them.
+ * @internal
+ */
+export function feeTokensWithdrawn(
+  logs: readonly { address: string; topics: readonly string[]; data: string }[],
+  poolAddress: string,
+  pool: Interface,
+): { token: string; amount: bigint }[] {
+  const event = pool.getEvent('FeeTokenWithdrawn')!
+  const from = getAddress(poolAddress)
+  return logs
+    .filter((log) => getAddress(log.address) === from && log.topics[0] === event.topicHash)
+    .map((log) => {
+      const { args } = pool.parseLog(log)!
+      return { token: getAddress(String(args.feeToken)), amount: BigInt(args.amount) }
+    })
 }
