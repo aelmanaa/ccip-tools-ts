@@ -253,6 +253,7 @@ export async function fittedItems<E>(
     tokenAddressesOf = () => [],
     describe,
     simulate = true,
+    checks: injected,
   }: {
     /** The signers' roles of every item. */
     signerRoles?: PoolGroupPackItem['signerRoles']
@@ -262,6 +263,8 @@ export async function fittedItems<E>(
     describe: (entry: E) => string
     /** Whether to size by simulation too; defaults to `true`. */
     simulate?: boolean
+    /** The one-transaction checks (tests inject them); defaults to {@link oneTransactionChecks}. */
+    checks?: Awaited<ReturnType<typeof oneTransactionChecks>>
   },
 ): Promise<PoolGroupPackItem[]> {
   if (!entries.length) return []
@@ -270,14 +273,16 @@ export async function fittedItems<E>(
     instructions: [await build(chunk)],
     ...(signerRoles && { signerRoles }),
   })
-  const checks = await oneTransactionChecks({
-    operation,
-    chain,
-    payer: parsed.payer,
-    items: [],
-    ...(parsed.budget && { budget: parsed.budget }),
-    ...(parsed.durableNonces && { durableNonces: parsed.durableNonces }),
-  })
+  const checks =
+    injected ??
+    (await oneTransactionChecks({
+      operation,
+      chain,
+      payer: parsed.payer,
+      items: [],
+      ...(parsed.budget && { budget: parsed.budget }),
+      ...(parsed.durableNonces && { durableNonces: parsed.durableNonces }),
+    }))
   const chunks: E[][] = []
   let current: E[] = []
   for (const entry of entries) {

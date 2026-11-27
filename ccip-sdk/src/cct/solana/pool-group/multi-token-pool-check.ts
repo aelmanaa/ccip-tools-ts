@@ -577,8 +577,9 @@ async function programHasPoolGroups(chain: SolanaChain, program: PublicKey): Pro
  * fee floor, the stored EVM token and pool bytes, mint authority (burn-mint pools), pauses and
  * stops, the send lock budget, and the remote side ({@link evaluateSolanaLaneRemote}). With `post`
  * the lane's own accounts and view are judged as a simulated write leaves them (the make-live check
- * of a write); the registry, the mint, the send resolution and the remote side are read as they are,
- * since no pool-group write changes them.
+ * of a write); the registry, the mint and the remote side are read as they are, since no
+ * pool-group write changes them. The send lock budget is measured on the current state: the write
+ * guard warns when a write changes the records a send passes (S3b N3).
  * @internal
  */
 export async function checkSolanaMultiTokenPoolLane(

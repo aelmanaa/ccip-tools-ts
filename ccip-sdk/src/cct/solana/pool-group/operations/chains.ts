@@ -23,6 +23,7 @@ import { createPoolGroupProgram } from '../program.ts'
 import {
   type SectionWrite,
   assertDefaultPoolsFit,
+  assertPoolsFit,
   classBit,
   exactSection,
   parseSectionUpdate,
@@ -138,6 +139,13 @@ export class AddPoolGroupChain extends PoolGroupWriteOperation<
         'remoteChainSelector',
         `the pool group has ${selectors.length} chains, the most it can (TooManyGroupChains): remove one first`,
       )
+    // the new record copies the default, pools included: each must be an address of the chain
+    assertPoolsFit(
+      this.name,
+      group.defaultPolicy.connection.remotePools.map((p) => Buffer.from(p.address.address)),
+      [selector],
+      'remoteChainSelector',
+    )
     const record = poolGroupPdas.groupChain(ref.program, ref.group, selector)
     const ix = await createPoolGroupProgram(chain, ref.program, parsed.payer)
       .methods.addGroupChain({ remoteChainSelector: new BN(selector.toString()) })

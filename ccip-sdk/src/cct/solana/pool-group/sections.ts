@@ -350,14 +350,34 @@ export function assertDefaultPoolsFit(
   following: readonly bigint[],
 ): void {
   if (write.kind !== 'update' || write.update.policyClass !== 'connection') return
-  write.update.remotePools?.forEach(({ address }, i) => {
-    for (const selector of following)
+  assertPoolsFit(
+    operation,
+    (write.update.remotePools ?? []).map((p) => p.address),
+    following,
+    'section.connection.remotePools',
+  )
+}
+
+/**
+ * Checks pool bytes against chains' families ({@link assertDefaultPoolsFit}; `addPoolGroupChain`
+ * runs it on the default's pools for the new chain, S3b N4).
+ * @throws {@link CCTParamsInvalidError} (param `<param>[i]`) if a pool is no address of a chain
+ * @internal
+ */
+export function assertPoolsFit(
+  operation: string,
+  pools: readonly Buffer[],
+  selectors: readonly bigint[],
+  param: string,
+): void {
+  pools.forEach((address, i) => {
+    for (const selector of selectors)
       try {
         decodeRemoteAddress(address, selector)
       } catch (cause) {
         throw new CCTParamsInvalidError(
           operation,
-          `section.connection.remotePools[${i}]`,
+          `${param}[${i}]`,
           `0x${address.toString('hex')} is not an address of chain ${selector}, which follows the default for CONNECTION: give a pool every following chain can name, or detach the chain first`,
           { cause: cause instanceof Error ? cause : undefined },
         )

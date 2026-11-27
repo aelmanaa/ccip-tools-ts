@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
 
-import { Wallet as AnchorWallet } from '@coral-xyz/anchor'
+import { BN, Wallet as AnchorWallet } from '@coral-xyz/anchor'
 import { Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js'
 
 import '../../../index.ts'
@@ -32,10 +32,12 @@ import {
   surfnetRequest,
 } from '../../../solana/__tests__/surfpool.ts'
 import { SolanaChain } from '../../../solana/index.ts'
+import { deriveTokenPoolChainConfigV2Pda } from '../../../solana/token-pool.ts'
 import { jsonStringify } from '../../../utils.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import { SolanaTokenManager } from '../index.ts'
 import { deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
+import { poolGroupsCoder } from './accounts.ts'
 import type { PoolGroupSectionUpdate } from './write-types.ts'
 
 const PROGRAM = '22P6h4QV5wswBX63KCncFGctC9dyVRMjykBBDdhwXjg7'
@@ -530,6 +532,92 @@ describe(
           wallet: wallet(),
         })
         assert.equal(reset.transactions.length, 1)
+      })
+
+      it('N1: moving SECURITY off a lane with threshold CCVs needs confirmCCVChanges, even with equal base lists', async (t) => {
+        const lane = lanes[0]!
+        const mint = new PublicKey(lane.tokenAddress)
+        const program = new PublicKey(PROGRAM)
+        const view = await cct.getMultiTokenPoolLane({ ...lane, poolAddress: PROGRAM })
+        if (view.outboundStatus.status !== 'ok' && view.inboundStatus.status !== 'ok')
+          return t.skip('the lane is not live')
+        // the State owner is the test key (the assignment case rewrote it)
+        const current = lane.classSource!
+        const keep = (k: 'connection' | 'fee' | 'rateLimit') =>
+          current[k].kind === 'policy'
+            ? { kind: 'policy' as const, policyId: current[k].policyId }
+            : { kind: current[k].kind }
+        const base = {
+          ...g,
+          remoteChainSelector: lane.remoteChainSelector,
+          tokenAddresses: [lane.tokenAddress],
+          getChain,
+        }
+        const sources = (security: { kind: 'inline' } | { kind: 'default' }) => ({
+          connection: keep('connection'),
+          fee: keep('fee'),
+          rateLimit: keep('rateLimit'),
+          security,
+        })
+        const laneKey = {
+          tokenAddress: lane.tokenAddress,
+          remoteChainSelector: lane.remoteChainSelector,
+        }
+        if (current.security.kind !== 'inline')
+          await cct.assignPoolGroupLanePolicies({
+            ...base,
+            classSource: sources({ kind: 'inline' }),
+            confirmCCVChanges: [laneKey],
+            wallet: wallet(),
+          })
+        // threshold CCVs on the inline lane, with base lists equal to the record's (rewritten on the
+        // fork): only the thresholds change when SECURITY moves to the default
+        const record = await cct.getPoolGroupChain({
+          ...g,
+          remoteChainSelector: lane.remoteChainSelector,
+        })
+        const keys = (list: string[]) =>
+          list.map((k) => (k === 'default' ? PublicKey.default : new PublicKey(k)))
+        const v2 = deriveTokenPoolChainConfigV2Pda(program, lane.remoteChainSelector, mint)
+        const info = await fork.connection!.getAccountInfo(v2)
+        assert.ok(info)
+        const decoded = poolGroupsCoder.accounts.decode('chainConfigV2', info.data)
+        const bodyLength = (await poolGroupsCoder.accounts.encode('chainConfigV2', decoded)).length
+        decoded.ccvConfig.outboundCcvs = keys(record.policy.security.current.outbound)
+        decoded.ccvConfig.inboundCcvs = keys(record.policy.security.current.inbound)
+        decoded.ccvConfig.thresholdAmount = new BN(1)
+        decoded.ccvConfig.thresholdOutboundCcvs = [Keypair.generate().publicKey]
+        const body = await poolGroupsCoder.accounts.encode('chainConfigV2', decoded)
+        const data = Buffer.concat([body, info.data.subarray(bodyLength)])
+        await surfnetRequest(fork.connection!, 'surfnet_setAccount', [
+          v2.toBase58(),
+          {
+            data: data.toString('hex'),
+            lamports:
+              (await fork.connection!.getMinimumBalanceForRentExemption(data.length)) +
+              info.lamports,
+            owner: info.owner.toBase58(),
+            executable: false,
+          },
+        ])
+        if (record.policy.security.pending)
+          return t.skip('the chain record has a pending CCV set, so the lists differ anyway')
+        // moving SECURITY to the default clears the thresholds: refused without the confirmation
+        await assert.rejects(
+          cct.generateUnsignedAssignPoolGroupLanePolicies({
+            ...base,
+            classSource: sources({ kind: 'default' }),
+            payer: owner.publicKey.toBase58(),
+          }),
+          isParam('confirmCCVChanges'),
+        )
+        const confirmed = await cct.generateUnsignedAssignPoolGroupLanePolicies({
+          ...base,
+          classSource: sources({ kind: 'default' }),
+          confirmCCVChanges: [laneKey],
+          payer: owner.publicKey.toBase58(),
+        })
+        assert.equal(confirmed.transactions.length, 1)
       })
     })
   },

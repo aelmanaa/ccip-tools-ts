@@ -155,6 +155,8 @@ export type Tail = {
   uid?: Buffer
   /** A pending CCV set the lane copied. */
   ccvPending?: { outbound: PublicKey[]; inbound: PublicKey[]; epoch: bigint; activatesAt: bigint }
+  /** The body's threshold CCVs (`CCVConfig.threshold_*`). */
+  thresholds?: { amount: bigint; outbound: PublicKey[] }
 }
 
 /** A Borsh `Vec<Pubkey>`. */
@@ -167,6 +169,11 @@ const keyVec = (keys: PublicKey[]) => {
 export function chainConfigV2Data(tail?: Tail, mint = MINT): Buffer {
   const body = encodeType('ChainConfigV2', (v) => {
     Object.assign(v, { version: tail ? 2 : 1, mint, remoteChainSelector: bn(SEPOLIA) })
+    if (tail?.thresholds)
+      Object.assign(v.ccvConfig as Record<string, unknown>, {
+        thresholdAmount: bn(tail.thresholds.amount),
+        thresholdOutboundCcvs: tail.thresholds.outbound,
+      })
   })
   const data = account('ChainConfigV2', body)
   if (!tail) return data

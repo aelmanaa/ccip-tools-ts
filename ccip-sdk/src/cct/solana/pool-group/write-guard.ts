@@ -155,6 +155,13 @@ function classFingerprint(state: PoolGroupLaneState, cls: 'connection' | 'fee'):
   })
 }
 
+/** The named records a lane references, as a stable string. */
+const namedRecords = (state: PoolGroupLaneState) =>
+  [...state.named.values()]
+    .map((n) => n.address.toBase58())
+    .sort()
+    .join()
+
 /** Where a lane takes SECURITY from (kind, and the named record). */
 function securitySource(state: PoolGroupLaneState): string {
   const source = state.ext?.poolGroupAddress ? state.ext.classSource.security : undefined
@@ -162,9 +169,13 @@ function securitySource(state: PoolGroupLaneState): string {
   return `policy:${state.named.get(source.slot)?.address.toBase58() ?? source.slot}`
 }
 
-/** The CCV lists a lane applies (its body copy and a pending copy). */
+/**
+ * The CCV configuration a lane applies: its body's base lists, its threshold amount and threshold
+ * lists (a source change clears them, S3b N1), and a pending copy.
+ */
 const effectiveCcvs = (state: PoolGroupLaneState) => ({
   current: state.v2?.lane.ccvs ?? null,
+  thresholds: state.v2?.lane.thresholds ?? null,
   pending: state.ext?.ccvPending ?? null,
 })
 
@@ -435,14 +446,18 @@ async function checkLanesAfter(
           )
           if (mode === 'live' || !found.some((f) => f.severity === 'error')) return found
           // a lane live before and after: only the errors the write brings refuse (A23)
+          // the same fact: the code, the record type and the reason (which names the direction,
+          // the pool and the values), never the code alone (S3b N2)
+          const fact = (f: MultiTokenPoolLaneFinding) =>
+            `${f.check}|${f.recordType ?? ''}|${f.reason}`
           const had = new Set(
             (await check(operation, chain, params, { program, mint, selector })).findings
               .filter((f) => f.severity === 'error')
-              .map((f) => f.check),
+              .map(fact),
           )
           // a fact that cannot be read is never "the same as before": it fails closed
           return found.map((f) =>
-            f.severity === 'error' && had.has(f.check) && !UNREAD_CHECKS.includes(f.check)
+            f.severity === 'error' && had.has(fact(f)) && !UNREAD_CHECKS.includes(f.check)
               ? {
                   ...f,
                   severity: 'warning' as const,
@@ -637,6 +652,23 @@ export async function judgePoolGroupWrite(
         classFingerprint(s0, 'fee') !== classFingerprint(s1, 'fee'))
     )
       checkedLanes.push({ key, mint, selector, open: openOf(after1), mode: 'changed' })
+    // the send lock budget is measured on the state before the write: a write that changes the
+    // records a send passes (an assignment) is reported, to re-check after it lands (S3b N3)
+    if (
+      s0 &&
+      !isUnread(s0) &&
+      s1 &&
+      !isUnread(s1) &&
+      (after1.outbound || after1.inbound) &&
+      namedRecords(s0) !== namedRecords(s1)
+    )
+      findings.push({
+        check: 'ACCOUNT_LOCKS_EXCEEDED',
+        severity: 'warning',
+        ...key,
+        reason:
+          'the write changes the policy records a send of this lane passes, and the send lock budget was measured before it: run checkMultiTokenPoolLane after it lands',
+      })
     // a SECURITY source change swaps the lane's CCVs at once (no notice): refused on a lane live
     // before and after unless its effective CCVs are unchanged or the caller confirms it (A23)
     if (
@@ -717,7 +749,11 @@ export async function judgePoolGroupWrite(
         'guards',
         `the lane check fails on ${failing.length} problem(s) as the write leaves the lanes it makes live or whose CONNECTION or FEE it changes: ${failing
           .map((f) => `${f.check} on ${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
-          .join('; ')}`,
+          .join('; ')}${
+          !input.liveCheck?.getChain && failing.some((f) => f.check === 'REMOTE_UNREADABLE')
+            ? '. Pass getChain: every remote chain of these lanes must be readable (writes accept no attestations)'
+            : ''
+        }`,
         { context: { goingLive, findings: failing } },
       )
   }
