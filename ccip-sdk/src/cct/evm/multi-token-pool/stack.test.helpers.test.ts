@@ -6,8 +6,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { type Fragment, type Interface, FunctionFragment } from 'ethers'
+import { type Fragment, FunctionFragment, Interface } from 'ethers'
 
+import TOKEN_ADMIN_REGISTRY_V1_5_0_ABI from '../artifacts/abi/V1_5_0/token-admin-registry.ts'
 import {
   type MultiTokenPoolContractType,
   MULTI_TOKEN_POOL_HOOKS_TYPES,
@@ -19,7 +20,14 @@ import {
   getMultiTokenPoolInterface,
   poolConfigManagerRoleId,
 } from './contracts.ts'
-import { AUX_IFACE, PCM_IFACE, POOL_IFACE, STORE_IFACE, roleId } from './stack.test.helpers.ts'
+import {
+  AUX_IFACE,
+  PCM_IFACE,
+  POOL_IFACE,
+  STORE_IFACE,
+  TAR_IFACE,
+  roleId,
+} from './stack.test.helpers.ts'
 
 const STORE_TYPES = ['ConnectionPolicyStore', 'FeePolicyStore', 'SecurityPolicyStore'] as const
 const ALL: MultiTokenPoolContractType[] = [
@@ -60,6 +68,7 @@ describe('stack stub vs vendored ABIs (cct/evm multi-token-pool)', () => {
     assertSubset(PCM_IFACE, vendored([POOL_CONFIG_MANAGER_TYPE, ...STORE_TYPES]), 'PCM_IFACE')
     assertSubset(STORE_IFACE, vendored(STORE_TYPES), 'STORE_IFACE')
     assertSubset(AUX_IFACE, vendored(ALL), 'AUX_IFACE')
+    assertSubset(TAR_IFACE, [new Interface(TOKEN_ADMIN_REGISTRY_V1_5_0_ABI)], 'TAR_IFACE')
   })
 
   it('derives the same role ids as the SDK', () => {

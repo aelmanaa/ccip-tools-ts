@@ -10,9 +10,10 @@ import { dataLength, getAddress, hexlify, isError, zeroPadValue } from 'ethers'
 import type { Chain, ChainGetter } from '../../../chain.ts'
 import { CCIPTokenPoolChainConfigNotFoundError } from '../../../errors/index.ts'
 import { EVMChain } from '../../../evm/index.ts'
-import { decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
+import { decodeLaneConnection, decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
+import { CCTContractTypeInvalidError, CCTContractVersionUnsupportedError } from '../../errors.ts'
 import type { MultiTokenPoolRemoteAttestation } from '../../multi-token-pool.ts'
 import { laneFamilyOf } from '../../remote-address.ts'
 import { readAllAuthorizedCallers } from '../advanced-pool-hooks/contracts.ts'
@@ -25,7 +26,8 @@ import {
   resolveMultiTokenPool,
   uidProviderContract,
 } from '../multi-token-pool/contracts.ts'
-import { isNotCcipContract } from '../query.ts'
+import { isMissingFunction, isNotCcipContract } from '../query.ts'
+import { toAbiLaneKey } from './contracts.ts'
 import {
   type MultiTokenPoolGuardFactRequests,
   type MultiTokenPoolGuardFacts,
@@ -231,8 +233,14 @@ async function readProviderData({
           },
         )
         .catch((err: unknown) => {
-          if (!isError(err, 'CALL_EXCEPTION')) throw err
-          out.refused.set(key, err.revert?.name ?? err.shortMessage)
+          // a revert, or no such function (an EOA, another contract): every send reverts
+          if (!isMissingFunction(err)) throw err
+          out.refused.set(
+            key,
+            isError(err, 'CALL_EXCEPTION')
+              ? (err.revert?.name ?? err.shortMessage)
+              : 'it has no getAdditionalPoolData',
+          )
           return undefined
         })
       if (data === undefined) return
@@ -266,12 +274,14 @@ async function readLocalAcceptance(
   const localAcceptsInbound = new Map<string, boolean>()
   const localAcceptsLegacy = new Map<string, boolean>()
   const valid = (provider: string, lane: ProjectedMultiTokenPoolLane, data: string) =>
-    uidProviderContract(chain, provider).isAdditionalPoolDataValid(
+    isDataValid(
+      uidProviderContract(chain, provider),
       lane.tokenAddress,
       lane.remoteChainSelector,
-      ANY_FINALITY_CONFIG,
       data,
-      { blockTag },
+      {
+        blockTag,
+      },
     )
   await Promise.all(
     requests.remoteLanes.map(async (lane) => {
@@ -402,10 +412,12 @@ async function readRemoteLane(
   // limit the lane check compares with this lane's inbound
   const legacy = lane.connection.poolDataFormat === 'legacy'
   // a remote multi-token pool runs its token's provider on what arrives, and adds its own on a send
+  // a remote multi-token pool runs its token's provider on what arrives, and adds its own on a send;
+  // any other pool sends legacy data and adds nothing
   const provider =
     readsLongData && remote instanceof EVMChain
-      ? await readRemoteProviderVerdict(remote, registryPool, remoteToken, localSelector, sends)
-      : { remoteSendsData: '0x' }
+      ? await readRemoteMultiTokenPoolSide(remote, registryPool, remoteToken, localSelector, sends)
+      : { remoteSendsData: '0x', remoteSendsLegacy: true }
   if (!legacy && !input.readRemoteRateLimits)
     return { status: 'known', readsLongData, registryPool, mapsBack: true, ...provider }
   const back = await remote
@@ -436,10 +448,31 @@ async function readRemoteLane(
 }
 
 /**
- * A remote multi-token pool's provider for the remote token: whether it accepts the data this lane
- * sends, and the data it sends back. No provider accepts anything and sends nothing.
+ * `isAdditionalPoolDataValid`, as the receiving store runs it: a revert, or a provider without the
+ * function, refuses the receive (`false`); transport errors propagate.
  */
-async function readRemoteProviderVerdict(
+async function isDataValid(
+  provider: ReturnType<typeof uidProviderContract>,
+  token: string,
+  remoteChainSelector: bigint,
+  data: string,
+  overrides: { blockTag?: number } = {},
+): Promise<boolean> {
+  return provider
+    .isAdditionalPoolDataValid(token, remoteChainSelector, ANY_FINALITY_CONFIG, data, overrides)
+    .catch((err: unknown) => {
+      if (isMissingFunction(err)) return false
+      throw err
+    })
+}
+
+/**
+ * What a remote multi-token pool sends toward this chain and accepts from it: its lane's format, and
+ * its token's provider's verdict on the data this lane sends and the data it adds. No provider
+ * accepts anything and adds nothing. A remote the SDK cannot resolve (another variant, an unknown
+ * version) leaves it unread.
+ */
+async function readRemoteMultiTokenPoolSide(
   remote: EVMChain,
   remotePool: string,
   remoteToken: string,
@@ -448,35 +481,61 @@ async function readRemoteProviderVerdict(
 ): Promise<
   Pick<
     Extract<MultiTokenPoolRemoteLaneFacts, { status: 'known' }>,
-    'remoteAcceptsOutbound' | 'remoteSendsData' | 'remoteProviderRefused'
+    | 'remoteAcceptsOutbound'
+    | 'remoteSendsData'
+    | 'remoteProviderRefused'
+    | 'remoteSendsLegacy'
+    | 'remoteSideUnread'
   >
 > {
-  const { version } = await resolveMultiTokenPool(remote, remotePool)
-  const pcm = getAddress(
-    resultToObject(
-      await multiTokenPoolContract(remote, remotePool, version).getPoolConfigManager(),
-    ),
-  )
-  const [config] = await poolConfigManagerContract(remote, pcm, version).getTokenConfigBatch([
-    remoteToken,
+  const resolved = await resolveMultiTokenPool(remote, remotePool).catch((err: unknown) => {
+    if (
+      err instanceof CCTContractTypeInvalidError ||
+      err instanceof CCTContractVersionUnsupportedError
+    )
+      return err
+    throw err
+  })
+  if (resolved instanceof Error)
+    return {
+      remoteSideUnread: `the SDK cannot read remote pool ${remotePool}: ${resolved.message}`,
+    }
+  const { version } = resolved
+  const pcmRaw = await multiTokenPoolContract(remote, remotePool, version)
+    .getPoolConfigManager()
+    .catch((err: unknown) => {
+      if (isMissingFunction(err)) return undefined
+      throw err
+    })
+  if (pcmRaw === undefined)
+    return { remoteSideUnread: `remote pool ${remotePool} reports no PoolConfigManager` }
+  const pcm = poolConfigManagerContract(remote, getAddress(resultToObject(pcmRaw)), version)
+  const [[config], [connection]] = await Promise.all([
+    pcm.getTokenConfigBatch([remoteToken]),
+    pcm.getLaneConnectionBatch([
+      toAbiLaneKey({ tokenAddress: remoteToken, remoteChainSelector: localSelector }),
+    ]),
   ])
+  const remoteSendsLegacy =
+    decodeLaneConnection(resultToObject(connection!), String).poolDataFormat === 'legacy'
   const provider = decodeTokenProfileFields(resultToObject(config!)).additionalPoolDataProvider
-  if (!provider) return { remoteSendsData: '0x' }
+  if (!provider) return { remoteSendsData: '0x', remoteSendsLegacy }
   const contract = uidProviderContract(remote, provider)
-  const [remoteAcceptsOutbound, remoteSendsData] = await Promise.all([
-    contract.isAdditionalPoolDataValid(remoteToken, localSelector, ANY_FINALITY_CONFIG, sends),
+  const [remoteAcceptsOutbound, adds] = await Promise.all([
+    isDataValid(contract, remoteToken, localSelector, sends),
     contract
       .getAdditionalPoolData(remoteToken, localSelector, ANY_FINALITY_CONFIG, '0x')
       .then(hexlify, (err: unknown) => {
-        if (!isError(err, 'CALL_EXCEPTION')) throw err
+        if (!isMissingFunction(err)) throw err
         return undefined
       }),
   ])
   return {
     remoteAcceptsOutbound,
-    ...(remoteSendsData === undefined
+    remoteSendsLegacy,
+    ...(adds === undefined
       ? { remoteProviderRefused: 'the remote provider refuses to produce data for its token' }
-      : { remoteSendsData }),
+      : { remoteSendsData: remoteSendsLegacy ? '0x' : adds }),
   }
 }
 
@@ -547,8 +606,9 @@ async function readSolanaRemoteLane(
       status: 'unknown',
       reason: `the Solana OffRamp's address length for this chain could not be read (${String(length)}), so the bytes the remote lane back must store for the serving pool are unknown`,
     }
-  // the trailing `length` bytes of the 32-byte word the OnRamp sends
-  const trimmed = (address: string) => `0x${abiWord(address).slice(2 + (32 - (length ?? 20)) * 2)}`
+  // the trailing `length` bytes of the 32-byte word the OnRamp sends (read; unused without a lane back)
+  const kept = typeof length === 'number' ? length : 32
+  const trimmed = (address: string) => `0x${abiWord(address).slice(2 + (32 - kept) * 2)}`
   let mapsBackReason: string | undefined
   if (!back)
     mapsBackReason = `the remote pool ${facts.registryPool} has no lane back toward this chain: inbound transfers revert there`
@@ -572,6 +632,10 @@ async function readSolanaRemoteLane(
     mapsBack: mapsBackReason === undefined,
     ...(mapsBackReason !== undefined && { mapsBackReason }),
     ...(back?.failsClosed !== undefined && { failsClosed: back.failsClosed }),
+    // the lane back sends legacy data, or long data with its UID as the additional data
+    // (chainlink-ccip-solana 7558722 base-token-pool/src/pool_data.rs:121 encode_long_for_mint)
+    remoteSendsLegacy: facts.poolDataFormat !== 'long',
+    remoteSendsData: facts.poolDataFormat === 'long' ? (facts.uid ?? '0x') : '0x',
     ...(back?.admitted !== undefined && { admitted: back.admitted }),
     ...(facts.uid !== undefined && { uid: facts.uid }),
     ...(input.readRemoteRateLimits &&

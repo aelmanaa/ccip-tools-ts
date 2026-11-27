@@ -4,9 +4,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { Interface, getAddress, makeError } from 'ethers'
+import { Interface, ZeroAddress, getAddress, makeError } from 'ethers'
 
-import { CCIPTokenNotInRegistryError, CCIPTypeVersionInvalidError } from '../../../errors/index.ts'
+import { CCIPTypeVersionInvalidError } from '../../../errors/index.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import { MultiTokenPoolVersion } from '../multi-token-pool/contracts.ts'
 import { readPoolsServingPoolConfigManager } from './serving-pools.ts'
@@ -34,6 +34,10 @@ const [T_TARGET, T_SHARING, T_FOREIGN, T_SINGLE, T_GARBLED, T_MUTE, T_UNLISTED, 
   'a8',
 ].map(addr) as string[]
 const IFACE = new Interface(['function getPoolConfigManager() view returns (address)'])
+const TAR_IFACE = new Interface([
+  'function getTokenConfig(address token) view returns ((address administrator, address pendingAdministrator, address tokenPool))',
+])
+const PENDING = addr('77')
 
 /** A chain whose registry, `typeAndVersion` and `getPoolConfigManager` answers are given here. */
 function chain(): { chain: EVMChain; blockTags: unknown[] } {
@@ -58,18 +62,23 @@ function chain(): { chain: EVMChain; blockTags: unknown[] } {
   return {
     blockTags,
     chain: {
-      getRegistryTokenConfig: async (_tar: string, token: string) => {
-        if (token === T_UNLISTED) throw new CCIPTokenNotInRegistryError(token, TAR)
-        return { administrator: TAR, tokenPool: registry[token] }
-      },
       typeAndVersion: async (a: string) => {
         const t = types[getAddress(a)]
         if (t instanceof Error) throw t
         return [t!.split(' ')[0], t!.split(' ')[1], t]
       },
       provider: {
-        call: async ({ to, blockTag }: { to: string; blockTag?: unknown }) => {
+        call: async ({ to, data, blockTag }: { to: string; data: string; blockTag?: unknown }) => {
           blockTags.push(blockTag)
+          if (getAddress(to) === TAR) {
+            // a token the registry does not list reads as an all-zero entry
+            const [token] = TAR_IFACE.decodeFunctionData('getTokenConfig', data)
+            const pool = registry[getAddress(String(token))]
+            const pending = getAddress(String(token)) === T_SHARING ? PENDING : ZeroAddress
+            return TAR_IFACE.encodeFunctionResult('getTokenConfig', [
+              [pool ? TAR : ZeroAddress, pending, pool ?? ZeroAddress],
+            ])
+          }
           return IFACE.encodeFunctionResult('getPoolConfigManager', [pcms[getAddress(to)]])
         },
       },
@@ -104,7 +113,11 @@ describe('readPoolsServingPoolConfigManager (cct/evm pool-config-manager)', () =
     assert.deepEqual(r.diverged.map((d) => d.pool).sort(), [FOREIGN, SINGLE, GARBLED, MUTE].sort())
     // a token the registry does not list reads as "no pool", the same as no pool set
     assert.ok(!r.diverged.some((d) => d.token === T_UNLISTED || d.token === T_NOPOOL))
-    assert.deepEqual(blockTags, [1234, 1234])
+    // every admin state is visible in the entries, a pending one included
+    assert.equal(r.entries.get(T_SHARING!)?.pendingAdministrator, PENDING)
+    assert.equal(r.entries.get(T_UNLISTED!)?.pool, null)
+    // every read is pinned: 8 registry entries, then 2 PoolConfigManager reads
+    assert.deepEqual(blockTags, Array(10).fill(1234))
   })
 
   it('propagates transport errors', async () => {

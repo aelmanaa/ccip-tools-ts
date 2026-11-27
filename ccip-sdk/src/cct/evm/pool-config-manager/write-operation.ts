@@ -11,12 +11,11 @@ import type { EVMChain } from '../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
-import {
-  type MultiTokenPoolExpectedSnapshot,
-  type MultiTokenPoolLaneFinding,
-  type MultiTokenPoolRemoteCheckOptions,
-  type MultiTokenPoolSnapshot,
-  sortFindings,
+import type {
+  MultiTokenPoolExpectedSnapshot,
+  MultiTokenPoolLaneFinding,
+  MultiTokenPoolRemoteCheckOptions,
+  MultiTokenPoolSnapshot,
 } from '../../multi-token-pool.ts'
 import type { TransactionResult } from '../../operation.ts'
 import {
@@ -35,8 +34,11 @@ import {
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from './contracts.ts'
-import { runMultiTokenPoolGuards } from './guard-run.ts'
-import { validateMultiTokenPoolGuardOptions } from './guards.ts'
+import { type MultiTokenPoolSimulatedFrom, runMultiTokenPoolGuards } from './guard-run.ts'
+
+export type { MultiTokenPoolSimulatedFrom } from './guard-run.ts'
+export type { MultiTokenPoolGuardOptions } from './guards.ts'
+import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
 /** Common fields of every PoolConfigManager write. */
 export type PoolConfigManagerWriteParams = PoolConfigManagerTarget & {
@@ -54,37 +56,26 @@ export type PoolConfigManagerWriteParams = PoolConfigManagerTarget & {
  * thresholds, never switches that skip a rule.
  */
 export type MultiTokenPoolWriteGuards = MultiTokenPoolRemoteCheckOptions &
-  MultiTokenPoolExpectedSnapshot & {
-    /** Accept non-empty CCV lists without the default-CCV placeholder `address(0)`. Defaults to `false`. */
-    allowDroppingDefaultCCVs?: boolean
-    /** Highest resolved transfer fee in bps on any affected lane, both tiers. Defaults to 1,000. */
-    maxTransferFeeBps?: number
-    /** Lowest resolved `destGasOverhead`. Defaults to 200,000, plus 100,000 when a hook resolves. */
-    minDestGasOverhead?: number
-    /** Lanes the caller agrees this write closes (connection gone after the write). */
-    confirmClosing?: MultiTokenPoolLaneKey[]
-    /**
-     * Lanes, per direction, the caller agrees this write opens: refused when a lane it opens goes
-     * live in a direction not listed. A planner passes its planned lanes.
-     */
-    confirmOpening?: MultiTokenPoolLaneDirections[]
-    /**
-     * Remote chains where a lane may accept legacy pool data from a remote multi-token pool: only for
-     * a migration window.
-     */
-    migrationWindowChains?: bigint[]
-  }
+  MultiTokenPoolExpectedSnapshot &
+  MultiTokenPoolGuardOptions
 
 /**
- * Unsigned output of a multi-token pool write: one transaction, plus what a reviewer of a multisig
- * proposal needs, since the signed path is not the only path.
+ * Unsigned output of a multi-token pool write: one transaction, plus its impact on the lanes for a
+ * reviewer of a multisig proposal. The new values are in the calldata; `snapshot.expected` holds the
+ * values the write replaces, as they were when it was built.
  */
 export type MultiTokenPoolUnsignedTx = UnsignedEVMTx & {
   /**
    * `true` when the projection was cross-checked with `eth_simulateV1` (the write plus the lane views,
-   * one block, from `sender`); `false` when the RPC lacks it, or no `sender` was given.
+   * one block); `false` when the RPC lacks it, or the write was not simulated.
    */
   projectionVerified: boolean
+  /**
+   * Who the write was simulated from: `'sender'` (the PCM role gate included), or, with no `sender`,
+   * `'pcm'`: each store call the PCM forwards, from the PCM, so every store-level revert is caught
+   * but the PCM role gate is not checked. `'none'`: a write that reaches no store, not simulated.
+   */
+  simulatedFrom: MultiTokenPoolSimulatedFrom
   /** Lanes the write changes. */
   affectedLanes: MultiTokenPoolLaneKey[]
   /** Lanes live in a direction after the write that were not before, with those directions. */
@@ -99,7 +90,7 @@ export type MultiTokenPoolUnsignedTx = UnsignedEVMTx & {
 export type MultiTokenPoolTransactionResult = TransactionResult &
   Pick<
     MultiTokenPoolUnsignedTx,
-    'projectionVerified' | 'affectedLanes' | 'goingLive' | 'warnings' | 'snapshot'
+    'projectionVerified' | 'simulatedFrom' | 'affectedLanes' | 'goingLive' | 'warnings' | 'snapshot'
   >
 
 /** A resolved PCM and the block a write is built at. @internal */
@@ -118,8 +109,6 @@ export type PoolConfigManagerWrite = {
   data: string
   /** Values the write keeps, merges or replaces, by dotted path. */
   expected?: Record<string, unknown>
-  /** Warnings the op's own checks found (beyond the lane guard's), returned with the guard's. */
-  warnings?: MultiTokenPoolLaneFinding[]
 }
 
 /**
@@ -141,6 +130,14 @@ export abstract class PoolConfigManagerWriteOperation<
     ctx: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> | PoolConfigManagerWrite
 
+  /**
+   * Whether the write can make lanes live (an unpause): its guard then never uses attestations.
+   * Defaults to `false`.
+   */
+  protected makesLive(_params: Parsed): boolean {
+    return false
+  }
+
   /** Context every refusal of this op carries (e.g. a merged op's kind). */
   protected errorContext(_params: Parsed): Record<string, unknown> | undefined {
     return undefined
@@ -161,8 +158,8 @@ export abstract class PoolConfigManagerWriteOperation<
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
     const blockTag = await chain.provider.getBlockNumber()
     if (params.sender !== undefined)
-      await this.#preflightGate(chain, address, version, params, blockTag)
-    const { data, expected, warnings } = await this.encode(chain, params, {
+      await this.#preflightGate(chain, address, version, params, params.sender, blockTag)
+    const { data, expected } = await this.encode(chain, params, {
       address,
       version,
       blockTag,
@@ -179,6 +176,7 @@ export abstract class PoolConfigManagerWriteOperation<
       ...(params.sender !== undefined && { sender: params.sender }),
       ...(expected && { expected }),
       ...(context && { errorContext: context }),
+      ...(this.makesLive(params) && { makesLive: true }),
       ...(params.expectedSnapshot && { expectedSnapshot: params.expectedSnapshot }),
       ...(params.getChain && { getChain: params.getChain }),
       ...(params.remoteAttestations && { remoteAttestations: params.remoteAttestations }),
@@ -201,9 +199,10 @@ export abstract class PoolConfigManagerWriteOperation<
         { to: address, data, ...(params.sender !== undefined && { from: params.sender }) },
       ],
       projectionVerified: result.projectionVerified,
+      simulatedFrom: result.simulatedFrom,
       affectedLanes: result.affectedLanes,
       goingLive: result.goingLive,
-      warnings: sortFindings([...(warnings ?? []), ...result.warnings]),
+      warnings: result.warnings,
       snapshot: result.snapshot,
     }
   }
@@ -214,20 +213,21 @@ export abstract class PoolConfigManagerWriteOperation<
     address: string,
     version: MultiTokenPoolVersion,
     params: Parsed,
+    sender: string,
     blockTag: number,
   ): Promise<void> {
     const roles = this.gate(params)
     const pcm = poolConfigManagerContract(chain, address, version)
     const held = await Promise.all(
       roles.map((role) =>
-        pcm.hasRole(poolConfigManagerRoleId(role), getAddress(params.sender!), { blockTag }),
+        pcm.hasRole(poolConfigManagerRoleId(role), getAddress(sender), { blockTag }),
       ),
     )
     if (!held.some(Boolean))
       throw new CCTParamsInvalidError(
         this.name,
         'sender',
-        `${params.sender} holds none of ${roles.join(', ')} on PoolConfigManager ${address}, which this write needs: send it from a holder, or grant one of the roles first`,
+        `${sender} holds none of ${roles.join(', ')} on PoolConfigManager ${address}, which this write needs: send it from a holder, or grant one of the roles first`,
         { context: { ...this.errorContext(params), roles } },
       )
   }
@@ -251,6 +251,7 @@ export abstract class PoolConfigManagerWriteOperation<
     return {
       hash: response.hash,
       projectionVerified: unsigned.projectionVerified,
+      simulatedFrom: unsigned.simulatedFrom,
       affectedLanes: unsigned.affectedLanes,
       goingLive: unsigned.goingLive,
       warnings: unsigned.warnings,

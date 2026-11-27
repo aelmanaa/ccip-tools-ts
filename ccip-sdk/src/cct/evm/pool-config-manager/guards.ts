@@ -40,7 +40,6 @@ import {
   policyKey,
   resolveMultiTokenPoolLanes,
 } from './projection.ts'
-import type { MultiTokenPoolWriteGuards } from './write-operation.ts'
 
 /** Default {@link MultiTokenPoolGuardOptions.maxTransferFeeBps} (the token fee cap). @internal */
 export const DEFAULT_MAX_TRANSFER_FEE_BPS = 1_000
@@ -53,16 +52,30 @@ export const LONG_POOL_DATA_BYTES = 192
 /** Legacy pool data: the decimals word. @internal */
 export const LEGACY_POOL_DATA_BYTES = 32
 
-/** The guard options a write takes (thresholds and confirmations, never switches). @internal */
-export type MultiTokenPoolGuardOptions = Pick<
-  MultiTokenPoolWriteGuards,
-  | 'allowDroppingDefaultCCVs'
-  | 'maxTransferFeeBps'
-  | 'minDestGasOverhead'
-  | 'confirmClosing'
-  | 'confirmOpening'
-  | 'migrationWindowChains'
->
+/**
+ * The guard thresholds and confirmations of a lane-affecting write (never switches that skip a rule);
+ * part of `MultiTokenPoolWriteGuards`.
+ */
+export type MultiTokenPoolGuardOptions = {
+  /** Accept non-empty CCV lists without the default-CCV placeholder `address(0)`. Defaults to `false`. */
+  allowDroppingDefaultCCVs?: boolean
+  /** Highest resolved transfer fee in bps on any affected lane, both tiers. Defaults to 1,000. */
+  maxTransferFeeBps?: number
+  /** Lowest resolved `destGasOverhead`. Defaults to 200,000, plus 100,000 when a hook resolves. */
+  minDestGasOverhead?: number
+  /** Lanes the caller agrees this write closes (connection gone after the write). */
+  confirmClosing?: MultiTokenPoolLaneKey[]
+  /**
+   * Lanes, per direction, the caller agrees this write opens: refused when a lane it opens goes
+   * live in a direction not listed. A planner passes its planned lanes.
+   */
+  confirmOpening?: MultiTokenPoolLaneDirections[]
+  /**
+   * Remote chains where a lane may accept legacy pool data from a remote multi-token pool: only for
+   * a migration window.
+   */
+  migrationWindowChains?: bigint[]
+}
 
 // the family-neutral remote fact and the lane directions; re-exported so importers keep their path
 export type { MultiTokenPoolLaneDirections } from './contracts.ts'
@@ -96,6 +109,10 @@ export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   remoteSendsData?: string
   /** Set when the remote provider refuses to produce data for its own token. */
   remoteProviderRefused?: string
+  /** Whether the remote side sends legacy pool data (no source token) toward this chain. */
+  remoteSendsLegacy?: boolean
+  /** Set when what the remote side sends and accepts cannot be read: the rules never pass on it. */
+  remoteSideUnread?: string
   /** Whether the remote token has code on the remote chain (read when the registry names no pool). */
   remoteTokenHasCode?: boolean
   /** The remote pool's outbound bucket toward this chain (read for the lane check), `null` when disabled. */
@@ -567,12 +584,28 @@ export function evaluateMultiTokenPoolGuards({
         `${remote.remoteProviderRefused}: sends from the remote side revert there`,
         'connection',
       )
-    else if (hasProvider && remote.remoteSendsData === undefined)
+    // what the remote sends and accepts could not be read: fail closed, never pass
+    if (
+      remote.remoteSideUnread !== undefined ||
+      (hasProvider && remote.remoteSendsData === undefined)
+    )
+      factFailures.push({
+        ...key,
+        scope: 'remote',
+        status: 'unknown',
+        reason:
+          remote.remoteSideUnread ??
+          "the additional pool data the remote side sends cannot be read, so this token's provider cannot be checked against it",
+      })
+    // legacy data names no source token: the lane must trust the sending pool with allowLegacyPoolData
+    // (chainlink-ccip c950d9bc ConnectionPolicyStore._checkPoolData, LegacyPoolDataNotAllowed)
+    const sender = c.remotePools.find((p) => p.address === remote.registryPool)
+    if (remote.remoteSendsLegacy && sender && !sender.allowLegacyPoolData)
       add(
-        'UID_MISMATCH',
-        'warning',
-        "the additional pool data the remote side sends cannot be read, so this token's provider was not checked against it",
-        'connection',
+        'POOL_DATA_FORMAT_MISMATCH',
+        'error',
+        `remote pool ${remote.registryPool} sends legacy pool data, which this lane refuses from it (LegacyPoolDataNotAllowed): every inbound release reverts here; set allowLegacyPoolData on that remote pool, or have the remote side send long data`,
+        'remotePool',
       )
     if (remote.uid != null && c.poolDataFormat === 'long') {
       const data = facts.additionalPoolData?.get(guardLaneKey(key))
@@ -622,7 +655,12 @@ export function multiTokenPoolChainLanes(
   return resolveMultiTokenPoolLanes(state, lanes)
 }
 
-const DIRECTIONS = ['outbound', 'inbound'] as const
+/** Both transfer directions, outbound first. @internal */
+export const TRANSFER_DIRECTIONS = [
+  'outbound',
+  'inbound',
+] as const satisfies readonly TransferDirection[]
+const DIRECTIONS = TRANSFER_DIRECTIONS
 
 /**
  * Validates guard options before any RPC: a write's own params (`prefix` empty) or the options a

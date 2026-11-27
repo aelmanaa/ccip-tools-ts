@@ -28,8 +28,6 @@ import {
 } from './get-multi-token-pool-state.ts'
 import type { MultiTokenPoolReadParams } from './is-multi-token-pool.ts'
 
-/** Registry reads in flight at once during the sharing-pool sweep. */
-
 /** One finding of the stack audit. */
 export type MultiTokenPoolStackFinding = MultiTokenPoolFinding<
   /**

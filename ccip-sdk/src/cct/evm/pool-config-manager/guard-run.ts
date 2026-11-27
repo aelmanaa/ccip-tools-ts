@@ -39,7 +39,11 @@ import {
 import { simulateEVMTx } from '../simulate.ts'
 import { toTokenTransferFeeConfig } from '../token-pool/contracts.ts'
 import { type DecodedMultiTokenPoolWrite, decodeMultiTokenPoolWrite } from './calldata.ts'
-import { type MultiTokenPoolLaneKey, toAbiLaneKey } from './contracts.ts'
+import {
+  type MultiTokenPoolLaneKey,
+  type PoolConfigManagerStaticConfig,
+  toAbiLaneKey,
+} from './contracts.ts'
 import { type AbiRateLimits, decodeRateLimits } from './decode.ts'
 import { readMultiTokenPoolGuardFacts } from './guard-facts.ts'
 import {
@@ -117,6 +121,8 @@ export type MultiTokenPoolGuardResult = {
   findings: MultiTokenPoolLaneFinding[]
   /** `true` when `eth_simulateV1` confirmed the projection; `false` when the RPC lacks it. */
   projectionVerified: boolean
+  /** Who the write was simulated from; see {@link MultiTokenPoolSimulatedFrom}. */
+  simulatedFrom: MultiTokenPoolSimulatedFrom
   /** The state the write was judged on. */
   snapshot: MultiTokenPoolSnapshot
   /** The block every read was pinned to. */
@@ -139,14 +145,16 @@ export async function runMultiTokenPoolGuards(
   const errorOperation = input.errorOperation ?? operation
   const decoded = decodeMultiTokenPoolWrite(data, version)
   const blockNumber = input.blockTag ?? (await chain.provider.getBlockNumber())
-  const {
-    state: before,
-    staticConfig: { tokenAdminRegistry },
-  } = await readMultiTokenPoolRecordState(chain, poolConfigManager, version, {
-    blockTag: blockNumber,
-    // chains the write names may have no record yet, and can already be paused
-    extraChains: multiTokenPoolChangeChains(decoded.changes),
-  })
+  const { state: before, staticConfig } = await readMultiTokenPoolRecordState(
+    chain,
+    poolConfigManager,
+    version,
+    {
+      blockTag: blockNumber,
+      // chains the write names may have no record yet, and can already be paused
+      extraChains: multiTokenPoolChangeChains(decoded.changes),
+    },
+  )
   const after = applyMultiTokenPoolRecordChanges(before, decoded.changes)
   // both sides need provider answers for every lane they resolve from a policy
   const candidates = multiTokenPoolCandidateLanes(before, after)
@@ -167,7 +175,7 @@ export async function runMultiTokenPoolGuards(
     chain,
     poolConfigManager,
     version,
-    tokenAdminRegistry,
+    tokenAdminRegistry: staticConfig.tokenAdminRegistry,
     blockTag: blockNumber,
     ...(input.poolAddress && { poolAddress: input.poolAddress }),
     requests: requiredMultiTokenPoolGuardFacts(afterLanes),
@@ -224,7 +232,7 @@ export async function runMultiTokenPoolGuards(
           .map((l) => `${l.tokenAddress} → ${l.remoteChainSelector} (${l.directions.join(', ')})`)
           .join(
             '; ',
-          )}; a record another operator wrote can make it open more than planned. List them, or rebuild after checking`,
+          )}; a record another operator wrote can make it open more than planned. Add context.extra to confirmOpening (same shape), or rebuild after checking who wrote the extra records`,
         { context: { ...input.errorContext, extra } },
       )
   }
@@ -239,21 +247,33 @@ export async function runMultiTokenPoolGuards(
       { context: { ...input.errorContext, findings: errors } },
     )
 
-  // the write itself, from the account that will execute it
-  if (sender) {
+  // the write itself: from the account that will execute it, or else each store call the PCM forwards,
+  // from the PCM (the stores' authorized caller), which checks everything but the PCM's role gate
+  const writes = sender
+    ? [{ from: sender, to: poolConfigManager, data }]
+    : forwardedStoreCalls(poolConfigManager, version, data, staticConfig)
+  const simulatedFrom: MultiTokenPoolSimulatedFrom = sender
+    ? 'sender'
+    : writes.length
+      ? 'pcm'
+      : 'none'
+  for (const call of writes) {
     const sim = await simulateEVMTx(
       chain,
-      { family: ChainFamily.EVM, transactions: [{ to: poolConfigManager, data, from: sender }] },
-      { from: sender, blockTag: blockNumber },
+      { family: ChainFamily.EVM, transactions: [call] },
+      { from: call.from, blockTag: blockNumber },
     )
     if (!sim.success)
       throw new CCTParamsInvalidError(
         errorOperation,
-        'sender',
-        `the write reverts when ${sender} executes it: ${sim.errorName ?? sim.revertData}`,
+        sender ? 'sender' : 'data',
+        sender
+          ? `the write reverts when ${sender} executes it: ${sim.errorName ?? sim.revertData}`
+          : `the write reverts in the PoolConfigManager's store ${call.to}: ${sim.errorName ?? sim.revertData}`,
         {
           context: {
             ...input.errorContext,
+            simulatedFrom,
             errorName: sim.errorName,
             errorArgs: sim.errorArgs,
             revertData: sim.revertData,
@@ -261,8 +281,8 @@ export async function runMultiTokenPoolGuards(
         },
       )
   }
-  const projectionVerified = sender
-    ? await crossCheckWithSimulateV1(chain, { ...input, sender }, afterLanes, blockNumber)
+  const projectionVerified = writes.length
+    ? await crossCheckWithSimulateV1(chain, input, writes, afterLanes, blockNumber)
     : false
 
   const guardInputsHash = hashGuardInputs(lanes, chainLanes, facts)
@@ -298,6 +318,7 @@ export async function runMultiTokenPoolGuards(
     warnings: findings.filter((f) => f.severity === 'warning'),
     findings,
     projectionVerified,
+    simulatedFrom,
     snapshot,
     blockNumber,
   }
@@ -480,6 +501,42 @@ export function assertSnapshotHolds(
     )
 }
 
+/**
+ * Who a write was simulated from: `'sender'`, the account that will execute it (the PCM's role gate
+ * included); `'pcm'`, without a sender, each store call the PCM forwards, from the PCM (everything but
+ * the PCM's role gate); `'none'`, a write that reaches no store, without a sender (not simulated).
+ */
+export type MultiTokenPoolSimulatedFrom = 'sender' | 'pcm' | 'none'
+
+/** One call of a write, as simulated. */
+type WriteCall = { from: string; to: string; data: string }
+
+/**
+ * The store calls the PCM makes for a write: it forwards the exact calldata (`Address.functionCall(
+ * store, msg.data)`, chainlink-ccip c950d9bc `PoolConfigManager.sol`) to each store whose ABI has the
+ * function.
+ */
+function forwardedStoreCalls(
+  poolConfigManager: string,
+  version: MultiTokenPoolVersion,
+  data: string,
+  stores: Pick<
+    PoolConfigManagerStaticConfig,
+    'connectionPolicyStore' | 'feePolicyStore' | 'securityPolicyStore'
+  >,
+): WriteCall[] {
+  const selector = data.slice(0, 10)
+  return (
+    [
+      ['ConnectionPolicyStore', stores.connectionPolicyStore],
+      ['FeePolicyStore', stores.feePolicyStore],
+      ['SecurityPolicyStore', stores.securityPolicyStore],
+    ] as const
+  )
+    .filter(([type]) => getMultiTokenPoolInterface(type, version).getFunction(selector) !== null)
+    .map(([, to]) => ({ from: getAddress(poolConfigManager), to, data }))
+}
+
 /** RPC errors that mean "this node has no `eth_simulateV1`". */
 const UNSUPPORTED =
   /method.*(not found|not supported|does not exist|unsupported)|unknown method|not available/i
@@ -492,13 +549,8 @@ const UNSUPPORTED =
  */
 async function crossCheckWithSimulateV1(
   chain: EVMChain,
-  {
-    poolConfigManager,
-    version,
-    data,
-    sender,
-    operation,
-  }: RunMultiTokenPoolGuardsInput & { sender: string },
+  { poolConfigManager, version, operation }: RunMultiTokenPoolGuardsInput,
+  writes: readonly WriteCall[],
   lanes: readonly ProjectedMultiTokenPoolLane[],
   blockTag: number,
 ): Promise<boolean> {
@@ -519,8 +571,8 @@ async function crossCheckWithSimulateV1(
         blockStateCalls: [
           {
             calls: [
-              { from: sender, to: poolConfigManager, data },
-              ...views.map((v) => ({ from: sender, to: poolConfigManager, data: v })),
+              ...writes,
+              ...views.map((v) => ({ from: writes[0]!.from, to: poolConfigManager, data: v })),
             ],
           },
         ],
@@ -535,32 +587,41 @@ async function crossCheckWithSimulateV1(
   }
   const calls = (result as { calls?: { status: string; returnData: string }[] }[] | undefined)?.[0]
     ?.calls
-  if (!calls || calls.length !== views.length + 1 || calls.some((c) => c.status !== '0x1'))
+  if (
+    !calls ||
+    calls.length !== writes.length + views.length ||
+    calls.some((c) => c.status !== '0x1')
+  )
     // a simulation that ran the write but not the views (or reverted where eth_call did not) is
     // not a confirmation
     return false
-  const [connRaw] = pcm.decodeFunctionResult('getLaneConnectionBatch', calls[1]!.returnData)
-  const [feeRaw] = pcm.decodeFunctionResult('getTokenTransferFeeConfigBatch', calls[2]!.returnData)
+  const [connRaw] = pcm.decodeFunctionResult(
+    'getLaneConnectionBatch',
+    calls[writes.length + 0]!.returnData,
+  )
+  const [feeRaw] = pcm.decodeFunctionResult(
+    'getTokenTransferFeeConfigBatch',
+    calls[writes.length + 1]!.returnData,
+  )
   const [hooks, outbound, inbound] = pcm.decodeFunctionResult(
     'getLaneVerificationBatch',
-    calls[3]!.returnData,
+    calls[writes.length + 2]!.returnData,
   )
   const [bucketsRaw] = pcm.decodeFunctionResult(
     'getCurrentRateLimiterStateBatch',
-    calls[4]!.returnData,
+    calls[writes.length + 3]!.returnData,
   )
-  const levelsRaw = pcm.decodeFunctionResult('getLaneRecordLevelBatch', calls[5]!.returnData)
+  const levelsRaw = pcm.decodeFunctionResult(
+    'getLaneRecordLevelBatch',
+    calls[writes.length + 4]!.returnData,
+  )
   const byAddress = <T extends { address: string }>(xs: readonly T[]) =>
     [...xs].sort((a, b) => a.address.localeCompare(b.address))
   lanes.forEach((lane, i) => {
     const conn = decodeLaneConnection(resultToObject(connRaw[i]), (b) =>
       decodeRemoteAddress(b, lane.remoteChainSelector),
     )
-    const levels = decodeLaneRecordLevels(
-      levelsRaw as unknown as readonly (readonly bigint[])[],
-      i,
-      poolConfigManager,
-    )
+    const levels = decodeLaneRecordLevels(levelsRaw, i, poolConfigManager)
     const simulated = {
       levels,
       // the store zeroes the buckets of a lane without a connection or a rate limit record

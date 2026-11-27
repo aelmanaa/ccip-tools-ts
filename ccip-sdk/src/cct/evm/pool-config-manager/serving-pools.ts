@@ -5,9 +5,9 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
+import { ZeroAddress, getAddress } from 'ethers'
 
-import type { Chain, RegistryTokenConfig } from '../../../chain.ts'
+import type { Chain } from '../../../chain.ts'
 import { CCIPTokenNotConfiguredError, CCIPTokenNotInRegistryError } from '../../../errors/index.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import { resultToObject } from '../../../evm/types.ts'
@@ -17,27 +17,11 @@ import {
   reportsMultiTokenPool,
 } from '../multi-token-pool/contracts.ts'
 import { isMissingFunction, isNotCcipContract } from '../query.ts'
+import { readTokenAdminRegistryConfig } from '../token-admin-registry/contracts.ts'
 import { readInBatches } from './contracts.ts'
 
 /** Registry reads per batch: a large stack must not flood the RPC. */
 const REGISTRY_BATCH_SIZE = 16
-
-/**
- * The registry's entry for a token, or `null` when it lists none: a token the registry does not list
- * and one it never configured read the same. Any other failure propagates.
- * @internal
- */
-export async function readRegistryEntry(
-  chain: Pick<Chain, 'getRegistryTokenConfig'>,
-  tokenAdminRegistry: string,
-  token: string,
-): Promise<RegistryTokenConfig | null> {
-  return chain.getRegistryTokenConfig(tokenAdminRegistry, token).catch((err: unknown) => {
-    if (err instanceof CCIPTokenNotConfiguredError || err instanceof CCIPTokenNotInRegistryError)
-      return null
-    throw err
-  })
-}
 
 /**
  * The pool the registry names for a token, or `null` when it names none (or lists no entry). Any
@@ -49,15 +33,21 @@ export async function readRegistryPool(
   tokenAdminRegistry: string,
   token: string,
 ): Promise<string | null> {
-  const entry = await readRegistryEntry(chain, tokenAdminRegistry, token)
-  return entry?.tokenPool ? getAddress(entry.tokenPool) : null
+  return chain.getRegistryTokenConfig(tokenAdminRegistry, token).then(
+    ({ tokenPool }) => (tokenPool ? getAddress(tokenPool) : null),
+    (err: unknown) => {
+      if (err instanceof CCIPTokenNotConfiguredError || err instanceof CCIPTokenNotInRegistryError)
+        return null
+      throw err
+    },
+  )
 }
 
 /**
- * The PoolConfigManager a pool calls, or `undefined` when it is not a multi-token pool: it reports
+ * The PoolConfigManager a pool calls (checksummed), or `undefined` when it is not a multi-token pool: it reports
  * no `typeAndVersion`, another type, or no `getPoolConfigManager`. Transport errors propagate.
  */
-async function poolConfigManagerOf(
+export async function poolConfigManagerOf(
   chain: EVMChain,
   pool: string,
   version: MultiTokenPoolVersion,
@@ -90,6 +80,14 @@ export type PoolConfigManagerServingPools = {
   serving: string[]
   /** Tokens whose registry pool does not call this PCM (another PCM, or not a multi-token pool). */
   diverged: { token: string; pool: string }[]
+  /**
+   * Each token's registry entry, read from the TokenAdminRegistry directly so every admin state is
+   * visible (a proposed admin not yet accepted too); `null` fields are unset.
+   */
+  entries: Map<
+    string,
+    { pool: string | null; administrator: string | null; pendingAdministrator: string | null }
+  >
 }
 
 /**
@@ -121,16 +119,24 @@ export async function readPoolsServingPoolConfigManager(
     [...new Set(tokens.map((t) => getAddress(t)))],
     (batch) =>
       Promise.all(
-        batch.map(async (token) => ({
-          token,
-          pool: await readRegistryPool(chain, tokenAdminRegistry, token),
-        })),
+        batch.map(async (token) => {
+          const entry = await readTokenAdminRegistryConfig(chain, tokenAdminRegistry, token, {
+            ...(blockTag !== undefined && { blockTag }),
+          })
+          const set = (a: string) => (a === ZeroAddress ? null : a)
+          return {
+            token,
+            pool: set(entry.tokenPool),
+            administrator: set(entry.administrator),
+            pendingAdministrator: set(entry.pendingAdministrator),
+          }
+        }),
       ),
     { batchSize: REGISTRY_BATCH_SIZE, sequential: true },
   )
-  const others = named.filter(
-    (n): n is { token: string; pool: string } => n.pool !== null && n.pool !== target,
-  )
+  const others = named
+    .filter((n) => n.pool !== null && n.pool !== target)
+    .map((n) => ({ token: n.token, pool: n.pool! }))
   const callers = new Map(
     await Promise.all(
       [...new Set(others.map((n) => n.pool))].map(
@@ -143,5 +149,6 @@ export async function readPoolsServingPoolConfigManager(
   for (const n of others)
     if (callers.get(n.pool) === pcm) serving.add(n.pool)
     else diverged.push(n)
-  return { serving: [...serving].sort(), diverged }
+  const entries = new Map(named.map(({ token, ...entry }) => [token, entry] as const))
+  return { serving: [...serving].sort(), diverged, entries }
 }
