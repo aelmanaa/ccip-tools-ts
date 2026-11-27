@@ -6,6 +6,7 @@
 
 import type { TokenTransferFeeConfig } from '../../../chain.ts'
 import type { FinalityAllowed, FinalityRequested } from '../../../extra-args.ts'
+import type { UnsignedSolanaTx } from '../../../solana/types.ts'
 import type {
   MultiTokenPoolDirection,
   MultiTokenPoolSnapshot,
@@ -594,6 +595,11 @@ export type GetPoolGroupRequiredCCVsResult = {
 export type CheckPoolGroupSnapshotParams = PoolGroupRef & {
   /** The snapshot a pool-group op returned with the proposal. */
   snapshot: MultiTokenPoolSnapshot
+  /**
+   * The proposal's transaction, so the instruction hash bound into the snapshot is checked (mirrors
+   * EVM's `transaction`). Compute-budget and nonce instructions are not part of the hash.
+   */
+  transaction: UnsignedSolanaTx
 }
 /** Params of `getTokenPoolGlobalConfig`. */
 export type GetTokenPoolGlobalConfigParams = PoolGroupProgramRef

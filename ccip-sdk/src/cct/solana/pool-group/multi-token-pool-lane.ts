@@ -3,69 +3,50 @@
  * `checkMultiTokenPoolLane`, `getMultiTokenPoolTransferQuote`): the shared shapes of
  * `cct/multi-token-pool.ts`, from a pool-groups lane as its transfer paths resolve it.
  *
- * The remote side of a lane to EVM is read with core `Chain` reads on `getChain`'s chain (registry,
- * `typeAndVersion`, `getTokenPoolRemotes`, `getTokenInfo`) and the EVM guard's own helpers, loaded
- * on first use: the mirror of the EVM guard, which loads the Solana remote reader lazily.
+ * The lane check is in `multi-token-pool-check.ts`.
  *
  * @packageDocumentation
  */
 
 import { Buffer } from 'buffer'
 
-import { BN } from '@coral-xyz/anchor'
-import { ComputeBudgetProgram, PublicKey } from '@solana/web3.js'
-import { getAddress, isAddress, zeroPadValue } from 'ethers'
+import { AnchorError, BN, ProgramError } from '@coral-xyz/anchor'
+import { PublicKey, TransactionInstruction } from '@solana/web3.js'
+import { getBytes, sha256, toUtf8Bytes } from 'ethers'
 
 import type {
-  Chain,
   LaneRecordType,
   LaneStatus,
   RateLimiterState,
   TokenTransferFeeConfig,
 } from '../../../chain.ts'
-import { CCIPTokenPoolChainConfigNotFoundError } from '../../../errors/index.ts'
 import { bpsFeeDeducted } from '../../../evm/multi-token-pool.ts'
 import { encodeFinality } from '../../../extra-args.ts'
 import { ChainFamily, networkInfo } from '../../../networks.ts'
-import { buildMessageForDest } from '../../../requests.ts'
 import type { SolanaChain } from '../../../solana/index.ts'
-import { resolveCcipSendV2 } from '../../../solana/resolution.ts'
-import { selectSendLane } from '../../../solana/send-v2.ts'
 import { deriveTokenPoolChainConfigV2Pda } from '../../../solana/token-pool.ts'
-import { SIMULATION_PAYER } from '../../../solana/utils.ts'
-import { CCTParamsInvalidError } from '../../errors.ts'
-import type { readRemoteMultiTokenPoolSide } from '../../evm/pool-config-manager/guard-facts.ts'
 import {
-  type CheckMultiTokenPoolLaneParams,
+  SIMULATION_PAYER,
+  customInstructionErrorCode,
+  simulateTransaction,
+} from '../../../solana/utils.ts'
+import { toLeArray } from '../../../utils.ts'
+import { CCTDataDecodeError, CCTParamsInvalidError } from '../../errors.ts'
+import {
   type GetMultiTokenPoolTransferQuoteParams,
   type MultiTokenPoolConfigSource,
-  type MultiTokenPoolFact,
   type MultiTokenPoolLane,
-  type MultiTokenPoolLaneCheckResult,
-  type MultiTokenPoolLaneFinding,
-  type MultiTokenPoolRemoteAttestation,
   type MultiTokenPoolTransferQuote,
   type PoolDataFormat,
-  DEFAULT_MAX_TRANSFER_FEE_BPS,
-  DEFAULT_MIN_DEST_GAS_OVERHEAD,
-  HOOK_DEST_GAS_OVERHEAD,
   longPoolDataBytes,
-  sortFindings,
 } from '../../multi-token-pool.ts'
-import { decodeRemoteAddress, laneFamilyOf } from '../../remote-address.ts'
-import {
-  deriveTokenPoolChainConfigPda,
-  deriveTokenPoolConfigPda,
-  deriveTokenPoolSignerPda,
-} from '../programs/token-pool.ts'
-import { readTokenMintAuthority } from '../token-admin-registry/mint-authority.ts'
+import { decodeRemoteAddress } from '../../remote-address.ts'
+import { deriveTokenPoolChainConfigPda, deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
 import type { PoolGroupClass } from './accounts.ts'
 import { decodeFeeConfig } from './decode.ts'
 import {
   type PoolGroupLaneState,
   isUnread,
-  laneCcvSync,
-  laneFailsClosed,
   laneFormat,
   lanePauses,
   laneSectionsFor,
@@ -79,14 +60,8 @@ import {
   type SolanaRemoteLanePool,
   laneRemotePools,
   poolState,
-  readRegistry,
-  readSourcePoolAddressLength,
   registryOf,
 } from './remote-lane.ts'
-
-const DIRECTIONS = ['outbound', 'inbound'] as const
-/** The account locks a Solana transaction may take. */
-export const SOLANA_ACCOUNT_LOCK_LIMIT = 64
 
 /** A lane read for the shared views: the lane, its accounts, and what the program applies. */
 export type SolanaMultiTokenPoolLaneRead = {
@@ -198,8 +173,9 @@ function laneCcvs(state: PoolGroupLaneState): { outbound: string[]; inbound: str
  * Reads the mint's pool `State` under `program`, at its PDA.
  * @throws {@link CCTParamsInvalidError} if the mint has no pool there
  * @throws {@link CCTDataDecodeError} if the account is not a pool `State` at its PDA
+ * @internal
  */
-async function readPoolState(
+export async function readPoolState(
   operation: string,
   chain: SolanaChain,
   program: PublicKey,
@@ -336,619 +312,84 @@ export async function readSolanaMultiTokenPoolLane(
   }
 }
 
-// ─── The lane check ──────────────────────────────────────────────────────────────────────────
+// ─── The transfer quote ──────────────────────────────────────────────────────────────────────
 
-type Add = (
-  check: MultiTokenPoolLaneFinding['check'],
-  severity: MultiTokenPoolLaneFinding['severity'],
-  reason: string,
-  recordType?: LaneRecordType,
-) => void
+/** `InvalidRequestedFinality` of the base token pool errors. */
+const INVALID_REQUESTED_FINALITY = 6028
 
-/** The remote side as read: tri-state, with the cause of an unread side. */
-type RemoteSide =
-  | { status: 'missing' | 'unknown'; reason: string; cause?: unknown }
-  | {
-      status: 'known'
-      /** The pool the remote registry names for the remote token, or `null`. */
-      registryPool: string | null
-      /** Whether it reads long pool data. */
-      readsLongData: boolean
-      /** The attestation the fact came from, for a family the SDK cannot read. */
-      attestation?: MultiTokenPoolRemoteAttestation
-      /** The remote lane back: its token, pools and outbound bucket (EVM remotes). */
-      back?: { remoteToken: string; remotePools: string[]; outbound: RateLimiterState }
-      /** The remote token's decimals. */
-      remoteDecimals?: number
-      /** Trusted pools that may send legacy data and are multi-token pools. */
-      legacyFromMultiTokenPools: string[]
-      /** Trusted pools whose type was not read. */
-      unreadPools: string[]
-      /** A remote multi-token pool's side: its lane format and its token's provider verdicts. */
-      multiTokenPoolSide?: Awaited<ReturnType<typeof readRemoteMultiTokenPoolSide>>
-    }
-
-/**
- * Reads the EVM side of a Solana lane with core reads: the registry of the first trusted pool, the
- * pool it names for the remote token and its type, each trusted legacy pool's type, and the lane
- * back toward this chain.
- */
-async function readEvmRemote(
-  remote: Chain,
-  read: SolanaMultiTokenPoolLaneRead,
-  localSelector: bigint,
-): Promise<RemoteSide> {
-  const [{ readRegistryPool }, { reportsMultiTokenPool }, { isNotCcipContract }] =
-    await Promise.all([
-      import('../../evm/pool-config-manager/serving-pools.ts'),
-      import('../../evm/multi-token-pool/contracts.ts'),
-      import('../../evm/query.ts'),
-    ])
-  const { lane } = read
-  const trusted = lane.remotePools.map((p) => p.address)
-  if (!trusted.length)
-    return {
-      status: 'missing',
-      reason: 'the lane trusts no remote pool, so its remote registry cannot be found',
-    }
-  const typeOf = (address: string) =>
-    remote.typeAndVersion(address).then(
-      ([type]) => type,
-      (err: unknown) => {
-        // a pool that reports no (or an unparseable) typeAndVersion is not a multi-token pool
-        if (isNotCcipContract(err)) return ''
-        throw err
-      },
-    )
-  const registry = await remote.getTokenAdminRegistryFor(trusted[0]!)
-  const registryPool = await readRegistryPool(remote, registry, lane.remoteToken!)
-  const legacyPools = lane.remotePools.filter((p) => p.allowLegacyPoolData).map((p) => p.address)
-  const legacyTypes = await Promise.all(legacyPools.map(typeOf))
-  const legacyFromMultiTokenPools = legacyPools.filter((_, i) =>
-    reportsMultiTokenPool(legacyTypes[i]!),
-  )
-  if (registryPool === null)
-    return {
-      status: 'known',
-      registryPool,
-      readsLongData: false,
-      legacyFromMultiTokenPools,
-      unreadPools: [],
-    }
-  const [type, back] = await Promise.all([
-    typeOf(registryPool),
-    remote.getTokenPoolRemotes(registryPool, localSelector, { token: lane.remoteToken! }).then(
-      (remotes) => Object.values(remotes)[0],
-      (err: unknown) => {
-        if (err instanceof CCIPTokenPoolChainConfigNotFoundError) return undefined
-        throw err
-      },
-    ),
-  ])
-  // the remote decimals only matter to compare two enabled buckets
-  const compare = !!back?.outboundRateLimiterState && !!lane.rateLimits.inbound
-  const readsLongData = reportsMultiTokenPool(type)
-  // a remote multi-token pool runs its token's provider on what arrives, and adds its own data
-  let multiTokenPoolSide
-  if (readsLongData) {
-    const [{ EVMChain }, { readRemoteMultiTokenPoolSide }] = await Promise.all([
-      import('../../../evm/index.ts'),
-      import('../../evm/pool-config-manager/guard-facts.ts'),
-    ])
-    if (remote instanceof EVMChain)
-      multiTokenPoolSide = await readRemoteMultiTokenPoolSide(
-        remote,
-        registryPool,
-        lane.remoteToken!,
-        localSelector,
-        // the additional pool data this lane sends: abi.encode(bytes32 uid) on a long UID lane
-        lane.poolDataFormat === 'long' && read.state?.ext?.uid ? read.state.ext.uid : '0x',
-      )
-    else
-      multiTokenPoolSide = {
-        remoteSideUnread: 'getChain did not return an EVMChain for this EVM selector',
-      }
-  }
-  return {
-    status: 'known',
-    registryPool: getAddress(registryPool),
-    readsLongData,
-    ...(multiTokenPoolSide && { multiTokenPoolSide }),
-    ...(back && {
-      back: {
-        remoteToken: back.remoteToken,
-        remotePools: back.remotePools,
-        outbound: back.outboundRateLimiterState,
-      },
-    }),
-    ...(compare && { remoteDecimals: (await remote.getTokenInfo(lane.remoteToken!)).decimals }),
-    legacyFromMultiTokenPools,
-    unreadPools: [],
-  }
+/** The custom program error code of a refused view, however anchor or core reported it. */
+function viewErrorCode(err: unknown): number | undefined {
+  if (err instanceof AnchorError) return err.error.errorCode.number
+  if (err instanceof ProgramError) return err.code
+  return customInstructionErrorCode(err)
 }
 
 /**
- * The remote side of the lane: an EVM remote read with core reads, a family the SDK cannot read
- * through an attestation for exactly this lane, else unread (fail closed).
+ * The FeeQuoter fallback the router charges for a token transfer when the pool has no enabled fee
+ * record (`legacy_fallback_token_pool_receipt`): the FeeQuoter's own
+ * `get_fallback_token_transfer_fee_v2`, simulated: the token's per-chain config when enabled, else
+ * the destination chain's defaults.
  */
-async function readRemoteSide(
-  params: CheckMultiTokenPoolLaneParams,
-  read: SolanaMultiTokenPoolLaneRead,
-  localSelector: bigint,
-): Promise<RemoteSide> {
-  const { remoteChainOf, attestationRefusal } =
-    await import('../../evm/pool-config-manager/guard-facts.ts')
-  const { lane } = read
-  const family = laneFamilyOf(lane.remoteChainSelector)
-  if (family === ChainFamily.Solana)
-    return { status: 'unknown', reason: 'a Solana lane toward another Solana chain is not read' }
-  const remote = await remoteChainOf(params, lane.remoteChainSelector)
-  if ('status' in remote) {
-    const trusted = lane.remotePools.map((p) => p.address)
-    const attestation = params.remoteAttestations?.find(
-      (a) =>
-        a.remoteChainSelector === lane.remoteChainSelector &&
-        a.remoteToken === lane.remoteToken &&
-        trusted.includes(a.remotePoolAddress),
-    )
-    if (!attestation) return remote
-    const refused = attestationRefusal(attestation, { now: BigInt(Math.floor(Date.now() / 1000)) })
-    if (refused)
-      return { status: 'unknown', reason: `the attestation for this lane is refused: ${refused}` }
-    return {
-      status: 'known',
-      registryPool: attestation.remotePoolAddress,
-      readsLongData: attestation.acceptsLongPoolData,
-      attestation,
-      legacyFromMultiTokenPools: [],
-      unreadPools: [],
-    }
-  }
-  if (family !== ChainFamily.EVM)
-    return {
-      status: 'unknown',
-      reason: `the SDK cannot read the remote side of a ${family} lane yet`,
-    }
-  return readEvmRemote(remote, read, localSelector)
-}
-
-/**
- * The account locks of a token-only send of `mint` toward the lane's remote chain, from the send
- * the core resolver builds (every account the router and the pool resolve, the sender, the Router
- * and the compute-budget program), plus `extraAccounts`. `undefined` when the lane has no CCIP 2.0
- * send path.
- */
-async function sendLocks(
-  chain: SolanaChain,
-  router: PublicKey,
-  mint: PublicKey,
-  selector: bigint,
-  lockBudget: CheckMultiTokenPoolLaneParams['lockBudget'],
-): Promise<number | undefined> {
-  if (laneFamilyOf(selector) !== ChainFamily.EVM) return undefined
-  const receiver = zeroPadValue('0x01', 20)
-  const message = buildMessageForDest(
-    {
-      receiver,
-      data: '0x',
-      tokenAmounts: [{ token: mint.toBase58(), amount: 1n }],
-      extraArgs: { gasLimit: 0n },
-      ...(lockBudget?.feeToken && { feeToken: lockBudget.feeToken }),
-    },
-    ChainFamily.EVM,
-  )
-  const lane = await selectSendLane(chain, { router, destChainSelector: selector, message })
-  if (lane.version !== '2.0.0') return undefined
-  const { instruction } = await resolveCcipSendV2(chain, {
-    router,
-    destChainSelector: selector,
-    sender: SIMULATION_PAYER,
-    message: lane.message,
-  })
-  const keys = new Set([
-    SIMULATION_PAYER.toBase58(),
-    instruction.programId.toBase58(),
-    ComputeBudgetProgram.programId.toBase58(),
-    ...instruction.keys.map((k) => k.pubkey.toBase58()),
-  ])
-  return keys.size + (lockBudget?.extraAccounts ?? 0)
-}
-
-/** The 32-byte word the EVM OnRamp sends for an address (`abi.encode(address)`), lowercase hex. */
-const abiWord = (address: string) => zeroPadValue(getAddress(address), 32).toLowerCase()
-
-/**
- * Runs the lane check on one Solana lane: kind, admission, pauses and stops, CCV sync, the long-data
- * fee floor, the stored EVM token and pool bytes, mint authority, the send lock budget, and the
- * remote side (registry pool, F14 long-data acceptance, legacy data from multi-token pools, the
- * lane back, inbound against the remote outbound limit).
- * @internal
- */
-export async function checkSolanaMultiTokenPoolLane(
+async function readFeeQuoterFallback(
   operation: string,
   chain: SolanaChain,
-  params: CheckMultiTokenPoolLaneParams,
-  key: ParsedSolanaLaneKey & { program: PublicKey },
-): Promise<MultiTokenPoolLaneCheckResult> {
-  const read = await readSolanaMultiTokenPoolLane(
-    operation,
-    chain,
-    key.program,
-    key.mint,
-    key.selector,
-  )
-  const { lane, state, pool } = read
-  const findings: MultiTokenPoolLaneFinding[] = []
-  const add: Add = (check, severity, reason, recordType) =>
-    findings.push({
-      check,
-      severity,
-      tokenAddress: lane.tokenAddress,
-      remoteChainSelector: lane.remoteChainSelector,
-      reason,
-      ...(recordType && { recordType }),
+  router: PublicKey,
+  selector: bigint,
+  mint: PublicKey,
+): Promise<{ flatFee: number; destGasOverhead: number; destBytesOverhead: number }> {
+  const { feeQuoter } = await chain._getRouterConfig(router.toBase58())
+  const sel = toLeArray(selector, 8)
+  const pda = (...seeds: (Buffer | Uint8Array)[]) =>
+    PublicKey.findProgramAddressSync(
+      seeds.map((x) => Buffer.from(x)),
+      feeQuoter,
+    )[0]
+  const keys = [
+    pda(Buffer.from('config')),
+    pda(Buffer.from('dest_chain_v2'), sel),
+    pda(Buffer.from('per_chain_per_token_config'), sel, mint.toBuffer()),
+  ].map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }))
+  const data = Buffer.concat([
+    GET_FALLBACK_TOKEN_TRANSFER_FEE_V2,
+    Buffer.from(sel),
+    mint.toBuffer(),
+  ])
+  let result
+  try {
+    result = await simulateTransaction(chain, {
+      payerKey: SIMULATION_PAYER,
+      instructions: [new TransactionInstruction({ programId: feeQuoter, keys, data })],
     })
-  const localSelector = chain.network.chainSelector
-  let remote: MultiTokenPoolFact = 'unknown'
-
-  // the Router's registry must name this pool for the mint, on interface 2 for a marked lane
-  const router = await registryOf(chain, pool.state.router)
-  if (isUnread(router)) add('TOKEN_NOT_REGISTERED', 'error', router.reason)
-  else {
-    const registry = await readRegistry(chain, router, key.mint)
-    if (isUnread(registry)) add('TOKEN_NOT_REGISTERED', 'error', registry.reason)
-    else if (!registry.registryPool?.equals(pool.address))
-      add(
-        'TOKEN_NOT_REGISTERED',
-        'error',
-        `the Router's registry names ${registry.registryPool?.toBase58() ?? 'no pool'} for ${lane.tokenAddress}, not the pool State ${pool.address.toBase58()}: transfers do not use this pool`,
-      )
-    else if (state && state.kind !== 'standard' && registry.interfaceVersion !== 2)
-      add(
-        'TOKEN_NOT_REGISTERED',
-        'error',
-        `the registry serves ${lane.tokenAddress} on pool interface ${registry.interfaceVersion}, where a ${state.kind} lane refuses every transfer: set interface 2`,
-      )
+  } catch (err) {
+    return simulationRefused(operation, err, 'get_fallback_token_transfer_fee_v2')
   }
-
-  if (!state)
-    add(
-      'NO_CONNECTION',
-      'error',
-      'no ChainConfig exists for this token and chain: the lane does not exist',
-    )
-  else {
-    const ext = state.ext
-    const where = `the lane of ${lane.tokenAddress} toward ${lane.remoteChainSelector}`
-    // admission and CCV sync, which fail every transfer of a lane that is not paused
-    const { admitted } = lanePauses(state)
-    if (state.kind === 'driven' && admitted === false)
-      add(
-        'LANE_NOT_ADMITTED',
-        'error',
-        "the pool group's chain record does not admit this member, so transfers revert (GroupLaneNotEnabled): admit it in the chain record's lane mode",
-        'connection',
-      )
-    const failsClosed = orThrow(laneFailsClosed(state), where)
-    if (failsClosed !== undefined)
-      add(
-        'CCVS_NOT_SYNCED',
-        'error',
-        `every transfer reverts: ${failsClosed}; sync the lane`,
-        'security',
-      )
-    const sync = orThrow(laneCcvSync(state), where)
-    if (sync?.failsClosedAt !== undefined)
-      add(
-        'CCVS_NOT_SYNCED',
-        'warning',
-        `the SECURITY record activates a new CCV set at ${sync.failsClosedAt} that the lane has not copied: transfers fail closed from then until it syncs`,
-        'security',
-      )
-
-    // the long-data fee floor: the program sends long data only with an enabled fee record whose
-    // destination bytes cover it (`require_dest_bytes_overhead`)
-    const fee = lane.tokenTransferFeeConfig
-    const uid = ext?.uid ?? null
-    if (lane.poolDataFormat === 'long') {
-      const needed = longPoolDataBytes(uid ? 32 : 0)
-      if (!fee)
-        add(
-          'NO_FEE_RECORD',
-          'error',
-          `the lane sends long pool data, which needs an enabled fee record with destBytesOverhead >= ${needed}: every send reverts (LongPoolDataNeedsDestBytesOverhead)`,
-          'fee',
-        )
-      else if (fee.destBytesOverhead < needed)
-        add(
-          'DEST_BYTES_OVERHEAD_TOO_LOW',
-          'error',
-          `destBytesOverhead ${fee.destBytesOverhead} is below the ${needed} bytes of long pool data this lane sends: every send reverts`,
-          'destOverhead',
-        )
-    }
-    if (fee) {
-      const minGas =
-        params.minDestGasOverhead ??
-        DEFAULT_MIN_DEST_GAS_OVERHEAD + (lane.hasHooks ? HOOK_DEST_GAS_OVERHEAD : 0)
-      if (fee.destGasOverhead < minGas)
-        add(
-          'DEST_GAS_OVERHEAD_TOO_LOW',
-          'error',
-          `destGasOverhead ${fee.destGasOverhead} is below ${minGas}${lane.hasHooks ? ' (a hook resolves)' : ''}: the destination release can run out of gas`,
-          'destOverhead',
-        )
-      const maxBps = params.maxTransferFeeBps ?? DEFAULT_MAX_TRANSFER_FEE_BPS
-      const bps = Math.max(fee.finalityTransferFeeBps, fee.fastFinalityTransferFeeBps)
-      if (bps > maxBps)
-        add(
-          'TRANSFER_FEE_ABOVE_CAP',
-          'error',
-          `the resolved transfer fee is ${bps} bps, above maxTransferFeeBps ${maxBps}`,
-          'fee',
-        )
-    }
-
-    // the stored EVM bytes: the program compares them exactly with what the OffRamp passes
-    if (laneFamilyOf(lane.remoteChainSelector) === ChainFamily.EVM) {
-      const raw = `0x${Buffer.from(state.chainConfig.base.remote.tokenAddress.address).toString('hex')}`
-      if (!lane.remoteToken || !isAddress(lane.remoteToken))
-        add(
-          'REMOTE_TOKEN_ENCODING',
-          'error',
-          `the remote token ${lane.remoteToken ?? raw} is not an EVM address`,
-          'connection',
-        )
-      else if (raw !== abiWord(lane.remoteToken))
-        add(
-          'REMOTE_TOKEN_ENCODING',
-          'error',
-          `the lane stores the remote token as ${raw}, but the EVM OnRamp sends ${abiWord(lane.remoteToken)} (abi.encode of ${getAddress(lane.remoteToken)}): the program compares the bytes, so every inbound transfer reverts (SourceTokenMismatch); store the 32-byte form`,
-          'connection',
-        )
-      if (!isUnread(router) && read.remotePools.length) {
-        const length = await readSourcePoolAddressLength(chain, router, lane.remoteChainSelector)
-        if (length === null || length < 20 || length > 32)
-          add(
-            'REMOTE_UNREADABLE',
-            'error',
-            `the Solana OffRamp's address length for ${lane.remoteChainSelector} could not be read (${String(length)}), so the stored remote pool bytes cannot be judged`,
-            'remotePool',
-          )
-        else {
-          const trimmed = (a: string) => `0x${abiWord(a).slice(2 + (32 - length) * 2)}`
-          const wrong = read.remotePools.filter((p) => p.raw.toLowerCase() !== trimmed(p.address))
-          for (const p of wrong)
-            add(
-              'REMOTE_LANE_MISMATCH',
-              'error',
-              `the lane stores remote pool ${p.address} as ${p.raw}, but the OffRamp hands the pool the trailing ${length} bytes of the 32-byte form: inbound transfers from it revert; store the ${length}-byte form`,
-              'remotePool',
-            )
-        }
-      }
-    }
-
-    // the remote side
-    const side = await readRemoteSide(params, read, localSelector)
-    remote = side.status
-    if (side.status !== 'known') {
-      if (side.status === 'missing' && read.remotePools.length === 0)
-        add(
-          'NO_REMOTE_POOL',
-          'error',
-          `${side.reason}: inbound transfers revert, and a send cannot be checked against a remote pool`,
-          'remotePool',
-        )
-      else
-        add(
-          'REMOTE_UNREADABLE',
-          'error',
-          `the remote side could not be checked (${side.reason}): pass getChain for ${lane.remoteChainSelector}, or a remoteAttestations entry where the family has no reader`,
-        )
-    } else {
-      const outboundPaused = lane.outboundStatus.status === 'paused'
-      if (side.attestation)
-        add(
-          'REMOTE_ATTESTED',
-          'warning',
-          `the remote long-data fact comes from an attestation, not a read: ${side.attestation.reason}`,
-        )
-      for (const p of side.legacyFromMultiTokenPools)
-        add(
-          'LEGACY_RECEIVE_FROM_MULTI_TOKEN_POOL',
-          'error',
-          `remote pool ${p} is a multi-token pool but the lane accepts legacy pool data from it, which names no source token`,
-          'remotePool',
-        )
-      if (side.registryPool === null) {
-        remote = 'missing'
-        // a token paused outbound whose remote side is not registered yet may wait (onboarding)
-        if (!outboundPaused)
-          add(
-            'NO_REMOTE_POOL',
-            'error',
-            `the remote registry names no pool for ${lane.remoteToken}: a send burns here and nothing releases it there; register the remote side first, or keep the lane paused outbound`,
-            'connection',
-          )
-      } else {
-        if (!lane.remotePools.some((p) => p.address === side.registryPool))
-          add(
-            'REMOTE_LANE_MISMATCH',
-            'error',
-            `the remote registry names pool ${side.registryPool} for ${lane.remoteToken}, which this lane does not trust: inbound messages from it revert`,
-            'remotePool',
-          )
-        if (lane.poolDataFormat === 'long' && !side.readsLongData)
-          add(
-            'POOL_DATA_FORMAT_MISMATCH',
-            'error',
-            `the lane sends long pool data but remote pool ${side.registryPool} reads only legacy data: the destination release reverts and the burned tokens are stuck`,
-            'remotePool',
-          )
-        if (!side.attestation) {
-          const back = side.back
-          const servingPool = pool.address.toBase58()
-          const pointsBack =
-            !!back &&
-            back.remoteToken === lane.tokenAddress &&
-            back.remotePools.includes(servingPool)
-          // only a legacy lane relies on the reverse mapping; long data names its source token
-          if (lane.poolDataFormat === 'legacy' && !pointsBack)
-            add(
-              'REMOTE_LANE_MISMATCH',
-              'error',
-              back
-                ? `the remote lane back names ${back.remoteToken} and pools ${back.remotePools.join(', ')}, not ${lane.tokenAddress} and ${servingPool}: the lane sends legacy pool data (no source token), so the destination cannot tell which token was sent`
-                : `remote pool ${side.registryPool} has no lane back toward this chain: inbound transfers revert there`,
-              'connection',
-            )
-          // the additional pool data, judged by the providers that judge it on chain
-          const mttp = side.multiTokenPoolSide
-          if (mttp?.remoteSideUnread !== undefined)
-            add(
-              'REMOTE_UNREADABLE',
-              'error',
-              `the remote multi-token pool side could not be read (${mttp.remoteSideUnread}), so the UID pairing and its pool data format were not checked`,
-              'connection',
-            )
-          else if (mttp) {
-            if (mttp.remoteAcceptsOutbound === false)
-              add(
-                'UID_MISMATCH',
-                'error',
-                `the remote token's provider refuses the additional pool data this lane sends (${uid !== null && lane.poolDataFormat === 'long' ? uid : 'none'}): the release there reverts (InvalidAdditionalPoolData) and the burned tokens are stuck; pair the providers`,
-                'connection',
-              )
-            if (mttp.remoteProviderRefused !== undefined)
-              add(
-                'UID_MISMATCH',
-                'warning',
-                `${mttp.remoteProviderRefused}: sends from the remote side revert there`,
-                'connection',
-              )
-            if (uid !== null) {
-              if (mttp.remoteSendsData === undefined)
-                add(
-                  'UID_MISMATCH',
-                  'warning',
-                  `the additional pool data the remote side sends cannot be read, so it was not checked against this lane's UID ${uid}`,
-                  'connection',
-                )
-              else if (mttp.remoteSendsData.toLowerCase() !== uid.toLowerCase())
-                add(
-                  'UID_MISMATCH',
-                  'error',
-                  `this lane requires UID ${uid} as the additional pool data of every inbound transfer, but the remote side sends ${mttp.remoteSendsData}: inbound transfers revert here (InvalidAdditionalPoolData)`,
-                  'connection',
-                )
-            }
-            // a long or UID lane refuses legacy pool data from every pool
-            if (mttp.remoteSendsLegacy && (lane.poolDataFormat === 'long' || uid !== null))
-              add(
-                'POOL_DATA_FORMAT_MISMATCH',
-                'error',
-                `remote pool ${side.registryPool} sends legacy pool data toward this chain, which this ${uid !== null ? 'UID' : 'long'} lane refuses: inbound transfers revert here`,
-                'remotePool',
-              )
-          }
-          const local = lane.rateLimits.inbound
-          const theirs = back?.outbound
-          if (local && theirs && side.remoteDecimals !== undefined) {
-            const { scaleDecimals } = await import('../../../utils.ts')
-            const toLocal = (amount: bigint) =>
-              scaleDecimals(amount, side.remoteDecimals!, pool.state.decimals)
-            const [capacity, rate] = [toLocal(theirs.capacity), toLocal(theirs.rate)]
-            if (local.capacity < capacity || local.rate < rate)
-              add(
-                'INBOUND_BELOW_REMOTE_OUTBOUND',
-                'warning',
-                `the inbound limit (capacity ${local.capacity}, rate ${local.rate}) is below the remote outbound one (capacity ${capacity}, rate ${rate} in local units): a burst the remote side lets out waits here for the bucket to refill; raise the inbound limit`,
-                'rateLimit',
-              )
-          }
-        }
-      }
-    }
-
-    // mint authority: the pool mints inbound transfers as its signer, alone or in an SPL multisig
-    const signer = deriveTokenPoolSignerPda(key.program, key.mint)
-    const { mintAuthority, multisig } = await readTokenMintAuthority(chain, key.mint)
-    const holds =
-      !!mintAuthority &&
-      (mintAuthority.equals(signer) ||
-        (!!multisig && multisig.signers.filter((s) => s.equals(signer)).length >= multisig.m))
-    if (!holds)
-      add(
-        'POOL_CANNOT_MINT_BURN',
-        'error',
-        `the mint authority of ${lane.tokenAddress} is ${mintAuthority?.toBase58() ?? 'none'}, not the pool signer ${signer.toBase58()} (alone, or m times in an SPL multisig): inbound transfers cannot mint`,
-      )
+  const ret = result.returnData
+  const bytes =
+    ret?.programId === feeQuoter.toBase58() ? Buffer.from(ret.data[0], 'base64') : Buffer.alloc(0)
+  if (bytes.length < 12)
+    throw new CCTDataDecodeError(feeQuoter.toBase58(), {
+      context: { reason: 'get_fallback_token_transfer_fee_v2 returned no fee' },
+    })
+  // FallbackTokenTransferFeeV2 { flat_fee: u32 cents, dest_gas_limit: u32, dest_bytes_overhead: u32 }
+  return {
+    flatFee: bytes.readUInt32LE(0),
+    destGasOverhead: bytes.readUInt32LE(4),
+    destBytesOverhead: bytes.readUInt32LE(8),
   }
-
-  // pauses and stops, by the directions that must be open
-  const expected = new Set(params.expectOpen ?? DIRECTIONS)
-  for (const direction of DIRECTIONS) {
-    const status = direction === 'outbound' ? lane.outboundStatus : lane.inboundStatus
-    const severity = expected.has(direction) ? 'error' : 'warning'
-    if (status.status === 'paused')
-      add(
-        'LANE_PAUSED',
-        severity,
-        `${direction} is paused (${status.scope} pause): lift it with the matching unpause`,
-      )
-    else if (lane.stopped[direction])
-      add(
-        'LANE_STOPPED',
-        severity,
-        `${direction} is stopped: its rate limit bucket is enabled with no capacity and no rate; lift it by writing a non-zero bucket`,
-        'rateLimit',
-      )
-  }
-
-  // the send lock budget
-  if (state && !isUnread(router)) {
-    const severity = expected.has('outbound') ? 'error' : 'warning'
-    try {
-      const locks = await sendLocks(chain, router, key.mint, key.selector, params.lockBudget)
-      if (locks === undefined)
-        add(
-          'ACCOUNT_LOCKS_EXCEEDED',
-          'warning',
-          'the send lock budget was not measured: the lane has no CCIP 2.0 send path toward an EVM chain',
-        )
-      else if (locks > SOLANA_ACCOUNT_LOCK_LIMIT)
-        add(
-          'ACCOUNT_LOCKS_EXCEEDED',
-          severity,
-          `a send of this token takes ${locks} account locks, above the ${SOLANA_ACCOUNT_LOCK_LIMIT} a transaction may take: the send cannot land`,
-        )
-    } catch (err) {
-      // a resolution the program refuses is an answer; transport errors propagate
-      try {
-        simulationRefused(operation, err, 'ccip_send_v2 resolution')
-      } catch (refused) {
-        if (refused === err) throw err
-        add(
-          'ACCOUNT_LOCKS_EXCEEDED',
-          severity,
-          `the send lock budget could not be measured: the send resolution was refused (${err instanceof Error ? err.message : String(err)})`,
-        )
-      }
-    }
-  }
-
-  const sorted = sortFindings(findings)
-  return { lane, findings: sorted, remote, ok: !sorted.some((f) => f.severity === 'error') }
 }
 
-// ─── The transfer quote ──────────────────────────────────────────────────────────────────────
+/** Discriminator of the FeeQuoter's `get_fallback_token_transfer_fee_v2`. */
+const GET_FALLBACK_TOKEN_TRANSFER_FEE_V2 = Buffer.from(
+  getBytes(sha256(toUtf8Bytes('global:get_fallback_token_transfer_fee_v2'))),
+).subarray(0, 8)
 
 /**
  * Quotes a transfer by simulating `get_pool_fee` with the lane's group and named records, the way
  * the router forwards them.
+ * @remarks Without an enabled pool fee record the router charges the FeeQuoter fallback: the
+ *   quote then has `hasFeeRecord: false` and the fallback's fee and overheads, with no token fee.
  * @throws {@link CCTParamsInvalidError} if the lane does not exist, the lane does not allow the
- *   requested finality, or it sends long data without a fee record (a send would revert)
+ *   requested finality, or it sends long data without a fee record covering it (a send would revert)
  * @throws {@link CCTOperationUnsupportedError} if the program refuses the simulation otherwise
  * @internal
  */
@@ -992,7 +433,7 @@ export async function quoteSolanaMultiTokenPoolTransfer(
       .remainingAccounts(remaining)
       .view()
   } catch (err) {
-    if (err instanceof Error && /InvalidRequestedFinality/.test(err.message))
+    if (viewErrorCode(err) === INVALID_REQUESTED_FINALITY)
       throw new CCTParamsInvalidError(
         operation,
         'finality',
@@ -1000,21 +441,44 @@ export async function quoteSolanaMultiTokenPoolTransfer(
       )
     return simulationRefused(operation, err, 'get_pool_fee')
   }
-  if (!fee.isEnabled && orThrow(laneFormat(state), where) === 'long')
-    throw new CCTParamsInvalidError(
-      operation,
-      'remoteChainSelector',
-      `the lane of ${mint.toBase58()} to ${selector} sends long pool data without a fee record, so a send would revert: set an enabled fee record with the destination overheads`,
-    )
-  const tokenFeeBps = fee.isEnabled ? fee.tokenFeeBps : 0
-  const feeDeducted = bpsFeeDeducted(params.amount, tokenFeeBps)
+  const format = orThrow(laneFormat(state), where)
+  if (format === 'long') {
+    // the program sends long data only with an enabled record covering it
+    const needed = longPoolDataBytes(state.ext?.uid ? 32 : 0)
+    if (!fee.isEnabled || fee.destBytesOverhead < needed)
+      throw new CCTParamsInvalidError(
+        operation,
+        'remoteChainSelector',
+        `the lane of ${mint.toBase58()} to ${selector} sends long pool data ${fee.isEnabled ? `with destBytesOverhead ${fee.destBytesOverhead}, below ${needed}` : 'without a fee record'}, so a send would revert (LongPoolDataNeedsDestBytesOverhead): set an enabled fee record covering ${needed} bytes`,
+      )
+  }
+  if (!fee.isEnabled) {
+    // the router charges the FeeQuoter fallback; the pool takes no basis-point fee
+    const pool = await readPoolState(operation, chain, program, mint)
+    const router = await registryOf(chain, pool.state.router)
+    if (isUnread(router))
+      throw new CCTDataDecodeError(pool.state.router.toBase58(), {
+        context: { reason: router.reason },
+      })
+    const fallback = await readFeeQuoterFallback(operation, chain, router, selector, mint)
+    return {
+      feeUSDCents: BigInt(fallback.flatFee),
+      destGasOverhead: fallback.destGasOverhead,
+      destBytesOverhead: fallback.destBytesOverhead,
+      tokenFeeBps: 0,
+      feeDeducted: 0n,
+      netAmount: params.amount,
+      hasFeeRecord: false,
+    }
+  }
+  const feeDeducted = bpsFeeDeducted(params.amount, fee.tokenFeeBps)
   return {
-    feeUSDCents: BigInt(fee.isEnabled ? fee.fee : 0),
-    destGasOverhead: fee.isEnabled ? fee.destGasLimit : 0,
-    destBytesOverhead: fee.isEnabled ? fee.destBytesOverhead : 0,
-    tokenFeeBps,
+    feeUSDCents: BigInt(fee.fee),
+    destGasOverhead: fee.destGasLimit,
+    destBytesOverhead: fee.destBytesOverhead,
+    tokenFeeBps: fee.tokenFeeBps,
     feeDeducted,
     netAmount: params.amount - feeDeducted,
-    hasFeeRecord: fee.isEnabled,
+    hasFeeRecord: true,
   }
 }

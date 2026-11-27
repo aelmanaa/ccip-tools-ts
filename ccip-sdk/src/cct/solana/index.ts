@@ -3493,14 +3493,16 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   /**
    * Re-reads the values a snapshot recorded and reports which moved.
    * @remarks Run it right before a Squads proposal executes; the program cannot compare on chain.
-   * The snapshot's op re-reads its state and re-runs its guard; no Solana op builds snapshots yet,
-   * so every snapshot is refused until the first pool-group write op lands.
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), or the snapshot was
-   *   not built by a Solana pool-group op
+   * `transaction` is the proposal's: its instructions (compute budget and nonce aside) must hash to
+   * the snapshot's `calldataHash`. The snapshot's op then re-reads its state and re-runs its guard;
+   * no Solana op builds snapshots yet, so every snapshot is refused until the first pool-group write
+   * op registers its re-check.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the snapshot covers
+   *   other instructions, or it was not built by a Solana pool-group op
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
    * @example
    * ```ts
-   * const result = await cct.checkPoolGroupSnapshot({ poolGroupId, snapshot })
+   * const result = await cct.checkPoolGroupSnapshot({ poolGroupId, snapshot, transaction })
    * ```
    */
   checkPoolGroupSnapshot(opts: CheckPoolGroupSnapshotParams): Promise<MultiTokenPoolSnapshotCheck> {
@@ -3531,8 +3533,11 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * Runs the lane checks the router does not: kind, admission, pauses, CCV sync, long-data fee
    * floor, 32-byte EVM token bytes, the remote pool's long-data acceptance (F14), account-lock
    * budget, and mint authority.
-   * @remarks Fails closed on an unread, unattested remote. The EVM side of a lane is read with
-   * `getChain`'s chain (registry, pool type, lane back, decimals).
+   * @remarks Fails closed on an unread, unattested remote. The EVM side is read with the EVM reads
+   * on `getChain`'s chain: the registry pool and its type, the remote lane (`getMultiTokenPoolLane`
+   * on a multi-token pool: what it trusts, accepts and sends), and its token provider's verdicts on
+   * what this lane sends, so both directions of the pool data format and the UID pairing are judged.
+   * Mint authority is judged on burn-mint pools only.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
    * @throws {@link CCIPError} (transient) when a remote read fails
@@ -3550,11 +3555,13 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   /**
    * Quotes a transfer by simulating `get_pool_fee` with the lane's pool group records, with the
    * token fee and net amount.
-   * @remarks Read-only: needs no wallet and builds no transaction. On Solana a legacy lane without a
-   * pool fee record still sends (the router quotes the FeeQuoter's token defaults): the quote then
-   * has `hasFeeRecord: false`, no token fee and zero pool overheads. A long lane needs the record.
+   * @remarks Read-only: needs no wallet and builds no transaction. Without an enabled pool fee
+   * record the router charges the FeeQuoter fallback (the token's per-chain config, else the
+   * destination chain's defaults), read by simulating the FeeQuoter's
+   * `get_fallback_token_transfer_fee_v2`: the quote then has `hasFeeRecord: false`, the fallback's
+   * fee and overheads, and no token fee. A long lane needs an enabled record covering its pool data.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the lane does not
-   *   exist or allow the finality, or it sends long data without a fee record
+   *   exist or allow the finality, or it sends long data without a fee record covering it
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded
    * @throws {@link CCTOperationUnsupportedError} if the program refuses the simulation
    * @example
