@@ -11,15 +11,19 @@ import { getAddress } from 'ethers'
 import type { LaneRecordType } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
+import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { laneFamilyOf } from '../../../remote-address.ts'
 import {
   type MultiTokenPoolSingleFunctionOperation,
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
+  SAME_ADDRESS_PROVIDER_TYPE,
   TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
+import { readContractTypeOrNull } from '../../query.ts'
 import { assertUnique, validateArray } from '../../validate.ts'
 import {
   type MultiTokenPoolLaneKey,
@@ -420,4 +424,29 @@ export abstract class InlineRecordWriteOperation<
     )
     return { data, expected }
   }
+}
+
+/**
+ * The non-EVM chains a connection policy would serve through a same-address provider, which answers
+ * the local token's own address: no address of a non-EVM chain. One invariant, checked from both
+ * sides: when a record is added (`chains`, against the stored provider) and when a provider is set
+ * (`provider`, against the stored records). Empty when the provider is not a same-address one.
+ * @internal
+ */
+export async function sameAddressProviderConflicts(
+  chain: EVMChain,
+  state: MultiTokenPoolRecordState,
+  policyWord: string,
+  { provider, chains }: { provider?: string; chains?: readonly bigint[] },
+): Promise<bigint[]> {
+  const of = (r: { policyName: PolicyName }) => policyKey(r.policyName, 'policyName') === policyWord
+  const nonEvm = (
+    chains ?? state.policies.connection.filter(of).map((r) => r.remoteChainSelector)
+  ).filter((c) => laneFamilyOf(c) !== ChainFamily.EVM)
+  if (!nonEvm.length) return []
+  const answering = provider ?? state.policies.remoteTokenAddressProviders.find(of)?.provider
+  if (!answering) return []
+  return (await readContractTypeOrNull(chain, answering)) === SAME_ADDRESS_PROVIDER_TYPE
+    ? nonEvm
+    : []
 }
