@@ -5,7 +5,7 @@
  * @packageDocumentation
  */
 
-import { dataLength, getAddress, hexlify, isError, zeroPadValue } from 'ethers'
+import { dataLength, getAddress, hexlify, isError } from 'ethers'
 
 import type { Chain, ChainGetter } from '../../../chain.ts'
 import {
@@ -17,7 +17,7 @@ import { decodeLaneConnection, decodeTokenProfileFields } from '../../../evm/mul
 import { resultToObject } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { CCTContractTypeInvalidError, CCTContractVersionUnsupportedError } from '../../errors.ts'
-import type { MultiTokenPoolRemoteAttestation } from '../../multi-token-pool.ts'
+import { type MultiTokenPoolRemoteAttestation, abiWord } from '../../multi-token-pool.ts'
 import { laneFamilyOf } from '../../remote-address.ts'
 import { readAllAuthorizedCallers } from '../advanced-pool-hooks/contracts.ts'
 import {
@@ -619,7 +619,6 @@ async function readSolanaRemoteLane(
   if (facts.status !== 'known') return facts
   const { back } = facts
   const legacy = lane.connection.poolDataFormat === 'legacy'
-  const abiWord = (address: string) => zeroPadValue(getAddress(address), 32).toLowerCase()
   const length = facts.sourcePoolAddressLength
   if (back && (length === null || length === undefined || length < 20 || length > 32))
     return {
