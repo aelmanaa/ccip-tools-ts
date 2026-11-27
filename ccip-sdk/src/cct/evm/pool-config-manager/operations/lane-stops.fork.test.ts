@@ -508,4 +508,45 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
           JSON.stringify([dropped]),
     )
   })
+
+  it('a pending stop is not made stale by an unrelated edit on the chain (R3 m4)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: POLICY_TOKEN, remoteChainSelector: FUJI }]
+    const built = await stop.generate(chain, {
+      poolAddress: CORE_POOL,
+      lanes,
+      direction: 'outbound',
+    })
+    // another token's fee moves on the same chain
+    const { fee } = await withForkRetry(() =>
+      cct.getMultiTokenPoolInlineConfigs({ poolAddress: CORE_POOL, tokenAddress: INLINE_TOKEN }),
+    )
+    const record = fee!.find((r) => r.remoteChainSelector === FUJI)!
+    await mined(
+      cct.applyMultiTokenPoolInlineFeeConfigUpdates({
+        poolAddress: CORE_POOL,
+        wallet: await signer(CORE_CONFIG),
+        getChain,
+        set: [
+          {
+            ...record,
+            feeConfig: {
+              ...record.feeConfig,
+              finalityFeeUSDCents: record.feeConfig.finalityFeeUSDCents + 1,
+            },
+          },
+        ],
+      }),
+    )
+    const check = await withForkRetry(() =>
+      cct.checkMultiTokenPoolSnapshot({
+        snapshot: built.snapshot,
+        transaction: built,
+        sender: CORE_CONFIG,
+        getChain,
+      }),
+    )
+    assert.deepEqual(check.changed, [])
+    assert.equal(check.ok, true)
+  })
 })

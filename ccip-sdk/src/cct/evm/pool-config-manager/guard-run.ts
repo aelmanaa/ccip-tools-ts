@@ -324,7 +324,9 @@ export async function runMultiTokenPoolGuards(
     ? await crossCheckWithSimulateV1(chain, input, bundle, afterLanes, blockNumber)
     : false
 
-  const guardInputsHash = hashGuardInputs(lanes, chainLanes, facts)
+  // the chain's other lanes feed only the lane rules: a write that judges nothing (a pause, a stop,
+  // a clamp) seals just its own lanes, so an unrelated edit on the chain never makes it stale
+  const guardInputsHash = hashGuardInputs(lanes, judge ? chainLanes : [], facts)
   // the thresholds and confirmations the write was judged with travel in the snapshot, under its
   // hash, so a re-check of the proposal applies the same ones
   const expected = {
