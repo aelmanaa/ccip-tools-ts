@@ -62,11 +62,29 @@ export class GetMultiTokenPoolLaneVerifications extends LaneBatchQuery<
     )
     for (const column of [hooks, outbound, inbound])
       assertResultCount(address, 'getLaneVerificationBatch', column, lanes.length)
-    const addresses = (list: readonly string[]) => list.map((a) => getAddress(a))
-    return lanes.map((_, i) => ({
-      hook: nullableAddress(resultToObject(hooks[i]!)),
-      outboundCCVs: addresses(resultToObject(outbound[i]!)),
-      inboundCCVs: addresses(resultToObject(inbound[i]!)),
-    }))
+    return lanes.map((_, i) =>
+      decodeLaneVerification(
+        resultToObject(hooks[i]!),
+        resultToObject(outbound[i]!),
+        resultToObject(inbound[i]!),
+      ),
+    )
+  }
+}
+
+/**
+ * One lane's verification from a `getLaneVerificationBatch` row: shared by the read and the guard's
+ * `eth_simulateV1` cross-check.
+ * @internal
+ */
+export function decodeLaneVerification(
+  hook: string,
+  outboundCCVs: readonly string[],
+  inboundCCVs: readonly string[],
+): MultiTokenPoolLaneVerification {
+  return {
+    hook: nullableAddress(hook),
+    outboundCCVs: outboundCCVs.map((a) => getAddress(a)),
+    inboundCCVs: inboundCCVs.map((a) => getAddress(a)),
   }
 }

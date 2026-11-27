@@ -13,8 +13,8 @@ import {
   type PolicyName,
   type PoolConfigManagerReader,
   type PoolConfigManagerTarget,
-  decodePolicyName,
   encodePolicyName,
+  policyNameOf,
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from '../contracts.ts'
@@ -93,7 +93,7 @@ export abstract class PolicyQuery<
     const list = names[LANE_RECORD_TYPES.indexOf(this.recordType)] ?? []
     return {
       ...records,
-      policyName: decodePolicyName(params.policyWord) ?? params.policyWord,
+      policyName: policyNameOf(params.policyWord),
       exists: list.some((w) => String(w).toLowerCase() === word),
     }
   }

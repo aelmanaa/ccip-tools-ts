@@ -1,6 +1,7 @@
 /**
  * Compile-time checks of the shared multi-token pool types (X0): the family-neutral rate limit, the
  * family extension blocks, and the literal `family` of each manager. A regression fails `tsc`.
+ * Also pins that the internal planner inputs stay out of the public `.d.ts` of both barrels.
  */
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
@@ -8,7 +9,8 @@ import { describe, it } from 'node:test'
 import type { EVMTokenManager } from './evm/index.ts'
 import type { MultiTokenPoolRateLimits as EVMRecordsRateLimits } from './evm/pool-config-manager/records.ts'
 import type { RateLimitConfig as EVMRateLimitConfig } from './evm/token-pool/rate-limit.ts'
-import type { MultiTokenPoolFamilyExtension, MultiTokenPoolRateLimits } from './multi-token-pool.ts'
+import type { MultiTokenPoolFamilyExtension } from './multi-token-pool-planners.ts'
+import type { MultiTokenPoolRateLimits } from './multi-token-pool.ts'
 import type { RateLimitConfig } from './rate-limit.ts'
 import type { SolanaTokenManager } from './solana/index.ts'
 import type { RateLimitConfig as SolanaRateLimitConfig } from './solana/token-pool/operations/set-chain-rate-limit.ts'
@@ -43,5 +45,17 @@ describe('shared multi-token pool types (compile time)', () => {
     // @ts-expect-error: the other family's block is refused
     const crossed: EVMInput = { solana: { chunkSize: 2 } }
     assert.deepEqual([optional, withBlock, required, missing, crossed].length, 5)
+  })
+
+  it('keeps the internal planner inputs out of both public barrels', async () => {
+    const evm = (await import('./evm/index.ts')) as Record<string, unknown>
+    // types leave no runtime trace, so this pins the module split instead: the barrels re-export
+    // the shared module, which no longer declares the planner inputs
+    const shared = await import('./multi-token-pool.ts')
+    assert.equal('MULTI_TOKEN_POOL_LANE_CHECKS' in evm, true)
+    assert.equal(
+      Object.keys(shared).some((k) => /Planner|FamilyExtension/.test(k)),
+      false,
+    )
   })
 })

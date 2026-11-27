@@ -20,7 +20,8 @@ import {
 } from './lane-batch.ts'
 
 /** The PCM `RecordLevel` enum, in order (index = on-chain value). */
-const RECORD_LEVELS = ['none', 'inline', 'policy-chain', 'policy-default'] as const
+/** The PCM `RecordLevel` enum, in on-chain order. @internal */
+export const RECORD_LEVELS = ['none', 'inline', 'policy-chain', 'policy-default'] as const
 /** The PCM `RecordLevel` enum. */
 export type MultiTokenPoolRecordLevel = (typeof RECORD_LEVELS)[number]
 /** One lane's record levels. */
@@ -53,13 +54,25 @@ export class GetMultiTokenPoolLaneRecordLevels extends LaneBatchQuery<
   ): Promise<MultiTokenPoolLaneRecordLevels[]> {
     // one array per record type, in LANE_RECORD_TYPES order, each with one level per lane
     const byType = await pcm.getLaneRecordLevelBatch(lanes.map(toAbiLaneKey), { blockTag })
-    return lanes.map((_, i) => ({
-      levels: Object.fromEntries(
-        LANE_RECORD_TYPES.map((type, t) => [
-          type,
-          decodeEnum(RECORD_LEVELS, byType[t]?.[i] ?? NaN, `${type} record level`, address),
-        ]),
-      ) as Record<LaneRecordType, MultiTokenPoolRecordLevel>,
-    }))
+    return lanes.map((_, i) => ({ levels: decodeLaneRecordLevels(byType, i, address) }))
   }
+}
+
+/**
+ * Lane `i`'s levels from a `getLaneRecordLevelBatch` result (one column per record type, in
+ * `LANE_RECORD_TYPES` order): shared by the read and the guard's `eth_simulateV1` cross-check.
+ * @throws {@link CCTDataDecodeError} on a level the SDK does not know
+ * @internal
+ */
+export function decodeLaneRecordLevels(
+  byType: readonly (readonly (bigint | number)[])[],
+  i: number,
+  address: string,
+): Record<LaneRecordType, MultiTokenPoolRecordLevel> {
+  return Object.fromEntries(
+    LANE_RECORD_TYPES.map((type, t) => [
+      type,
+      decodeEnum(RECORD_LEVELS, byType[t]?.[i] ?? NaN, `${type} record level`, address),
+    ]),
+  ) as Record<LaneRecordType, MultiTokenPoolRecordLevel>
 }

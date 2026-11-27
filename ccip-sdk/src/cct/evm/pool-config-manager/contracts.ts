@@ -8,6 +8,7 @@
 import {
   type Interface,
   type LogDescription,
+  ZeroAddress,
   ZeroHash,
   decodeBytes32String,
   encodeBytes32String,
@@ -17,8 +18,11 @@ import {
   isHexString,
 } from 'ethers'
 
+import type { TransferDirection } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import {
+  type PoolConfigManagerStores,
+  decodeLaneConnection,
   decodePoolConfigManagerStaticConfig,
   decodeTokenProfileFields,
 } from '../../../evm/multi-token-pool.ts'
@@ -337,6 +341,15 @@ export function decodePolicyName(value: string): PolicyName | null {
   return value.toLowerCase()
 }
 
+/**
+ * A policy word as a name, where the word always names a policy (a record key, a decoded write):
+ * {@link decodePolicyName}, with the zero word kept as it is rather than read as "unassigned".
+ * @internal
+ */
+export function policyNameOf(word: string): PolicyName {
+  return decodePolicyName(word) ?? word
+}
+
 /** One token lane: a local token and a remote chain. The PCM's `LaneKey`. */
 export type MultiTokenPoolLaneKey = {
   /** Local token. */
@@ -345,11 +358,17 @@ export type MultiTokenPoolLaneKey = {
   remoteChainSelector: bigint
 }
 
+/** A lane key plus the directions that apply to it (`goingLive`, `confirmOpening`). */
+export type MultiTokenPoolLaneDirections = MultiTokenPoolLaneKey & {
+  /** The directions. */
+  directions: TransferDirection[]
+}
+
 /** Lanes or tokens per PCM batch view call (every batch view chunks by it). */
 export const LANE_BATCH_SIZE = 100
 
 /**
- * Validates a non-empty list of {@link MultiTokenPoolLaneKey}s.
+ * Validates a list of {@link MultiTokenPoolLaneKey}s, non-empty unless `minLength` is 0.
  * @throws {@link CCTParamsInvalidError} naming the first invalid entry
  * @internal
  */
@@ -357,8 +376,9 @@ export function validateLaneKeys(
   operation: string,
   param: string,
   lanes: unknown,
+  minLength = 1,
 ): asserts lanes is MultiTokenPoolLaneKey[] {
-  validateArray(operation, param, lanes, 1)
+  validateArray(operation, param, lanes, minLength)
   Array.from(lanes, (lane, i) => {
     const { tokenAddress, remoteChainSelector } = (lane ?? {}) as Record<string, unknown>
     validateAddress(operation, `${param}[${i}].tokenAddress`, tokenAddress)
@@ -401,16 +421,7 @@ export function readLaneBatches<R>(
 }
 
 /** The TokenAdminRegistry and the three stores a PCM was deployed with. */
-export type PoolConfigManagerStaticConfig = {
-  /** The TokenAdminRegistry the PCM checks token admins against. */
-  tokenAdminRegistry: string
-  /** Store of connection and remote-pool policies. */
-  connectionPolicyStore: string
-  /** Store of fee and destination-overhead policies. */
-  feePolicyStore: string
-  /** Store of rate-limit and security policies. */
-  securityPolicyStore: string
-}
+export type PoolConfigManagerStaticConfig = PoolConfigManagerStores
 
 /**
  * Reads a PCM's `getStaticConfig()`.
@@ -420,15 +431,53 @@ export async function readPoolConfigManagerStaticConfig(
   chain: EVMChain,
   address: string,
   version: MultiTokenPoolVersion,
+  { blockTag }: { blockTag?: number } = {},
 ): Promise<PoolConfigManagerStaticConfig> {
   // positional: abitype types the four outputs as a tuple; the runtime Result also has names
   return decodePoolConfigManagerStaticConfig(
-    await poolConfigManagerContract(chain, address, version).getStaticConfig(),
+    await poolConfigManagerContract(chain, address, version).getStaticConfig(
+      blockTag === undefined ? {} : { blockTag },
+    ),
   )
 }
 
 /** The PCM handle the batch and policy readers get. @internal */
 export type PoolConfigManagerReader = ReturnType<typeof poolConfigManagerContract>
+
+/**
+ * The global pause flag and each chain's pause flags, from one zero-token lane read per chain (the
+ * global flag rides on every lane; selector `0` answers it when no chain is given).
+ * @internal
+ */
+export async function readChainPauseFlags(
+  pcm: PoolConfigManagerReader,
+  address: string,
+  selectors: readonly bigint[],
+  blockTag: number,
+): Promise<{
+  global: boolean
+  chains: { remoteChainSelector: bigint; outbound: boolean; inbound: boolean }[]
+}> {
+  const lanes = (selectors.length ? selectors : [0n]).map((remoteChainSelector) => ({
+    tokenAddress: ZeroAddress,
+    remoteChainSelector,
+  }))
+  const flags = await readLaneBatches(lanes, async (chunk) => {
+    const read = (await pcm.getLaneConnectionBatch(chunk.map(toAbiLaneKey), { blockTag })).map(
+      (c) => decodeLaneConnection(resultToObject(c), String),
+    )
+    assertResultCount(address, 'getLaneConnectionBatch', read, chunk.length)
+    return read
+  })
+  return {
+    global: flags.some((f) => f.isGloballyPaused),
+    chains: selectors.map((remoteChainSelector, i) => ({
+      remoteChainSelector,
+      outbound: flags[i]!.isChainOutboundPaused,
+      inbound: flags[i]!.isChainInboundPaused,
+    })),
+  }
+}
 
 /**
  * Decodes an on-chain enum value through its SDK tuple (index = on-chain value).

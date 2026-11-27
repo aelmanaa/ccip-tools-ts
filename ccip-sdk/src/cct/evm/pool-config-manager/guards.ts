@@ -10,20 +10,37 @@
 
 import { ZeroAddress, getAddress } from 'ethers'
 
-import type { LaneRecordType } from '../../../chain.ts'
+import type { LaneRecordType, RateLimiterState, TransferDirection } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
+import { canonicalJson } from '../../canonical.ts'
 import {
   type MultiTokenPoolLaneFinding,
   type MultiTokenPoolRemoteAttestation,
+  type MultiTokenPoolRemoteFact,
   sortFindings,
 } from '../../multi-token-pool.ts'
-import { type MultiTokenPoolLaneKey, encodePolicyName } from './contracts.ts'
+import {
+  validateArray,
+  validateBoolean,
+  validateOneOf,
+  validateUint32,
+  validateUint64,
+} from '../validate.ts'
+import {
+  type MultiTokenPoolLaneDirections,
+  type MultiTokenPoolLaneKey,
+  validateLaneKeys,
+} from './contracts.ts'
 import {
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
+  laneKey,
+  multiTokenPoolRecordChains,
   multiTokenPoolSupportedChains,
+  policyKey,
   resolveMultiTokenPoolLanes,
 } from './projection.ts'
+import type { MultiTokenPoolWriteGuards } from './write-operation.ts'
 
 /** Default {@link MultiTokenPoolGuardOptions.maxTransferFeeBps} (the token fee cap). @internal */
 export const DEFAULT_MAX_TRANSFER_FEE_BPS = 1_000
@@ -37,28 +54,19 @@ export const LONG_POOL_DATA_BYTES = 192
 export const LEGACY_POOL_DATA_BYTES = 32
 
 /** The guard options a write takes (thresholds and confirmations, never switches). @internal */
-export type MultiTokenPoolGuardOptions = {
-  /** Accept non-empty CCV lists without the default-CCV placeholder `address(0)`. */
-  allowDroppingDefaultCCVs?: boolean
-  /** Highest resolved transfer fee in bps, both tiers. */
-  maxTransferFeeBps?: number
-  /** Lowest resolved `destGasOverhead`. */
-  minDestGasOverhead?: number
-  /** Lanes the caller agrees this write closes. */
-  confirmClosing?: MultiTokenPoolLaneKey[]
-  /** Remote chains where a lane may accept legacy pool data from a remote multi-token pool. */
-  migrationWindowChains?: bigint[]
-}
+export type MultiTokenPoolGuardOptions = Pick<
+  MultiTokenPoolWriteGuards,
+  | 'allowDroppingDefaultCCVs'
+  | 'maxTransferFeeBps'
+  | 'minDestGasOverhead'
+  | 'confirmClosing'
+  | 'confirmOpening'
+  | 'migrationWindowChains'
+>
 
-/** A remote fact: read, absent on the remote chain, or unreadable. @internal */
-export type MultiTokenPoolRemoteFact<T> =
-  | ({ status: 'known' } & T)
-  | {
-      /** `'missing'`: the remote side lacks it; `'unknown'`: the SDK cannot read that chain. */
-      status: 'missing' | 'unknown'
-      /** What is missing or why it cannot be read. */
-      reason: string
-    }
+// the family-neutral remote fact and the lane directions; re-exported so importers keep their path
+export type { MultiTokenPoolLaneDirections } from './contracts.ts'
+export type { MultiTokenPoolRemoteFact } from '../../multi-token-pool.ts'
 
 /** What the remote side of one lane does. @internal */
 export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
@@ -68,8 +76,34 @@ export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   registryPool: string | null
   /** Whether that pool's lane back points at this token and trusts a local serving pool. */
   mapsBack: boolean
+  /** Why `mapsBack` is `false`, when the reader can say (e.g. the stored bytes differ). */
+  mapsBackReason?: string
+  /**
+   * Set when every transfer on the remote lane reverts although it is not paused (Solana: a stale
+   * SECURITY record or an unsynced CCV copy): the lane is not live.
+   */
+  failsClosed?: string
+  /** The remote lane's UID (`0x` hex), which every inbound long transfer must carry; `null`: none. */
+  uid?: string | null
+  /** A group-driven remote lane: whether its chain record admits the member now. */
+  admitted?: boolean
+  /**
+   * Whether the remote token's provider accepts the additional data this lane sends (`undefined`: the
+   * remote token has no provider, or the reader cannot say).
+   */
+  remoteAcceptsOutbound?: boolean
+  /** The additional data the remote side sends (`0x`: none); `undefined` when it cannot be read. */
+  remoteSendsData?: string
+  /** Set when the remote provider refuses to produce data for its own token. */
+  remoteProviderRefused?: string
   /** Whether the remote token has code on the remote chain (read when the registry names no pool). */
   remoteTokenHasCode?: boolean
+  /** The remote pool's outbound bucket toward this chain (read for the lane check), `null` when disabled. */
+  remoteOutbound?: RateLimiterState
+  /** Decimals of the remote token (read with `remoteOutbound`), to compare the limits in one unit. */
+  remoteDecimals?: number
+  /** Why the remote outbound bucket could not be read, when it was asked for and the lane back exists. */
+  remoteOutboundUnknownReason?: string
   /** The attestation the long-data fact came from, for a family the SDK cannot read. */
   attestation?: MultiTokenPoolRemoteAttestation
 }>
@@ -92,6 +126,14 @@ export type MultiTokenPoolGuardFacts = {
   servingPools: readonly string[]
   /** Bytes of additional pool data the token's provider adds, per lane key, for lanes with one. */
   additionalPoolDataBytes: ReadonlyMap<string, number>
+  /** The additional pool data itself (`0x` hex), per lane key, for lanes with a provider. */
+  additionalPoolData?: ReadonlyMap<string, string>
+  /** Why the token's provider refuses to produce data for it, per lane key. */
+  providerDataRefused?: ReadonlyMap<string, string>
+  /** Whether the token's provider accepts the data the remote side sends, per lane key. */
+  localAcceptsInbound?: ReadonlyMap<string, boolean>
+  /** Whether the token's provider accepts the empty data of legacy receive, per lane key. */
+  localAcceptsLegacy?: ReadonlyMap<string, boolean>
 }
 
 /** The facts to read for a set of projected lanes. @internal */
@@ -108,24 +150,15 @@ export type MultiTokenPoolGuardFactRequests = {
 
 /** The lane key the facts maps use. @internal */
 export const guardLaneKey = ({ tokenAddress, remoteChainSelector }: MultiTokenPoolLaneKey) =>
-  `${getAddress(tokenAddress)}:${remoteChainSelector}`
+  laneKey(tokenAddress, remoteChainSelector)
 /** The remote pool key the facts maps use. @internal */
 export const guardPoolKey = (remoteChainSelector: bigint, address: string) =>
   `${remoteChainSelector}:${address}`
 
 /** Every (token, chain) a state names, for the lanes a write could reach. */
 function candidateLanes(states: readonly MultiTokenPoolRecordState[]): MultiTokenPoolLaneKey[] {
-  const tokens = new Set<string>()
-  const chains = new Set<bigint>()
-  for (const s of states) {
-    for (const t of s.tokens) {
-      tokens.add(getAddress(t.tokenAddress))
-      for (const type of LANE_RECORD_TYPES)
-        for (const r of t.inline[type]) chains.add(r.remoteChainSelector)
-    }
-    for (const type of LANE_RECORD_TYPES)
-      for (const r of s.policies[type]) if (r.remoteChainSelector) chains.add(r.remoteChainSelector)
-  }
+  const tokens = new Set(states.flatMap((s) => s.tokens.map((t) => getAddress(t.tokenAddress))))
+  const chains = new Set(states.flatMap(multiTokenPoolRecordChains))
   return [...tokens].flatMap((tokenAddress) =>
     [...chains].map((remoteChainSelector) => ({ tokenAddress, remoteChainSelector })),
   )
@@ -140,21 +173,7 @@ function sameLane(a: ProjectedMultiTokenPoolLane, b: ProjectedMultiTokenPoolLane
       remotePools: [...l.connection.remotePools].sort((x, y) => x.address.localeCompare(y.address)),
     },
   })
-  return canonicalEqual(norm(a), norm(b))
-}
-
-function canonicalEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true
-  if (typeof a !== typeof b || a === null || b === null || typeof a !== 'object') return false
-  if (Array.isArray(a) !== Array.isArray(b)) return false
-  const ka = Object.keys(a).filter((k) => (a as Record<string, unknown>)[k] !== undefined)
-  const kb = Object.keys(b as object).filter((k) => (b as Record<string, unknown>)[k] !== undefined)
-  return (
-    ka.length === kb.length &&
-    ka.every((k) =>
-      canonicalEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
-    )
-  )
+  return canonicalJson(norm(a)) === canonicalJson(norm(b))
 }
 
 /**
@@ -230,8 +249,12 @@ export function longPoolDataBytes(extra: number): number {
 export type MultiTokenPoolGuardFactFailure = MultiTokenPoolLaneKey & {
   /** `'missing'` or `'unknown'`. */
   status: 'missing' | 'unknown'
+  /** Whether the fact is about the remote side of the lane, or a local contract (a hook). */
+  scope: 'remote' | 'local'
   /** What could not be read. */
   reason: string
+  /** The error that left it unread, when one did; see {@link MultiTokenPoolRemoteFact}. */
+  cause?: unknown
 }
 
 /** Inputs of {@link evaluateMultiTokenPoolGuards}. @internal */
@@ -285,7 +308,12 @@ export function evaluateMultiTokenPoolGuards({
     // a lane the write closes strands in-flight inbound messages
     if (before.connection.hasConnection && !c.hasConnection) {
       if (confirmed.has(guardLaneKey(key)))
-        add('LANE_CLOSED', 'warning', 'the write closes this lane (confirmed in confirmClosing)')
+        add(
+          'LANE_CLOSED',
+          'warning',
+          'the write closes this lane (confirmed in confirmClosing)',
+          'connection',
+        )
       else
         add(
           'LANE_CLOSED',
@@ -372,6 +400,7 @@ export function evaluateMultiTokenPoolGuards({
         factFailures.push({
           ...key,
           status: 'unknown',
+          scope: 'local',
           reason: `hook ${lane.verification.hook} callers were not read`,
         })
       else {
@@ -398,7 +427,7 @@ export function evaluateMultiTokenPoolGuards({
       add(
         'REMOTE_TOKEN_SHARED',
         'error',
-        `remote token ${c.remoteToken} is also the remote token of ${shared.map((o) => o.tokenAddress).join(', ')} on this chain`,
+        `remote token ${c.remoteToken} is also the remote token of ${shared.map((o) => o.tokenAddress).join(', ')} on this chain, so the destination cannot tell them apart: give each local token its own remote token`,
         'connection',
       )
 
@@ -409,8 +438,10 @@ export function evaluateMultiTokenPoolGuards({
       if (!pool || pool.status !== 'known') {
         factFailures.push({
           ...key,
+          scope: 'remote',
           status: pool?.status ?? 'unknown',
           reason: pool?.status ? pool.reason : `remote pool ${p.address} was not read`,
+          ...(pool?.cause !== undefined && { cause: pool.cause }),
         })
         continue
       }
@@ -428,8 +459,10 @@ export function evaluateMultiTokenPoolGuards({
     if (!remote || remote.status !== 'known') {
       factFailures.push({
         ...key,
+        scope: 'remote',
         status: remote?.status ?? 'unknown',
         reason: remote?.status ? remote.reason : 'the remote side of this lane was not read',
+        ...(remote?.cause !== undefined && { cause: remote.cause }),
       })
       continue
     }
@@ -467,13 +500,90 @@ export function evaluateMultiTokenPoolGuards({
         `the lane sends long pool data but remote pool ${remote.registryPool} reads only legacy data: the destination release reverts and the burned tokens are stuck`,
         'remotePool',
       )
-    if (c.poolDataFormat === 'legacy' && !remote.mapsBack)
+    // the EVM reader judges the reverse mapping only on legacy lanes (`true` on long ones); a reader
+    // that compares the stored bytes judges both, and says why
+    if (!remote.mapsBack)
       add(
         'REMOTE_LANE_MISMATCH',
         'error',
-        'the lane sends legacy pool data (no source token), but the remote lane back does not point at this token and a serving pool: the destination cannot tell which token was sent',
+        remote.mapsBackReason ??
+          'the lane sends legacy pool data (no source token), but the remote lane back does not point at this token and a serving pool: the destination cannot tell which token was sent',
         'connection',
       )
+    // the lane has a connection here: live outbound unless paused
+    const liveOutbound = !c.isOutboundPaused
+    if (remote.failsClosed !== undefined)
+      add(
+        'REMOTE_LANE_MISMATCH',
+        // a send into a lane that reverts is stuck; a write that leaves the lane paused may proceed
+        liveOutbound ? 'error' : 'warning',
+        `the remote lane reverts every transfer in both directions: ${remote.failsClosed}`,
+        'security',
+      )
+    if (remote.admitted === false)
+      add(
+        'LANE_NOT_ADMITTED',
+        'warning',
+        "the remote group's chain record does not admit this member now, so the remote lane is paused: transfers wait until it is admitted",
+        'connection',
+      )
+    // the additional pool data, judged by the providers that judge it on chain: the remote token's on
+    // what this lane sends, this token's on what arrives (legacy receive arrives empty)
+    const laneKeyStr = guardLaneKey(key)
+    const refused = facts.providerDataRefused?.get(laneKeyStr)
+    if (refused !== undefined)
+      add(
+        'UID_MISMATCH',
+        'error',
+        `this token's additional pool data provider refuses to produce data for it (${refused}): every send reverts; use a provider that maps the token (a UID factory must have deployed it)`,
+        'connection',
+      )
+    if (remote.remoteAcceptsOutbound === false)
+      add(
+        'UID_MISMATCH',
+        'error',
+        `the remote token's provider refuses the additional pool data this lane sends (${c.poolDataFormat === 'legacy' ? 'none: the lane sends legacy data' : (facts.additionalPoolData?.get(laneKeyStr) ?? 'none')}): the release there reverts (InvalidAdditionalPoolData) and the burned tokens are stuck; pair the providers, or send long data`,
+        'connection',
+      )
+    if (facts.localAcceptsInbound?.get(laneKeyStr) === false)
+      add(
+        'UID_MISMATCH',
+        'error',
+        `this token's provider refuses the additional pool data the remote side sends (${remote.remoteSendsData}): inbound releases revert here (InvalidAdditionalPoolData); pair the providers`,
+        'connection',
+      )
+    if (facts.localAcceptsLegacy?.get(laneKeyStr) === false)
+      add(
+        'UID_MISMATCH',
+        'error',
+        "a trusted remote pool may send legacy pool data, which carries no additional data, and this token's provider refuses empty data: such inbound releases revert; clear allowLegacyPoolData",
+        'remotePool',
+      )
+    const hasProvider = facts.additionalPoolData?.has(laneKeyStr) === true || refused !== undefined
+    if (remote.remoteProviderRefused !== undefined)
+      add(
+        'UID_MISMATCH',
+        'warning',
+        `${remote.remoteProviderRefused}: sends from the remote side revert there`,
+        'connection',
+      )
+    else if (hasProvider && remote.remoteSendsData === undefined)
+      add(
+        'UID_MISMATCH',
+        'warning',
+        "the additional pool data the remote side sends cannot be read, so this token's provider was not checked against it",
+        'connection',
+      )
+    if (remote.uid != null && c.poolDataFormat === 'long') {
+      const data = facts.additionalPoolData?.get(guardLaneKey(key))
+      if (data === undefined || data.toLowerCase() !== remote.uid.toLowerCase())
+        add(
+          'UID_MISMATCH',
+          'error',
+          `the remote lane requires UID ${remote.uid} as the additional pool data of every inbound transfer, but this lane sends ${data ?? 'none'}: the destination refuses it (InvalidAdditionalPoolData); give the token the provider that answers this UID`,
+          'connection',
+        )
+    }
   }
   return { findings: sortFindings(findings), factFailures }
 }
@@ -490,13 +600,10 @@ function policyBlastRadius(
   )
   const name = token?.policies[type]
   if (!name) return ''
-  const word = encodePolicyName('evaluateMultiTokenPoolGuards', 'policyName', name).toLowerCase()
+  const word = policyKey(name, 'policyName')
   const count = state.tokens.filter((t) => {
     const p = t.policies[type]
-    return (
-      p !== null &&
-      encodePolicyName('evaluateMultiTokenPoolGuards', 'policyName', p).toLowerCase() === word
-    )
+    return p !== null && policyKey(p, 'policyName') === word
   }).length
   return ` (from ${type} policy ${name}, shared by ${count} token${count === 1 ? '' : 's'})`
 }
@@ -513,4 +620,82 @@ export function multiTokenPoolChainLanes(
       .map((remoteChainSelector) => ({ tokenAddress: t.tokenAddress, remoteChainSelector })),
   )
   return resolveMultiTokenPoolLanes(state, lanes)
+}
+
+const DIRECTIONS = ['outbound', 'inbound'] as const
+
+/**
+ * Validates guard options before any RPC: a write's own params (`prefix` empty) or the options a
+ * snapshot sealed (`prefix` naming where they sit), with the same validators the reads use.
+ * @throws {@link CCTParamsInvalidError} naming the first invalid option
+ * @internal
+ */
+export function validateMultiTokenPoolGuardOptions(
+  operation: string,
+  prefix: string,
+  o: Record<string, unknown>,
+): asserts o is MultiTokenPoolGuardOptions {
+  const at = (name: string) => `${prefix}${name}`
+  if (o.allowDroppingDefaultCCVs !== undefined)
+    validateBoolean(operation, at('allowDroppingDefaultCCVs'), o.allowDroppingDefaultCCVs)
+  if (o.maxTransferFeeBps !== undefined)
+    validateUint32(operation, at('maxTransferFeeBps'), o.maxTransferFeeBps)
+  if (o.minDestGasOverhead !== undefined)
+    validateUint32(operation, at('minDestGasOverhead'), o.minDestGasOverhead)
+  if (o.confirmClosing !== undefined)
+    validateLaneKeys(operation, at('confirmClosing'), o.confirmClosing, 0)
+  if (o.confirmOpening !== undefined) {
+    validateLaneKeys(operation, at('confirmOpening'), o.confirmOpening, 0)
+    o.confirmOpening.forEach((l, i) => {
+      const { directions } = l as { directions?: unknown }
+      validateArray(operation, at(`confirmOpening[${i}].directions`), directions)
+      Array.from(directions, (d, j) =>
+        validateOneOf(operation, at(`confirmOpening[${i}].directions[${j}]`), d, DIRECTIONS),
+      )
+    })
+  }
+  if (o.migrationWindowChains !== undefined) {
+    validateArray(operation, at('migrationWindowChains'), o.migrationWindowChains)
+    Array.from(o.migrationWindowChains, (c, i) =>
+      validateUint64(operation, at(`migrationWindowChains[${i}]`), c),
+    )
+  }
+}
+
+/** Whether a lane is live in a direction: it has a connection and no pause holds that direction. */
+function liveIn(l: ProjectedMultiTokenPoolLane, d: TransferDirection): boolean {
+  return (
+    l.connection.hasConnection &&
+    !(d === 'outbound' ? l.connection.isOutboundPaused : l.connection.isInboundPaused)
+  )
+}
+
+/**
+ * What a write opens and makes live, per direction: `opened` gains a connection (with the directions
+ * live after it), `goingLive` is live in a direction it was not live in before (an opened lane, or an
+ * unpause).
+ * @internal
+ */
+export function multiTokenPoolLaneTransitions(
+  lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
+): { opened: MultiTokenPoolLaneDirections[]; goingLive: MultiTokenPoolLaneDirections[] } {
+  const entry = (l: ProjectedMultiTokenPoolLane, directions: TransferDirection[]) => ({
+    tokenAddress: l.tokenAddress,
+    remoteChainSelector: l.remoteChainSelector,
+    directions,
+  })
+  const opened: MultiTokenPoolLaneDirections[] = []
+  const goingLive: MultiTokenPoolLaneDirections[] = []
+  for (const { before, after } of lanes) {
+    if (!before.connection.hasConnection && after.connection.hasConnection)
+      opened.push(
+        entry(
+          after,
+          DIRECTIONS.filter((d) => liveIn(after, d)),
+        ),
+      )
+    const newly = DIRECTIONS.filter((d) => liveIn(after, d) && !liveIn(before, d))
+    if (newly.length) goingLive.push(entry(after, newly))
+  }
+  return { opened, goingLive }
 }

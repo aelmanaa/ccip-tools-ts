@@ -5,14 +5,10 @@
  * @packageDocumentation
  */
 
-import { ZeroAddress, getAddress, isError } from 'ethers'
+import { getAddress, isError } from 'ethers'
 
 import type { EVMChain } from '../../../evm/index.ts'
-import {
-  LANE_RECORD_TYPES,
-  decodeLaneConnection,
-  isZeroHex,
-} from '../../../evm/multi-token-pool.ts'
+import { LANE_RECORD_TYPES, isZeroHex } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
 import {
@@ -23,13 +19,13 @@ import {
 } from '../multi-token-pool/contracts.ts'
 import {
   type MultiTokenPoolLaneKey,
+  type PoolConfigManagerStaticConfig,
   LANE_BATCH_SIZE,
-  decodePolicyName,
+  policyNameOf,
+  readChainPauseFlags,
   readConfiguredTokens,
   readInBatches,
-  readLaneBatches,
   readPoolConfigManagerStaticConfig,
-  toAbiLaneKey,
 } from './contracts.ts'
 import { decodeTokenPolicies } from './decode.ts'
 import {
@@ -37,6 +33,7 @@ import {
   type MultiTokenPoolProviderAnswer,
   type MultiTokenPoolRecordState,
   type MultiTokenPoolTokenRecords,
+  multiTokenPoolRecordChains,
   multiTokenPoolSupportedChains,
   requiredMultiTokenPoolProviderAnswers,
 } from './projection.ts'
@@ -60,6 +57,8 @@ export type MultiTokenPoolRecordStateRead = {
   blockNumber: number
   /** Every (token, supported chain) of the tokens read. */
   lanes: MultiTokenPoolLaneKey[]
+  /** The PCM's static config, read at the same block (callers need its TokenAdminRegistry). */
+  staticConfig: PoolConfigManagerStaticConfig
 }
 
 /**
@@ -83,14 +82,14 @@ export async function readMultiTokenPoolRecordState(
   const blockNumber = blockTag ?? (await chain.provider.getBlockNumber())
   const at = { blockTag: blockNumber }
   const pcm = poolConfigManagerContract(chain, address, version)
-  const [{ connectionPolicyStore }, tokens, nameLists] = await Promise.all([
-    readPoolConfigManagerStaticConfig(chain, address, version),
+  const [staticConfig, tokens, nameLists] = await Promise.all([
+    readPoolConfigManagerStaticConfig(chain, address, version, at),
     tokenAddresses
       ? tokenAddresses.map((t) => getAddress(t))
       : readConfiguredTokens(chain, address, version, at).then((r) => r.tokens),
     pcm.getPolicyNames(at),
   ])
-  const store = connectionPolicyStoreContract(chain, connectionPolicyStore, version)
+  const store = connectionPolicyStoreContract(chain, staticConfig.connectionPolicyStore, version)
 
   // tokens: policies, own pauses and inline records
   const tokenRecords: MultiTokenPoolTokenRecords[] = await readInBatches(
@@ -139,7 +138,7 @@ export async function readMultiTokenPoolRecordState(
       const words = (nameLists[t] ?? []).map(String)
       await Promise.all(
         words.map(async (word) => {
-          const policyName = decodePolicyName(word) ?? word
+          const policyName = policyNameOf(word)
           if (type === 'connection') {
             const read = await POLICY_RECORD_READERS.connection(pcm, word, at)
             if (read.remoteTokenAddressProvider)
@@ -167,31 +166,14 @@ export async function readMultiTokenPoolRecordState(
   )
 
   // pauses: one lane read per chain any record names (the zero token has no records of its own)
-  const chains = new Set<bigint>(extraChains)
-  for (const t of tokenRecords)
-    for (const type of LANE_RECORD_TYPES)
-      for (const r of t.inline[type]) chains.add(r.remoteChainSelector)
-  for (const type of LANE_RECORD_TYPES)
-    for (const r of policies[type])
-      if (r.remoteChainSelector !== 0n) chains.add(r.remoteChainSelector)
-  const chainList = [...(chains.size ? chains : [0n])]
-  const flags = await readLaneBatches(
-    chainList.map((remoteChainSelector) => ({ tokenAddress: ZeroAddress, remoteChainSelector })),
-    async (chunk) =>
-      (await pcm.getLaneConnectionBatch(chunk.map(toAbiLaneKey), at)).map((c) =>
-        decodeLaneConnection(resultToObject(c), String),
-      ),
-  )
+  const chainList = [
+    ...new Set([...extraChains, ...multiTokenPoolRecordChains({ tokens: tokenRecords, policies })]),
+  ]
+  const pauses = await readChainPauseFlags(pcm, address, chainList, blockNumber)
 
   const state: MultiTokenPoolRecordState = {
-    isGloballyPaused: flags.some((f) => f.isGloballyPaused),
-    chainPauses: chainList
-      .map((remoteChainSelector, i) => ({
-        remoteChainSelector,
-        outbound: flags[i]!.isChainOutboundPaused,
-        inbound: flags[i]!.isChainInboundPaused,
-      }))
-      .filter((p) => p.remoteChainSelector !== 0n && (p.outbound || p.inbound)),
+    isGloballyPaused: pauses.global,
+    chainPauses: pauses.chains.filter((p) => p.outbound || p.inbound),
     tokens: tokenRecords,
     policies,
     providerAnswers: [],
@@ -208,7 +190,7 @@ export async function readMultiTokenPoolRecordState(
     requiredMultiTokenPoolProviderAnswers(state, lanes),
     blockNumber,
   )
-  return { state, blockNumber, lanes }
+  return { state, blockNumber, lanes, staticConfig }
 }
 
 /**

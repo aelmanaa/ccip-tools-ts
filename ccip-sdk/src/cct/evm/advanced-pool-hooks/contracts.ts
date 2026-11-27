@@ -119,13 +119,19 @@ export async function readThresholdAmount(
   return resultToObject(await hooks.getThresholdAmount()) as bigint
 }
 
-/** Reads every hooks caller authorized for preflight and postflight checks in one `eth_call`. */
+/**
+ * Reads every hooks caller authorized for preflight and postflight checks in one `eth_call`, at
+ * `blockTag` when given.
+ */
 export async function readAllAuthorizedCallers(
   chain: EVMChain,
   advancedPoolHooks: string,
+  { blockTag }: { blockTag?: number } = {},
 ): Promise<string[]> {
   const hooks = getTypedContract(chain, advancedPoolHooks, ADVANCED_POOL_HOOKS_V2_0_0_ABI)
-  return toAddresses(await hooks.getAllAuthorizedCallers())
+  return toAddresses(
+    await hooks.getAllAuthorizedCallers(blockTag === undefined ? {} : { blockTag }),
+  )
 }
 
 /** Resolves the CCVs required for a transfer in one `eth_call`. */

@@ -247,3 +247,12 @@ export function decodeTokenProfileFields(raw: {
     additionalPoolDataProvider: nullableAddress(raw.additionalPoolDataProvider),
   }
 }
+
+/**
+ * The token fee a pool deducts for a basis-point rate, rounded down as the pools compute it
+ * (`amount * bps / 10_000`).
+ * @internal
+ */
+export function bpsFeeDeducted(amount: bigint | number, bps: number): bigint {
+  return (BigInt(amount) * BigInt(bps)) / BigInt(10_000)
+}

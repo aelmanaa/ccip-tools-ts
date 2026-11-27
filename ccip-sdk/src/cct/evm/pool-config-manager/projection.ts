@@ -318,9 +318,11 @@ const DISABLED_FEE: TokenTransferFeeConfig = {
 
 // ─── Keys ───────────────────────────────────────────────────────────────────────────────────
 
-const policyKey = (name: PolicyName, param: string) =>
+/** A policy name's canonical key (its `bytes32`, lowercase). @internal */
+export const policyKey = (name: PolicyName, param: string) =>
   encodePolicyName(OPERATION, param, name).toLowerCase()
-const laneKey = (token: string, chain: bigint) => `${getAddress(token)}:${chain}`
+/** A lane's canonical key (`checksummed token:chain`). @internal */
+export const laneKey = (token: string, chain: bigint) => `${getAddress(token)}:${chain}`
 const recordKey = (policy: PolicyName, chain: bigint, param: string) =>
   `${policyKey(policy, param)}:${chain}`
 const answerKey = (provider: string, token: string, chain: bigint) =>
@@ -501,6 +503,15 @@ export function applyMultiTokenPoolRecordChanges(
         if (change.outbound !== undefined) token.isOutboundPaused = change.outbound
         if (change.inbound !== undefined) token.isInboundPaused = change.inbound
         break
+      }
+      default: {
+        // a change kind this projection does not know must never pass as a no-op
+        const unknown: never = change
+        throw new CCTParamsInvalidError(
+          OPERATION,
+          param,
+          `has an unknown kind ${(unknown as { kind: string }).kind}: it cannot be projected`,
+        )
       }
     }
   })
@@ -791,4 +802,40 @@ export function requiredMultiTokenPoolProviderAnswers(
       needed.set(key, { provider, tokenAddress: getAddress(tokenAddress), remoteChainSelector })
   }
   return [...needed.values()]
+}
+
+/** Every remote chain a record names: inline records, and policy records other than the default. @internal */
+export function multiTokenPoolRecordChains(
+  state: Pick<MultiTokenPoolRecordState, 'tokens' | 'policies'>,
+): bigint[] {
+  const chains = new Set<bigint>()
+  for (const t of state.tokens)
+    for (const type of LANE_RECORD_TYPES)
+      for (const r of t.inline[type]) chains.add(r.remoteChainSelector)
+  // a policy record on chain 0 is the default, not a chain
+  for (const type of LANE_RECORD_TYPES)
+    for (const r of state.policies[type])
+      if (r.remoteChainSelector !== 0n) chains.add(r.remoteChainSelector)
+  return [...chains]
+}
+
+/**
+ * Every remote chain a set of changes names (record keys, pauses), so a reader can include chains no
+ * record names yet: a chain can be paused before any record exists.
+ * @internal
+ */
+export function multiTokenPoolChangeChains(
+  changes: readonly MultiTokenPoolRecordChange[],
+): bigint[] {
+  const chains = new Set<bigint>()
+  for (const c of changes) {
+    const chain =
+      'remoteChainSelector' in c
+        ? c.remoteChainSelector
+        : 'record' in c
+          ? c.record.remoteChainSelector
+          : undefined
+    if (chain !== undefined && chain !== 0n) chains.add(chain)
+  }
+  return [...chains]
 }

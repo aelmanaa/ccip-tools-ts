@@ -13,7 +13,7 @@ import { getAddress, keccak256, toBeHex } from 'ethers'
 
 import type { ChainGetter } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
-import { decodeLaneConnection, nullableAddress } from '../../../evm/multi-token-pool.ts'
+import { decodeLaneConnection, decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
@@ -34,30 +34,36 @@ import {
   ANY_FINALITY_CONFIG,
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
+  poolConfigManagerContract,
 } from '../multi-token-pool/contracts.ts'
 import { simulateEVMTx } from '../simulate.ts'
 import { toTokenTransferFeeConfig } from '../token-pool/contracts.ts'
 import { type DecodedMultiTokenPoolWrite, decodeMultiTokenPoolWrite } from './calldata.ts'
-import {
-  type MultiTokenPoolLaneKey,
-  readPoolConfigManagerStaticConfig,
-  toAbiLaneKey,
-} from './contracts.ts'
+import { type MultiTokenPoolLaneKey, toAbiLaneKey } from './contracts.ts'
+import { type AbiRateLimits, decodeRateLimits } from './decode.ts'
 import { readMultiTokenPoolGuardFacts } from './guard-facts.ts'
 import {
   type MultiTokenPoolGuardFacts,
   type MultiTokenPoolGuardOptions,
+  type MultiTokenPoolLaneDirections,
   evaluateMultiTokenPoolGuards,
+  guardLaneKey,
   multiTokenPoolAffectedLanes,
   multiTokenPoolCandidateLanes,
   multiTokenPoolChainLanes,
+  multiTokenPoolLaneTransitions,
   requiredMultiTokenPoolGuardFacts,
 } from './guards.ts'
+import { decodeLaneRecordLevels } from './operations/get-multi-token-pool-lane-record-levels.ts'
+import { decodeLaneVerification } from './operations/get-multi-token-pool-lane-verifications.ts'
 import {
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
   applyMultiTokenPoolRecordChanges,
+  multiTokenPoolChangeChains,
+  multiTokenPoolSupportedChains,
   requiredMultiTokenPoolProviderAnswers,
+  resolveMultiTokenPoolLanes,
 } from './projection.ts'
 import { readMultiTokenPoolRecordState, readProviderAnswers } from './record-state.ts'
 
@@ -91,6 +97,10 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   blockTag?: number
   /** Return error findings in `findings` instead of refusing (the snapshot check reports them). */
   reportFindings?: boolean
+  /** The op named in errors, when it is not `operation` (the snapshot check re-runs another op's guard). */
+  errorOperation?: string
+  /** Extra context every refusal carries (e.g. the `recordType` of a merged op). */
+  errorContext?: Record<string, unknown>
 }
 
 /** What a guarded write reports (the fields of `MultiTokenPoolUnsignedTx`). @internal */
@@ -99,6 +109,8 @@ export type MultiTokenPoolGuardResult = {
   decoded: DecodedMultiTokenPoolWrite
   /** Lanes the write changes. */
   affectedLanes: MultiTokenPoolLaneKey[]
+  /** Lanes live in a direction after the write that were not live in it before, with those directions. */
+  goingLive: MultiTokenPoolLaneDirections[]
   /** Warning findings (errors refuse). */
   warnings: MultiTokenPoolLaneFinding[]
   /** Every finding, errors included (only with `reportFindings`; errors refuse otherwise). */
@@ -124,19 +136,32 @@ export async function runMultiTokenPoolGuards(
   input: RunMultiTokenPoolGuardsInput,
 ): Promise<MultiTokenPoolGuardResult> {
   const { chain, operation, poolConfigManager, version, data, sender } = input
+  const errorOperation = input.errorOperation ?? operation
   const decoded = decodeMultiTokenPoolWrite(data, version)
   const blockNumber = input.blockTag ?? (await chain.provider.getBlockNumber())
-  const [{ state: before }, { tokenAdminRegistry }] = await Promise.all([
-    readMultiTokenPoolRecordState(chain, poolConfigManager, version, { blockTag: blockNumber }),
-    readPoolConfigManagerStaticConfig(chain, poolConfigManager, version),
-  ])
+  const {
+    state: before,
+    staticConfig: { tokenAdminRegistry },
+  } = await readMultiTokenPoolRecordState(chain, poolConfigManager, version, {
+    blockTag: blockNumber,
+    // chains the write names may have no record yet, and can already be paused
+    extraChains: multiTokenPoolChangeChains(decoded.changes),
+  })
   const after = applyMultiTokenPoolRecordChanges(before, decoded.changes)
   // both sides need provider answers for every lane they resolve from a policy
   const candidates = multiTokenPoolCandidateLanes(before, after)
   await fillProviderAnswers(chain, before, candidates, blockNumber)
   await fillProviderAnswers(chain, after, candidates, blockNumber)
 
-  const lanes = multiTokenPoolAffectedLanes(before, after)
+  // a profile write changes no record, but what a token's lanes send and accept: its open lanes are
+  // judged again, with the provider the write leaves
+  const profiles = await profileChanges(input, decoded, blockNumber)
+  const lanes = [
+    ...multiTokenPoolAffectedLanes(before, after),
+    ...profileLanes(before, after, profiles.changedTokens),
+  ].filter(
+    (l, i, all) => all.findIndex((o) => guardLaneKey(o.after) === guardLaneKey(l.after)) === i,
+  )
   const afterLanes = lanes.map((l) => l.after)
   const facts = await readMultiTokenPoolGuardFacts({
     chain,
@@ -150,6 +175,7 @@ export async function runMultiTokenPoolGuards(
     ...(input.remoteAttestations && { remoteAttestations: input.remoteAttestations }),
     now: BigInt(Math.floor(Date.now() / 1000)),
     ...(input.makesLive && { makesLive: true }),
+    ...(profiles.providers.size && { providerOverrides: profiles.providers }),
   })
   const chainLanes = multiTokenPoolChainLanes(after, [
     ...new Set(afterLanes.map((l) => l.remoteChainSelector)),
@@ -164,24 +190,53 @@ export async function runMultiTokenPoolGuards(
 
   if (factFailures.length) {
     const unknown = factFailures.some((f) => f.status === 'unknown')
+    const cause = factFailures.find((f) => f.cause !== undefined)?.cause
     throw new CCTParamsInvalidError(
-      operation,
+      errorOperation,
       unknown ? 'getChain' : 'remoteSide',
       `cannot check ${factFailures.length} affected lane(s), and a guard never passes on a fact it could not read: ${factFailures
         .map((f) => `${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
         .join('; ')}`,
-      { context: { factFailures } },
+      {
+        context: { ...input.errorContext, factFailures },
+        // the first underlying error, so `err.cause` tells a missing RPC from a transient failure
+        ...(cause instanceof Error && { cause }),
+      },
     )
+  }
+  // a lane the write opens beyond the caller's planned set is refused (when the caller gives one)
+  const { opened, goingLive } = multiTokenPoolLaneTransitions(lanes)
+  if (input.confirmOpening) {
+    const allowed = new Map(
+      input.confirmOpening.map((l) => [guardLaneKey(l), new Set(l.directions)]),
+    )
+    const extra = opened
+      .map((l) => ({
+        ...l,
+        directions: l.directions.filter((d) => !allowed.get(guardLaneKey(l))?.has(d)),
+      }))
+      .filter((l) => l.directions.length)
+    if (extra.length)
+      throw new CCTParamsInvalidError(
+        errorOperation,
+        'confirmOpening',
+        `the write opens ${extra.length} lane(s) in directions not listed: ${extra
+          .map((l) => `${l.tokenAddress} → ${l.remoteChainSelector} (${l.directions.join(', ')})`)
+          .join(
+            '; ',
+          )}; a record another operator wrote can make it open more than planned. List them, or rebuild after checking`,
+        { context: { ...input.errorContext, extra } },
+      )
   }
   const errors = findings.filter((f) => f.severity === 'error')
   if (errors.length && !input.reportFindings)
     throw new CCTParamsInvalidError(
-      operation,
+      errorOperation,
       'guards',
       `the write would leave ${errors.length} problem(s) on the lanes it changes: ${errors
         .map((f) => `${f.check} on ${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
         .join('; ')}`,
-      { context: { findings: errors } },
+      { context: { ...input.errorContext, findings: errors } },
     )
 
   // the write itself, from the account that will execute it
@@ -193,11 +248,12 @@ export async function runMultiTokenPoolGuards(
     )
     if (!sim.success)
       throw new CCTParamsInvalidError(
-        operation,
+        errorOperation,
         'sender',
         `the write reverts when ${sender} executes it: ${sim.errorName ?? sim.revertData}`,
         {
           context: {
+            ...input.errorContext,
             errorName: sim.errorName,
             errorArgs: sim.errorArgs,
             revertData: sim.revertData,
@@ -212,7 +268,13 @@ export async function runMultiTokenPoolGuards(
   const guardInputsHash = hashGuardInputs(lanes, chainLanes, facts)
   // the thresholds and confirmations the write was judged with travel in the snapshot, under its
   // hash, so a re-check of the proposal applies the same ones
-  const expected = { ...input.expected, [GUARD_OPTIONS_PATH]: guardOptionsOf(input) }
+  const expected = {
+    ...input.expected,
+    [GUARD_OPTIONS_PATH]: guardOptionsOf(input),
+    // the target pool is a serving pool the guard counted; a re-check of the proposal, which sees only
+    // the PCM, needs the same one
+    ...(input.poolAddress !== undefined && { [GUARD_POOL_PATH]: getAddress(input.poolAddress) }),
+  }
   if (input.expectedSnapshot)
     assertSnapshotHolds(operation, input.expectedSnapshot, {
       calldataHash: keccak256(data),
@@ -232,6 +294,7 @@ export async function runMultiTokenPoolGuards(
       tokenAddress,
       remoteChainSelector,
     })),
+    goingLive,
     warnings: findings.filter((f) => f.severity === 'warning'),
     findings,
     projectionVerified,
@@ -253,6 +316,8 @@ async function fillProviderAnswers(
 
 /** The `expected` path the guard options are sealed under. @internal */
 export const GUARD_OPTIONS_PATH = 'guard.options'
+/** The `expected` path the target pool is sealed under. @internal */
+export const GUARD_POOL_PATH = 'guard.poolAddress'
 
 /** The guard options a write was judged with, defaults dropped, in a stable shape. @internal */
 export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGuardOptions {
@@ -266,11 +331,16 @@ export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGua
           tokenAddress: getAddress(tokenAddress),
           remoteChainSelector,
         }))
-        .sort((a, b) =>
-          `${a.tokenAddress}:${a.remoteChainSelector}`.localeCompare(
-            `${b.tokenAddress}:${b.remoteChainSelector}`,
-          ),
-        ),
+        .sort((a, b) => guardLaneKey(a).localeCompare(guardLaneKey(b))),
+    }),
+    ...(o.confirmOpening && {
+      confirmOpening: [...o.confirmOpening]
+        .map(({ tokenAddress, remoteChainSelector, directions }) => ({
+          tokenAddress: getAddress(tokenAddress),
+          remoteChainSelector,
+          directions: [...new Set(directions)].sort(),
+        }))
+        .sort((a, b) => guardLaneKey(a).localeCompare(guardLaneKey(b))),
     }),
     ...(o.migrationWindowChains?.length && {
       migrationWindowChains: [...o.migrationWindowChains].sort((a, b) =>
@@ -278,6 +348,57 @@ export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGua
       ),
     }),
   }
+}
+
+/**
+ * The tokens a profile write changes (a field other than the pauses differs from the stored profile),
+ * and the provider each set profile leaves.
+ */
+async function profileChanges(
+  { chain, poolConfigManager, version }: RunMultiTokenPoolGuardsInput,
+  decoded: DecodedMultiTokenPoolWrite,
+  blockTag: number,
+): Promise<{ changedTokens: Set<string>; providers: Map<string, string | null> }> {
+  const set = decoded.profiles?.set ?? []
+  const providers = new Map(set.map((p) => [p.tokenAddress, p.additionalPoolDataProvider]))
+  if (!set.length) return { changedTokens: new Set(), providers }
+  const configs = await poolConfigManagerContract(
+    chain,
+    poolConfigManager,
+    version,
+  ).getTokenConfigBatch(
+    set.map((p) => p.tokenAddress),
+    { blockTag },
+  )
+  const changedTokens = new Set(
+    set
+      .filter((p, i) => {
+        const raw = resultToObject(configs[i]!)
+        if (!raw.isRegistered) return true
+        const { tokenAddress: _, ...next } = p
+        return canonicalHash([next]) !== canonicalHash([decodeTokenProfileFields(raw)])
+      })
+      .map((p) => p.tokenAddress),
+  )
+  return { changedTokens, providers }
+}
+
+/** The open lanes of `tokens`, unchanged in their records, for a re-check after a profile write. */
+function profileLanes(
+  before: MultiTokenPoolRecordState,
+  after: MultiTokenPoolRecordState,
+  tokens: ReadonlySet<string>,
+): { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[] {
+  const keys = [...tokens].flatMap((tokenAddress) =>
+    multiTokenPoolSupportedChains(after, tokenAddress).map((remoteChainSelector) => ({
+      tokenAddress,
+      remoteChainSelector,
+    })),
+  )
+  const was = resolveMultiTokenPoolLanes(before, keys)
+  return resolveMultiTokenPoolLanes(after, keys)
+    .map((l, i) => ({ before: was[i]!, after: l }))
+    .filter((l) => l.after.connection.hasConnection)
 }
 
 /** Every input the rules read, canonically hashed: equal when nothing they read has moved. */
@@ -296,8 +417,35 @@ function hashGuardInputs(
       hookCallers: sorted(facts.hookCallers),
       servingPools: [...facts.servingPools].sort(),
       additionalPoolDataBytes: sorted(facts.additionalPoolDataBytes),
+      additionalPoolData: sorted(facts.additionalPoolData ?? new Map()),
+      providerDataRefused: sorted(facts.providerDataRefused ?? new Map()),
+      localAcceptsInbound: sorted(facts.localAcceptsInbound ?? new Map()),
+      localAcceptsLegacy: sorted(facts.localAcceptsLegacy ?? new Map()),
     },
   })
+}
+
+/**
+ * What moved between a snapshot and the state now: each kept value whose canonical form differs, and
+ * the guard inputs. Non-throwing; the snapshot check reports it, {@link assertSnapshotHolds} throws.
+ * @internal
+ */
+export function snapshotChanges(
+  snapshot: MultiTokenPoolSnapshot,
+  current: { guardInputsHash: string; expected: Record<string, unknown> },
+): CCTStateChange[] {
+  const changed: CCTStateChange[] = []
+  const paths = new Set([...Object.keys(snapshot.expected), ...Object.keys(current.expected)])
+  for (const path of [...paths].sort())
+    if (canonicalHash([snapshot.expected[path]]) !== canonicalHash([current.expected[path]]))
+      changed.push({ path, expected: snapshot.expected[path], actual: current.expected[path] })
+  if (snapshot.guardInputsHash !== current.guardInputsHash)
+    changed.push({
+      path: 'guardInputsHash',
+      expected: snapshot.guardInputsHash,
+      actual: current.guardInputsHash,
+    })
+  return changed
 }
 
 /**
@@ -323,17 +471,7 @@ export function assertSnapshotHolds(
       'expectedSnapshot',
       'covers other calldata: pass the snapshot built with these exact params',
     )
-  const changed: CCTStateChange[] = []
-  const paths = new Set([...Object.keys(snapshot.expected), ...Object.keys(current.expected)])
-  for (const path of [...paths].sort())
-    if (canonicalHash([snapshot.expected[path]]) !== canonicalHash([current.expected[path]]))
-      changed.push({ path, expected: snapshot.expected[path], actual: current.expected[path] })
-  if (snapshot.guardInputsHash !== current.guardInputsHash)
-    changed.push({
-      path: 'guardInputsHash',
-      expected: snapshot.guardInputsHash,
-      actual: current.guardInputsHash,
-    })
+  const changed = snapshotChanges(snapshot, current)
   if (changed.length)
     throw new CCTStateChangedError(
       operation,
@@ -371,6 +509,8 @@ async function crossCheckWithSimulateV1(
     pcm.encodeFunctionData('getLaneConnectionBatch', [keys]),
     pcm.encodeFunctionData('getTokenTransferFeeConfigBatch', [keys]),
     pcm.encodeFunctionData('getLaneVerificationBatch', [keys, ANY_FINALITY_CONFIG]),
+    pcm.encodeFunctionData('getCurrentRateLimiterStateBatch', [keys]),
+    pcm.encodeFunctionData('getLaneRecordLevelBatch', [keys]),
   ]
   let result: unknown
   try {
@@ -405,22 +545,40 @@ async function crossCheckWithSimulateV1(
     'getLaneVerificationBatch',
     calls[3]!.returnData,
   )
+  const [bucketsRaw] = pcm.decodeFunctionResult(
+    'getCurrentRateLimiterStateBatch',
+    calls[4]!.returnData,
+  )
+  const levelsRaw = pcm.decodeFunctionResult('getLaneRecordLevelBatch', calls[5]!.returnData)
   const byAddress = <T extends { address: string }>(xs: readonly T[]) =>
     [...xs].sort((a, b) => a.address.localeCompare(b.address))
   lanes.forEach((lane, i) => {
     const conn = decodeLaneConnection(resultToObject(connRaw[i]), (b) =>
       decodeRemoteAddress(b, lane.remoteChainSelector),
     )
+    const levels = decodeLaneRecordLevels(
+      levelsRaw as unknown as readonly (readonly bigint[])[],
+      i,
+      poolConfigManager,
+    )
     const simulated = {
+      levels,
+      // the store zeroes the buckets of a lane without a connection or a rate limit record
+      rateLimits:
+        conn.hasConnection && levels.rateLimit !== 'none'
+          ? decodeRateLimits(resultToObject(bucketsRaw[i]) as AbiRateLimits)
+          : null,
       connection: { ...conn, remotePools: byAddress(conn.remotePools) },
       tokenTransferFeeConfig: toTokenTransferFeeConfig(resultToObject(feeRaw[i])),
-      verification: {
-        hook: nullableAddress(String(hooks[i])),
-        outboundCCVs: [...(outbound[i] as string[])].map((a) => getAddress(a)),
-        inboundCCVs: [...(inbound[i] as string[])].map((a) => getAddress(a)),
-      },
+      verification: decodeLaneVerification(
+        String(hooks[i]),
+        resultToObject(outbound[i]) as string[],
+        resultToObject(inbound[i]) as string[],
+      ),
     }
     const projected = {
+      levels: lane.levels,
+      rateLimits: lane.rateLimits,
       connection: { ...lane.connection, remotePools: byAddress(lane.connection.remotePools) },
       tokenTransferFeeConfig: lane.tokenTransferFeeConfig,
       verification: lane.verification,

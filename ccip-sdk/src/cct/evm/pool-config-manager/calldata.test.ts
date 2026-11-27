@@ -165,6 +165,92 @@ describe('PCM calldata decoding (cct/evm pool-config-manager)', () => {
     assert.deepEqual(r.profiles.remove, [POOL])
     assert.equal(r.profiles.set[0]?.lockOrBurnAddress, null)
   })
+  it('round-trips populated records on every set path into the shapes the reads return', () => {
+    const fee = {
+      finalityFeeUSDCents: 10,
+      fastFinalityFeeUSDCents: 20,
+      finalityTransferFeeBps: 5,
+      fastFinalityTransferFeeBps: 15,
+    }
+    const overhead = { destGasOverhead: 250_000, destBytesOverhead: 224 }
+    const rl = [
+      [true, 100n, 1n],
+      [true, 100n, 1n],
+      [false, 0n, 0n],
+      [false, 0n, 0n],
+    ]
+    const rlOut = {
+      outbound: { enabled: true, capacity: 100n, rate: 1n },
+      inbound: { enabled: true, capacity: 100n, rate: 1n },
+      fastFinalityOutbound: { enabled: false, capacity: 0n, rate: 0n },
+      fastFinalityInbound: { enabled: false, capacity: 0n, rate: 0n },
+    }
+    const security = { outboundCCVs: [CCV], inboundCCVs: [ZeroAddress], hook: POOL }
+    const inline = { tokenAddress: TOKEN, remoteChainSelector: CHAIN }
+    const policy = { policyName: 'p', remoteChainSelector: CHAIN }
+    const cases: [string, unknown[], unknown][] = [
+      [
+        'applyInlineConnectionConfigUpdates',
+        [[], [[TOKEN, CHAIN, zeroPadValue(POOL, 32)]]],
+        { ...inline, remoteToken: POOL },
+      ],
+      [
+        'applyInlineRateLimitConfigUpdates',
+        [[], [[TOKEN, CHAIN, rl]]],
+        { ...inline, rateLimits: rlOut },
+      ],
+      [
+        'applyInlineFeeConfigUpdates',
+        [[], [[TOKEN, CHAIN, Object.values(fee)]]],
+        { ...inline, feeConfig: fee },
+      ],
+      [
+        'applyInlineDestOverheadConfigUpdates',
+        [[], [[TOKEN, CHAIN, Object.values(overhead)]]],
+        { ...inline, destOverheadConfig: overhead },
+      ],
+      [
+        'applyInlineSecurityConfigUpdates',
+        [[], [[TOKEN, CHAIN, [[CCV], [ZeroAddress], POOL]]]],
+        { ...inline, securityConfig: security },
+      ],
+      [
+        'applyConnectionPolicyConfigUpdates',
+        [[], [], [[P, CHAIN, true]]],
+        { ...policy, onlySubsetTokens: true },
+      ],
+      [
+        'applyRemotePoolPolicyConfigUpdates',
+        [[], [], [[P, CHAIN, [zeroPadValue(POOL, 32)]]]],
+        { ...policy, remotePoolAddresses: [POOL] },
+      ],
+      [
+        'applyRateLimitPolicyConfigUpdates',
+        [[], [], [[P, CHAIN, 18, rl]]],
+        { ...policy, localDecimals: 18, rateLimits: rlOut },
+      ],
+      [
+        'applyFeePolicyConfigUpdates',
+        [[], [], [[P, CHAIN, Object.values(fee)]]],
+        { ...policy, feeConfig: fee },
+      ],
+      [
+        'applyDestOverheadPolicyConfigUpdates',
+        [[], [], [[P, CHAIN, Object.values(overhead)]]],
+        { ...policy, destOverheadConfig: overhead },
+      ],
+      [
+        'applySecurityPolicyConfigUpdates',
+        [[], [], [[P, CHAIN, [[CCV], [ZeroAddress], POOL]]]],
+        { ...policy, securityConfig: security },
+      ],
+    ]
+    for (const [fn, args, record] of cases) {
+      const [change] = decode(fn, args).changes
+      assert.ok(change && 'record' in change, fn)
+      assert.deepEqual(change.record, record, fn)
+    }
+  })
 })
 
 /** A zero value of an ABI type, for encoding every function with empty arguments. */

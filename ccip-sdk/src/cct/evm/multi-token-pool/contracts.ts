@@ -12,6 +12,7 @@
 import { Interface, ZeroAddress, getAddress, id as keccak256Utf8, toBeHex } from 'ethers'
 import type { TypedContract } from 'ethers-abitype'
 
+import type { LaneRecordType } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import { isMultiTokenPoolType } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
@@ -193,29 +194,16 @@ const OPERATIONS = {
     contracts: ['PoolConfigManager'],
     function: 'applyTokenProfileUpdates',
   },
-  applyMultiTokenPoolTokenConnectionPolicyUpdates: {
+  applyMultiTokenPoolTokenPolicyUpdates: {
     contracts: ['PoolConfigManager'],
-    function: 'applyTokenConnectionPolicyUpdates',
-  },
-  applyMultiTokenPoolTokenRemotePoolPolicyUpdates: {
-    contracts: ['PoolConfigManager'],
-    function: 'applyTokenRemotePoolPolicyUpdates',
-  },
-  applyMultiTokenPoolTokenRateLimitPolicyUpdates: {
-    contracts: ['PoolConfigManager'],
-    function: 'applyTokenRateLimitPolicyUpdates',
-  },
-  applyMultiTokenPoolTokenFeePolicyUpdates: {
-    contracts: ['PoolConfigManager'],
-    function: 'applyTokenFeePolicyUpdates',
-  },
-  applyMultiTokenPoolTokenDestOverheadPolicyUpdates: {
-    contracts: ['PoolConfigManager'],
-    function: 'applyTokenDestOverheadPolicyUpdates',
-  },
-  applyMultiTokenPoolTokenSecurityPolicyUpdates: {
-    contracts: ['PoolConfigManager'],
-    function: 'applyTokenSecurityPolicyUpdates',
+    functions: {
+      connection: 'applyTokenConnectionPolicyUpdates',
+      remotePool: 'applyTokenRemotePoolPolicyUpdates',
+      rateLimit: 'applyTokenRateLimitPolicyUpdates',
+      fee: 'applyTokenFeePolicyUpdates',
+      destOverhead: 'applyTokenDestOverheadPolicyUpdates',
+      security: 'applyTokenSecurityPolicyUpdates',
+    },
   },
   applyMultiTokenPoolInlineConnectionConfigUpdates: {
     contracts: ['PoolConfigManager'],
@@ -381,16 +369,40 @@ const OPERATIONS = {
  * against the vendored ABIs.
  */
 export const MULTI_TOKEN_POOL_OPERATIONS: {
-  readonly [Op in keyof typeof OPERATIONS]: MultiTokenPoolOperationTarget
+  readonly [Op in keyof typeof OPERATIONS]: (typeof OPERATIONS)[Op] & MultiTokenPoolOperationTarget
 } = OPERATIONS
 
-/** The contract(s) and function one MTTP op calls; see {@link MULTI_TOKEN_POOL_OPERATIONS}. */
+/**
+ * The contract(s) and function(s) one MTTP op calls; see {@link MULTI_TOKEN_POOL_OPERATIONS}. A
+ * merged op (one op over several record types or store kinds) names one function per kind.
+ */
 export type MultiTokenPoolOperationTarget = {
   /** Contract types the op can target (one of them per call). */
   readonly contracts: readonly MultiTokenPoolContractType[]
-  /** The function the op calls, or `constructor` for a deploy. */
-  readonly function: string
-}
+} & (
+  | {
+      /** The function the op calls, or `constructor` for a deploy. */
+      readonly function: string
+    }
+  | {
+      /** The function per kind the op takes (e.g. per `recordType`). */
+      readonly functions: Readonly<Record<string, string>>
+    }
+)
+
+/**
+ * The PCM role, besides `CONFIG_ROLE` and `TOKEN_MANAGER_ROLE`, that may assign each record type's
+ * policy (`PoolConfigManager._checkTokenRoles`, chainlink-ccip c950d9bc).
+ * @internal
+ */
+export const TOKEN_POLICY_ROLES = {
+  connection: 'CONNECTION_ROLE',
+  remotePool: 'REMOTE_POOL_ROLE',
+  rateLimit: 'RATE_LIMIT_ROLE',
+  fee: 'FEE_ROLE',
+  destOverhead: 'DEST_OVERHEAD_ROLE',
+  security: 'SECURITY_ROLE',
+} as const satisfies Record<LaneRecordType, PoolConfigManagerRole>
 
 /** An MTTP op name, or an existing CCT op a planner step runs. */
 export type MultiTokenPoolOperationName =

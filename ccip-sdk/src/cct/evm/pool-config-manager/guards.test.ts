@@ -9,6 +9,7 @@ import { ZeroAddress, getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
+import { attestedRemoteFacts } from './guard-facts.ts'
 import {
   type MultiTokenPoolGuardFacts,
   type MultiTokenPoolGuardOptions,
@@ -18,6 +19,7 @@ import {
   guardPoolKey,
   multiTokenPoolAffectedLanes,
   multiTokenPoolChainLanes,
+  multiTokenPoolLaneTransitions,
 } from './guards.ts'
 import {
   type MultiTokenPoolRecordChange,
@@ -425,35 +427,53 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       judge(inlineLane(T1), { facts: missing }).factFailures.map((f) => f.status),
       ['missing'],
     )
+    // the error that left the side unread travels with the failure, for the refusal's context
+    const cause = new Error('request timeout')
+    const unread = goodFacts({
+      remoteLanes: new Map([
+        [
+          guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 }),
+          { status: 'unknown', reason: 'getChain could not serve it', cause },
+        ],
+      ]),
+    })
+    assert.equal(judge(inlineLane(T1), { facts: unread }).factFailures[0]?.cause, cause)
   })
 
-  it('reports an attested remote fact as a warning', () => {
-    const attested: MultiTokenPoolRemoteLaneFacts = {
-      status: 'known',
-      readsLongData: true,
-      registryPool: RPOOL,
-      mapsBack: true,
-      attestation: {
-        remoteChainSelector: C1,
-        remoteToken: REMOTE_A,
-        remotePoolAddress: RPOOL,
-        acceptsLongPoolData: true,
-        attestedAt: 0n,
-        validUntil: 1n,
-        reason: 'ops read',
-      },
+  it('reports an attested remote fact as a warning, in the shape the reader builds', () => {
+    const attestation = {
+      remoteChainSelector: C1,
+      remoteToken: REMOTE_A,
+      remotePoolAddress: RPOOL,
+      acceptsLongPoolData: true,
+      attestedAt: 0n,
+      validUntil: 1n,
+      reason: 'ops read',
     }
-    const r = judge(inlineLane(T1), {
-      facts: goodFacts({
-        remoteLanes: new Map([
-          [guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 }), attested],
-        ]),
-      }),
-    })
-    assert.deepEqual(
-      r.findings.map((f) => [f.check, f.severity]),
-      [['REMOTE_ATTESTED', 'warning']],
-    )
+    const judged = (format: 'long' | 'legacy') => {
+      const changes = inlineLane(T1, { format })
+      const lane = multiTokenPoolAffectedLanes(
+        empty(),
+        applyMultiTokenPoolRecordChanges(empty(), changes),
+      )[0]!.after
+      return judge(changes, {
+        facts: goodFacts({
+          remoteLanes: new Map([
+            [
+              guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 }),
+              attestedRemoteFacts(lane, attestation),
+            ],
+          ]),
+        }),
+      }).findings.map((f) => [f.check, f.severity])
+    }
+    // a long lane names its source token in the data: the attestation suffices
+    assert.deepEqual(judged('long'), [['REMOTE_ATTESTED', 'warning']])
+    // a legacy lane relies on the reverse mapping, which an attestation does not read: fails closed
+    assert.deepEqual(judged('legacy'), [
+      ['REMOTE_LANE_MISMATCH', 'error'],
+      ['REMOTE_ATTESTED', 'warning'],
+    ])
   })
 
   it('refuses a policy lane whose provider answers no remote token', () => {
@@ -483,5 +503,168 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       findings.map((f) => f.check),
       ['NO_CONNECTION'],
     )
+  })
+
+  it('reports what a write opens and makes live, per direction', () => {
+    const transitions = (changes: MultiTokenPoolRecordChange[], base = empty()) =>
+      multiTokenPoolLaneTransitions(
+        multiTokenPoolAffectedLanes(base, applyMultiTokenPoolRecordChanges(base, changes)),
+      )
+    const lane = { tokenAddress: T1, remoteChainSelector: C1 }
+    // a lane opened unpaused goes live both ways
+    assert.deepEqual(transitions(inlineLane(T1)), {
+      opened: [{ ...lane, directions: ['outbound', 'inbound'] }],
+      goingLive: [{ ...lane, directions: ['outbound', 'inbound'] }],
+    })
+    // opened with outbound paused: only inbound goes live
+    const pausedOut: MultiTokenPoolRecordChange = {
+      kind: 'setTokenPause',
+      tokenAddress: T1,
+      outbound: true,
+    }
+    assert.deepEqual(transitions([pausedOut, ...inlineLane(T1)]).goingLive, [
+      { ...lane, directions: ['inbound'] },
+    ])
+    // an unpause makes a lane live without opening it
+    const paused = applyMultiTokenPoolRecordChanges(empty(), [
+      ...inlineLane(T1),
+      { kind: 'setChainPause', remoteChainSelector: C1, outbound: true },
+    ])
+    assert.deepEqual(
+      transitions([{ kind: 'setChainPause', remoteChainSelector: C1, outbound: false }], paused),
+      {
+        opened: [],
+        goingLive: [{ ...lane, directions: ['outbound'] }],
+      },
+    )
+    // opened fully paused: opened, but nothing goes live
+    const bothPaused: MultiTokenPoolRecordChange = {
+      kind: 'setTokenPause',
+      tokenAddress: T1,
+      outbound: true,
+      inbound: true,
+    }
+    assert.deepEqual(transitions([bothPaused, ...inlineLane(T1)]), {
+      opened: [{ ...lane, directions: [] }],
+      goingLive: [],
+    })
+  })
+
+  it('reads the remote facts a byte-exact reader reports (Solana): mapping, fail-closed, UID, admission', () => {
+    const lane = guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 })
+    const withRemote = (
+      extra: Partial<MultiTokenPoolRemoteLaneFacts>,
+      over: Partial<MultiTokenPoolGuardFacts> = {},
+    ) =>
+      goodFacts({
+        remoteLanes: new Map([
+          [lane, { ...knownRemote(), ...extra } as MultiTokenPoolRemoteLaneFacts],
+        ]),
+        ...over,
+      })
+    // a long lane whose remote stores the 20-byte form: refused, with the reader's reason
+    const short = judge(inlineLane(T1), {
+      facts: withRemote({ mapsBack: false, mapsBackReason: 'stores 20 bytes' }),
+    })
+    assert.deepEqual(short.errors, ['REMOTE_LANE_MISMATCH'])
+    assert.equal(short.findings[0]?.reason, 'stores 20 bytes')
+    // a remote lane that reverts every transfer: refused while live outbound, reported once paused
+    const closed = withRemote({ failsClosed: 'stale SECURITY record' })
+    assert.deepEqual(judge(inlineLane(T1), { facts: closed }).errors, ['REMOTE_LANE_MISMATCH'])
+    const paused: MultiTokenPoolRecordChange = {
+      kind: 'setTokenPause',
+      tokenAddress: T1,
+      outbound: true,
+    }
+    const pausedRun = judge([...inlineLane(T1), paused], { facts: closed })
+    assert.deepEqual(pausedRun.errors, [])
+    assert.ok(
+      pausedRun.findings.some(
+        (f) => f.check === 'REMOTE_LANE_MISMATCH' && f.severity === 'warning',
+      ),
+    )
+    // a UID lane needs that UID as the provider data
+    const UID = '0x' + 'ab'.repeat(32)
+    assert.deepEqual(judge(inlineLane(T1), { facts: withRemote({ uid: UID }) }).errors, [
+      'UID_MISMATCH',
+    ])
+    assert.deepEqual(
+      judge(inlineLane(T1), {
+        facts: withRemote(
+          { uid: UID },
+          { additionalPoolData: new Map([[lane, UID.toUpperCase().replace('0X', '0x')]]) },
+        ),
+      }).errors,
+      [],
+    )
+    // a driven lane not admitted: a warning, transfers wait
+    const waiting = judge(inlineLane(T1), { facts: withRemote({ admitted: false }) })
+    assert.deepEqual(waiting.errors, [])
+    assert.ok(
+      waiting.findings.some((f) => f.check === 'LANE_NOT_ADMITTED' && f.severity === 'warning'),
+    )
+  })
+
+  it('judges additional pool data by the providers that judge it on chain, both ways', () => {
+    const lane = guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 })
+    const UID = '0x' + 'ab'.repeat(32)
+    const run = (
+      remote: Partial<MultiTokenPoolRemoteLaneFacts>,
+      over: Partial<MultiTokenPoolGuardFacts> = {},
+      changes = inlineLane(T1),
+    ) =>
+      judge(changes, {
+        facts: goodFacts({
+          remoteLanes: new Map([
+            [lane, { ...knownRemote(), ...remote } as MultiTokenPoolRemoteLaneFacts],
+          ]),
+          additionalPoolData: new Map([[lane, UID]]),
+          additionalPoolDataBytes: new Map([[lane, 32]]),
+          ...over,
+        }),
+      })
+    // paired: the remote accepts what this lane sends, this token accepts what comes back
+    assert.deepEqual(
+      run(
+        { remoteAcceptsOutbound: true, remoteSendsData: UID },
+        { localAcceptsInbound: new Map([[lane, true]]) },
+      ).findings,
+      [],
+    )
+    // the remote token's provider refuses this lane's data: burned here, stuck there
+    assert.deepEqual(run({ remoteAcceptsOutbound: false, remoteSendsData: UID }).errors, [
+      'UID_MISMATCH',
+    ])
+    // this token's provider refuses what the remote sends
+    assert.deepEqual(
+      run({ remoteSendsData: '0x' }, { localAcceptsInbound: new Map([[lane, false]]) }).errors,
+      ['UID_MISMATCH'],
+    )
+    // a trusted pool may send legacy data, and the provider refuses empty data
+    assert.deepEqual(
+      run(
+        { remoteSendsData: UID },
+        {
+          localAcceptsLegacy: new Map([[lane, false]]),
+          localAcceptsInbound: new Map([[lane, true]]),
+        },
+      ).errors,
+      ['UID_MISMATCH'],
+    )
+    // the provider refuses to produce data for its own token: every send reverts
+    assert.deepEqual(
+      run(
+        { remoteSendsData: UID },
+        {
+          additionalPoolData: new Map(),
+          providerDataRefused: new Map([[lane, 'TokenNotFromFactory']]),
+        },
+      ).errors,
+      ['UID_MISMATCH'],
+    )
+    // what the remote sends cannot be read: said, never passed silently
+    const unread = run({}, {})
+    assert.deepEqual(unread.errors, [])
+    assert.ok(unread.findings.some((f) => f.check === 'UID_MISMATCH' && f.severity === 'warning'))
   })
 })

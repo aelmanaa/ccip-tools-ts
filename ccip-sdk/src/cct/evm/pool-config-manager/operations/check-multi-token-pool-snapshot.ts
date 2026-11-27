@@ -5,7 +5,7 @@
  * @packageDocumentation
  */
 
-import { keccak256 } from 'ethers'
+import { isAddress, keccak256 } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
@@ -20,8 +20,13 @@ import {
 import { EVMQuery } from '../../query.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
 import { resolvePoolConfigManagerTarget } from '../contracts.ts'
-import { GUARD_OPTIONS_PATH, runMultiTokenPoolGuards } from '../guard-run.ts'
-import type { MultiTokenPoolGuardOptions } from '../guards.ts'
+import {
+  GUARD_OPTIONS_PATH,
+  GUARD_POOL_PATH,
+  runMultiTokenPoolGuards,
+  snapshotChanges,
+} from '../guard-run.ts'
+import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from '../guards.ts'
 
 /**
  * Parameters for `checkMultiTokenPoolSnapshot`: re-reads the state, and re-runs the full post-state
@@ -96,36 +101,52 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
     const { address, version } = await resolvePoolConfigManagerTarget(chain, {
       poolConfigManager: tx.to as string,
     })
-    const options = (snapshot.expected[GUARD_OPTIONS_PATH] ?? {}) as MultiTokenPoolGuardOptions
+    const options = guardOptionsFrom(snapshot.expected[GUARD_OPTIONS_PATH], this.name)
+    const pool = snapshot.expected[GUARD_POOL_PATH]
+    if (pool !== undefined && (typeof pool !== 'string' || !isAddress(pool)))
+      throw new CCTParamsInvalidError(
+        this.name,
+        `snapshot.expected.${GUARD_POOL_PATH}`,
+        'is not an address',
+      )
     const result = await runMultiTokenPoolGuards({
       ...options,
       chain,
       operation: snapshot.operation,
+      errorOperation: this.name,
       poolConfigManager: address,
       version,
+      ...(typeof pool === 'string' && { poolAddress: pool }),
       data: tx.data as string,
       sender,
       expected: Object.fromEntries(
-        Object.entries(snapshot.expected).filter(([path]) => path !== GUARD_OPTIONS_PATH),
+        Object.entries(snapshot.expected).filter(
+          ([path]) => path !== GUARD_OPTIONS_PATH && path !== GUARD_POOL_PATH,
+        ),
       ),
       ...(getChain && { getChain }),
       ...(remoteAttestations && { remoteAttestations }),
       reportFindings: true,
     })
-    const changed =
-      result.snapshot.guardInputsHash === snapshot.guardInputsHash
-        ? []
-        : [
-            {
-              path: 'guardInputsHash',
-              expected: snapshot.guardInputsHash,
-              actual: result.snapshot.guardInputsHash,
-            },
-          ]
+    const changed = snapshotChanges(snapshot, result.snapshot)
     return {
       ok: !changed.length && !result.findings.some((f) => f.severity === 'error'),
       changed,
       findings: result.findings,
     }
   }
+}
+
+/**
+ * The guard options a snapshot sealed, validated as a write validates its own: the hash proves the
+ * snapshot was not edited, not that a hand-built one carries valid options.
+ */
+function guardOptionsFrom(value: unknown, operation: string): MultiTokenPoolGuardOptions {
+  if (value === undefined) return {}
+  const param = `snapshot.expected.${GUARD_OPTIONS_PATH}`
+  if (value === null || typeof value !== 'object' || Array.isArray(value))
+    throw new CCTParamsInvalidError(operation, param, 'is not the guard options an op sealed')
+  const o = value as Record<string, unknown>
+  validateMultiTokenPoolGuardOptions(operation, `${param}.`, o)
+  return o
 }

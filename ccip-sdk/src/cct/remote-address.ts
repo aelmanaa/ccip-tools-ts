@@ -16,8 +16,9 @@ import { CCTDataDecodeError, CCTParamsInvalidError } from './errors.ts'
  * The chain family of a lane's remote chain selector, or `undefined` for an unknown selector.
  * `networkInfo` also resolves chain IDs, which would key the lane wrong: only an exact selector
  * match counts.
+ * @internal
  */
-function laneFamilyOf(remoteChainSelector: bigint): ChainFamily | undefined {
+export function laneFamilyOf(remoteChainSelector: bigint): ChainFamily | undefined {
   try {
     const info = networkInfo(remoteChainSelector)
     return info.chainSelector === remoteChainSelector ? info.family : undefined

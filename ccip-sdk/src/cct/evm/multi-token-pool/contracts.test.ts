@@ -4,6 +4,7 @@ import { describe, it } from 'node:test'
 import { id, makeError } from 'ethers'
 
 import type { EVMChain } from '../../../evm/index.ts'
+import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { parseTypeAndVersion } from '../../../utils.ts'
 import { CCTContractTypeInvalidError, CCTContractVersionUnsupportedError } from '../../errors.ts'
 import {
@@ -11,6 +12,7 @@ import {
   MULTI_TOKEN_POOL_OPERATIONS,
   MultiTokenPoolVersion,
   POOL_CONFIG_MANAGER_ROLES,
+  TOKEN_POLICY_ROLES,
   assertMultiTokenPoolAuxContract,
   getMultiTokenPoolInterface,
   isPoolConfigManagerRole,
@@ -153,16 +155,41 @@ describe('taxonomy', () => {
 
 describe('MULTI_TOKEN_POOL_OPERATIONS', () => {
   it('names a function (or constructor) that every listed contract really has', () => {
-    for (const [op, { contracts, function: fn }] of Object.entries(MULTI_TOKEN_POOL_OPERATIONS)) {
-      for (const contract of contracts) {
+    for (const [op, target] of Object.entries(MULTI_TOKEN_POOL_OPERATIONS)) {
+      const fns = 'function' in target ? [target.function] : Object.values(target.functions)
+      for (const contract of target.contracts) {
         const iface = getMultiTokenPoolInterface(contract, MultiTokenPoolVersion.V2_1_0_DEV)
-        if (fn === 'constructor') assert.ok(iface.deploy, `${op}: ${contract} constructor`)
-        else assert.ok(iface.getFunction(fn), `${op}: ${contract}.${fn}`)
+        for (const fn of fns)
+          if (fn === 'constructor') assert.ok(iface.deploy, `${op}: ${contract} constructor`)
+          else assert.ok(iface.getFunction(fn), `${op}: ${contract}.${fn}`)
       }
     }
   })
 
+  it('names one assignment function and one gate role per record type', () => {
+    const target = MULTI_TOKEN_POOL_OPERATIONS.applyMultiTokenPoolTokenPolicyUpdates
+    assert.ok('functions' in target)
+    assert.deepEqual(Object.keys(target.functions).sort(), [...LANE_RECORD_TYPES].sort())
+    // the gate table, as PoolConfigManager._checkTokenRoles reads it at chainlink-ccip c950d9bc
+    assert.deepEqual(TOKEN_POLICY_ROLES, {
+      connection: 'CONNECTION_ROLE',
+      remotePool: 'REMOTE_POOL_ROLE',
+      rateLimit: 'RATE_LIMIT_ROLE',
+      fee: 'FEE_ROLE',
+      destOverhead: 'DEST_OVERHEAD_ROLE',
+      security: 'SECURITY_ROLE',
+    })
+    for (const type of LANE_RECORD_TYPES) {
+      assert.ok(POOL_CONFIG_MANAGER_ROLES.includes(TOKEN_POLICY_ROLES[type]), type)
+      assert.match(
+        target.functions[type]!,
+        new RegExp(`^applyToken${type[0]!.toUpperCase()}${type.slice(1)}PolicyUpdates$`),
+      )
+    }
+  })
+
   it('maps every op of the agreed interface exactly once', () => {
-    assert.equal(Object.keys(MULTI_TOKEN_POOL_OPERATIONS).length, 61)
+    // 61, minus the 6 per-type assignments merged into one (A15)
+    assert.equal(Object.keys(MULTI_TOKEN_POOL_OPERATIONS).length, 56)
   })
 })

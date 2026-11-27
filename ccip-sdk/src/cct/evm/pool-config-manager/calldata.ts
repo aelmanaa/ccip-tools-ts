@@ -8,44 +8,35 @@
 import { type Result, getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
+import {
+  type DecodedTokenProfile,
+  decodeTokenProfileFields,
+} from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
-import { decodeRemoteAddress } from '../../remote-address.ts'
 import {
   type MultiTokenPoolVersion,
+  MULTI_TOKEN_POOL_OPERATIONS,
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
   nullableAddress,
 } from '../multi-token-pool/contracts.ts'
 import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
-import { decodePolicyName } from './contracts.ts'
+import { decodePolicyName, policyNameOf } from './contracts.ts'
 import {
-  decodeDestOverheadConfig,
-  decodeFeeConfig,
+  INLINE_RECORD_DECODERS,
+  POLICY_RECORD_DECODERS,
   decodeInlineKey,
-  decodeInlineRemotePoolConfig,
   decodePolicyRecordKey,
-  decodeRateLimits,
-  decodeSecurityConfig,
 } from './decode.ts'
 import type { MultiTokenPoolRateLimitBucket, MultiTokenPoolRecordChange } from './projection.ts'
 
 const OPERATION = 'decodeMultiTokenPoolWrite'
 
-/** A token profile a `applyTokenProfileUpdates` call sets. @internal */
-export type DecodedTokenProfileUpdate = {
+/** A token profile a `applyTokenProfileUpdates` call sets: the shared profile decode, keyed by token. @internal */
+export type DecodedTokenProfileUpdate = DecodedTokenProfile & {
   /** The token. */
   tokenAddress: string
-  /** Decimals. */
-  localDecimals: number
-  /** The `LockOrBurnFlavor` value. */
-  lockOrBurnFlavor: number
-  /** The allowed finality, as the raw `bytes4`. */
-  allowedFinalityConfig: string
-  /** Burn sink or lock box, or `null`. */
-  lockOrBurnAddress: string | null
-  /** Additional pool data provider, or `null`. */
-  additionalPoolDataProvider: string | null
 }
 
 /** A decoded PCM write. @internal */
@@ -58,7 +49,7 @@ export type DecodedMultiTokenPoolWrite = {
   profiles?: { remove: string[]; set: DecodedTokenProfileUpdate[] }
 }
 
-const policy = (word: unknown) => decodePolicyName(String(word)) ?? String(word)
+const policy = (word: unknown) => policyNameOf(String(word))
 const keys = (list: Result) => list.map((r) => resultToObject(r) as Record<string, unknown>)
 
 /** `PauseDirection` (Outbound, Inbound, Both) to the directions it sets. */
@@ -81,11 +72,14 @@ function bucketOf(direction: unknown, fastFinality: unknown): MultiTokenPoolRate
 }
 
 /** `apply<Type>PolicyConfigUpdates(toRemove, policiesToRemove, toSet)`: removals, then sets. */
-function policyConfigChanges<T extends LaneRecordType>(
-  type: T,
-  args: Result,
-  decodeSet: (raw: Record<string, unknown>) => MultiTokenPoolRecordChange,
-): MultiTokenPoolRecordChange[] {
+function policyConfigChanges(type: LaneRecordType, args: Result): MultiTokenPoolRecordChange[] {
+  const decodeSet = (raw: Record<string, unknown>) =>
+    ({
+      kind: 'setPolicyRecord',
+      type,
+      // the PCM takes the same structs its policy views return
+      record: POLICY_RECORD_DECODERS[type](raw as never),
+    }) as MultiTokenPoolRecordChange
   return [
     ...keys(args[0] as Result).map((r): MultiTokenPoolRecordChange => ({
       kind: 'removePolicyRecord',
@@ -102,11 +96,14 @@ function policyConfigChanges<T extends LaneRecordType>(
 }
 
 /** `applyInline<Type>ConfigUpdates(toRemove, toSet)`: removals, then sets. */
-function inlineConfigChanges<T extends LaneRecordType>(
-  type: T,
-  args: Result,
-  decodeSet: (raw: Record<string, unknown>) => MultiTokenPoolRecordChange,
-): MultiTokenPoolRecordChange[] {
+function inlineConfigChanges(type: LaneRecordType, args: Result): MultiTokenPoolRecordChange[] {
+  const decodeSet = (raw: Record<string, unknown>) =>
+    ({
+      kind: 'setInline',
+      type,
+      // the PCM takes the same structs its inline views return
+      record: INLINE_RECORD_DECODERS[type](raw as never),
+    }) as MultiTokenPoolRecordChange
   return [
     ...keys(args[0] as Result).map((r): MultiTokenPoolRecordChange => ({
       kind: 'removeInline',
@@ -137,14 +134,12 @@ export const NO_RECORD_CHANGE_FUNCTIONS: ReadonlySet<string> = new Set([
   'validateReleaseOrMint',
 ])
 
-const TOKEN_POLICY_FUNCTIONS: Record<string, LaneRecordType> = {
-  applyTokenConnectionPolicyUpdates: 'connection',
-  applyTokenRemotePoolPolicyUpdates: 'remotePool',
-  applyTokenRateLimitPolicyUpdates: 'rateLimit',
-  applyTokenFeePolicyUpdates: 'fee',
-  applyTokenDestOverheadPolicyUpdates: 'destOverhead',
-  applyTokenSecurityPolicyUpdates: 'security',
-}
+/** The record type of each assignment function: the op map's `functions`, inverted. */
+const TOKEN_POLICY_FUNCTIONS: Record<string, LaneRecordType> = Object.fromEntries(
+  Object.entries(MULTI_TOKEN_POOL_OPERATIONS.applyMultiTokenPoolTokenPolicyUpdates.functions).map(
+    ([type, fn]) => [fn, type as LaneRecordType],
+  ),
+)
 
 /**
  * Decodes PCM calldata into record changes.
@@ -188,71 +183,17 @@ export function decodeMultiTokenPoolWrite(
 
   switch (name) {
     case 'applyInlineConnectionConfigUpdates':
-      return done(
-        inlineConfigChanges('connection', args, (r) => {
-          const key = decodeInlineKey(r as never)
-          return {
-            kind: 'setInline',
-            type: 'connection',
-            record: {
-              ...key,
-              remoteToken: decodeRemoteAddress(String(r.remoteToken), key.remoteChainSelector),
-            },
-          }
-        }),
-      )
+      return done(inlineConfigChanges('connection', args))
     case 'applyInlineRemotePoolConfigUpdates':
-      return done(
-        inlineConfigChanges('remotePool', args, (r) => ({
-          kind: 'setInline',
-          type: 'remotePool',
-          record: decodeInlineRemotePoolConfig(r as never),
-        })),
-      )
+      return done(inlineConfigChanges('remotePool', args))
     case 'applyInlineRateLimitConfigUpdates':
-      return done(
-        inlineConfigChanges('rateLimit', args, (r) => ({
-          kind: 'setInline',
-          type: 'rateLimit',
-          record: {
-            ...decodeInlineKey(r as never),
-            rateLimits: decodeRateLimits(r.rateLimitConfig as never),
-          },
-        })),
-      )
+      return done(inlineConfigChanges('rateLimit', args))
     case 'applyInlineFeeConfigUpdates':
-      return done(
-        inlineConfigChanges('fee', args, (r) => ({
-          kind: 'setInline',
-          type: 'fee',
-          record: {
-            ...decodeInlineKey(r as never),
-            feeConfig: decodeFeeConfig(r.feeConfig as never),
-          },
-        })),
-      )
+      return done(inlineConfigChanges('fee', args))
     case 'applyInlineDestOverheadConfigUpdates':
-      return done(
-        inlineConfigChanges('destOverhead', args, (r) => ({
-          kind: 'setInline',
-          type: 'destOverhead',
-          record: {
-            ...decodeInlineKey(r as never),
-            destOverheadConfig: decodeDestOverheadConfig(r.destOverheadConfig as never),
-          },
-        })),
-      )
+      return done(inlineConfigChanges('destOverhead', args))
     case 'applyInlineSecurityConfigUpdates':
-      return done(
-        inlineConfigChanges('security', args, (r) => ({
-          kind: 'setInline',
-          type: 'security',
-          record: {
-            ...decodeInlineKey(r as never),
-            securityConfig: decodeSecurityConfig(r.securityConfig as never),
-          },
-        })),
-      )
+      return done(inlineConfigChanges('security', args))
     case 'applyInlineRateLimitBucketUpdates':
       return done(
         keys(args[0] as Result).map((r) => ({
@@ -263,77 +204,17 @@ export function decodeMultiTokenPoolWrite(
         })),
       )
     case 'applyConnectionPolicyConfigUpdates':
-      return done(
-        policyConfigChanges('connection', args, (r) => ({
-          kind: 'setPolicyRecord',
-          type: 'connection',
-          record: {
-            ...decodePolicyRecordKey(r as never),
-            onlySubsetTokens: Boolean(r.onlySubsetTokens),
-          },
-        })),
-      )
+      return done(policyConfigChanges('connection', args))
     case 'applyRemotePoolPolicyConfigUpdates':
-      return done(
-        policyConfigChanges('remotePool', args, (r) => {
-          const key = decodePolicyRecordKey(r as never)
-          return {
-            kind: 'setPolicyRecord',
-            type: 'remotePool',
-            record: {
-              ...key,
-              remotePoolAddresses: (r.remotePoolAddresses as string[]).map((a) =>
-                decodeRemoteAddress(a, key.remoteChainSelector),
-              ),
-            },
-          }
-        }),
-      )
+      return done(policyConfigChanges('remotePool', args))
     case 'applyRateLimitPolicyConfigUpdates':
-      return done(
-        policyConfigChanges('rateLimit', args, (r) => ({
-          kind: 'setPolicyRecord',
-          type: 'rateLimit',
-          record: {
-            ...decodePolicyRecordKey(r as never),
-            localDecimals: Number(r.localDecimals),
-            rateLimits: decodeRateLimits(r.rateLimitConfig as never),
-          },
-        })),
-      )
+      return done(policyConfigChanges('rateLimit', args))
     case 'applyFeePolicyConfigUpdates':
-      return done(
-        policyConfigChanges('fee', args, (r) => ({
-          kind: 'setPolicyRecord',
-          type: 'fee',
-          record: {
-            ...decodePolicyRecordKey(r as never),
-            feeConfig: decodeFeeConfig(r.feeConfig as never),
-          },
-        })),
-      )
+      return done(policyConfigChanges('fee', args))
     case 'applyDestOverheadPolicyConfigUpdates':
-      return done(
-        policyConfigChanges('destOverhead', args, (r) => ({
-          kind: 'setPolicyRecord',
-          type: 'destOverhead',
-          record: {
-            ...decodePolicyRecordKey(r as never),
-            destOverheadConfig: decodeDestOverheadConfig(r.destOverheadConfig as never),
-          },
-        })),
-      )
+      return done(policyConfigChanges('destOverhead', args))
     case 'applySecurityPolicyConfigUpdates':
-      return done(
-        policyConfigChanges('security', args, (r) => ({
-          kind: 'setPolicyRecord',
-          type: 'security',
-          record: {
-            ...decodePolicyRecordKey(r as never),
-            securityConfig: decodeSecurityConfig(r.securityConfig as never),
-          },
-        })),
-      )
+      return done(policyConfigChanges('security', args))
     case 'applyRateLimitPolicyBucketUpdates':
       return done(
         keys(args[0] as Result).map((r) => ({
@@ -390,11 +271,7 @@ export function decodeMultiTokenPoolWrite(
           remove: (args[0] as Result).map((t) => getAddress(String(t))),
           set: keys(args[1] as Result).map((r) => ({
             tokenAddress: getAddress(String(r.localToken)),
-            localDecimals: Number(r.localDecimals),
-            lockOrBurnFlavor: Number(r.lockOrBurnFlavor),
-            allowedFinalityConfig: String(r.allowedFinalityConfig),
-            lockOrBurnAddress: nullableAddress(String(r.lockOrBurnAddress)),
-            additionalPoolDataProvider: nullableAddress(String(r.additionalPoolDataProvider)),
+            ...decodeTokenProfileFields(r as Parameters<typeof decodeTokenProfileFields>[0]),
           })),
         },
       }

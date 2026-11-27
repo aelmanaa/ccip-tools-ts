@@ -185,6 +185,7 @@ import { type MessageV1TokenTransfer, encodeMessageV1 } from './messageCodec.ts'
 import type { CCIPMessage_V1_6_EVM, CleanAddressable } from './messages.ts'
 import {
   MULTI_TOKEN_POOL_LOCK_FLAVOR,
+  bpsFeeDeducted,
   decodeLaneConnection,
   decodePoolConfigManagerStaticConfig,
   decodeTokenProfileFields,
@@ -272,8 +273,12 @@ function isLockOrBurnSimulationArtifact(data: BytesLike, onRamp: string): boolea
 /** Raw on-chain TokenBucket struct returned by TokenPool rate limiter queries. */
 type RateLimiterBucket = { tokens: bigint; isEnabled: boolean; capacity: bigint; rate: bigint }
 
-/** Converts an on-chain bucket to the public RateLimiterState, stripping `isEnabled`. */
-function toRateLimiterState(b: RateLimiterBucket): RateLimiterState {
+/**
+ * Converts an on-chain bucket to the public RateLimiterState, stripping `isEnabled` (`null` when
+ * disabled).
+ * @internal
+ */
+export function toRateLimiterState(b: RateLimiterBucket): RateLimiterState {
   return b.isEnabled ? { tokens: b.tokens, capacity: b.capacity, rate: b.rate } : null
 }
 
@@ -1994,7 +1999,7 @@ export class EVMChain extends Chain<typeof ChainFamily.EVM> {
     return {
       ccipFee,
       tokenTransferFee: {
-        feeDeducted: (BigInt(amount) * BigInt(bps)) / 10_000n,
+        feeDeducted: bpsFeeDeducted(amount, bps),
         bps,
       },
     }

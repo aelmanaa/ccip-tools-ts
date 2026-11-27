@@ -266,7 +266,13 @@ export type MultiTokenPoolLane = {
  * - `POOL_CANNOT_MINT_BURN`: the pool lacks mint or burn on the token.
  * - `REMOTE_LANE_MISMATCH`: the remote side does not point back at this lane, or its registry's pool
  *   is not among the trusted ones.
- * - `LANE_PAUSED`: a pause stops the lane in a direction.
+ * - `LANE_PAUSED`: a global, chain or token pause holds the lane in a direction; lift it with the
+ *   matching unpause.
+ * - `LANE_STOPPED`: an EVM lane stop holds a direction: its rate limit bucket is enabled with no
+ *   capacity and no rate. Not a pause: lift it by writing a non-zero bucket (`liftMultiTokenPoolLaneStops`).
+ * - `REMOTE_UNREADABLE`: a fact the check needs could not be read (no `getChain`, or a remote family
+ *   the SDK cannot read yet), so the check fails closed; pass `getChain`, or a `remoteAttestations`
+ *   entry where one applies.
  * - `CCVS_NOT_SYNCED`, `LANE_NOT_ADMITTED`, `ACCOUNT_LOCKS_EXCEEDED`: Solana pool-group lane states.
  * - `REMOTE_ATTESTED`: a remote fact came from an attestation, not a read (a warning).
  */
@@ -291,10 +297,13 @@ export const MULTI_TOKEN_POOL_LANE_CHECKS = [
   'POOL_CANNOT_MINT_BURN',
   'REMOTE_LANE_MISMATCH',
   'LANE_PAUSED',
+  'LANE_STOPPED',
+  'REMOTE_UNREADABLE',
   'CCVS_NOT_SYNCED',
   'LANE_NOT_ADMITTED',
   'ACCOUNT_LOCKS_EXCEEDED',
   'REMOTE_ATTESTED',
+  'UID_MIGRATION_UNCHECKED',
 ] as const
 
 /** One lane check code. */
@@ -337,6 +346,25 @@ export function sortFindings<F extends MultiTokenPoolFinding<string>>(findings: 
   )
 }
 
+/**
+ * A remote fact, family-neutral: read, absent on the remote chain, or unreadable. Each family's
+ * remote reader returns it.
+ * @internal
+ */
+export type MultiTokenPoolRemoteFact<T> =
+  | ({ status: 'known' } & T)
+  | {
+      /** `'missing'`: the remote side lacks it; `'unknown'`: the SDK cannot read that chain. */
+      status: 'missing' | 'unknown'
+      /** What is missing or why it cannot be read. */
+      reason: string
+      /**
+       * The error that left it unread, when one did (e.g. `getChain` rejecting): tells "no RPC for
+       * that chain" from a transient transport failure worth a retry.
+       */
+      cause?: unknown
+    }
+
 /** Tri-state fact: `'unknown'` is never treated as `'missing'`. */
 export type MultiTokenPoolFact = 'known' | 'missing' | 'unknown'
 
@@ -364,7 +392,14 @@ export type MultiTokenPoolLaneCheckResult = {
   lane: MultiTokenPoolLane
   /** Every finding, errors and warnings. */
   findings: MultiTokenPoolLaneFinding[]
-  /** Whether the remote side could be read. */
+  /**
+   * The remote side, tri-state:
+   * - `'known'`: read and checked;
+   * - `'missing'`: read, and the remote side lacks what the lane needs (e.g. no pool registered);
+   * - `'unknown'`: not read: the SDK cannot read that chain, `getChain` is missing, or the lane has no
+   *   connection to check.
+   * `ok` already counts anything but `'known'` as a failure (fail closed): gate on `ok`.
+   */
   remote: MultiTokenPoolFact
   /** `true` when no finding is an error. */
   ok: boolean
@@ -394,7 +429,10 @@ export type MultiTokenPoolTransferQuote = {
   feeDeducted: bigint
   /** Amount the receiver gets: `amount - feeDeducted`. */
   netAmount: bigint
-  /** Whether a fee record resolves; without one a send reverts. */
+  /**
+   * Whether a fee record resolves. Always `true` in a returned quote: a lane without one makes the
+   * quote throw, since a send would revert.
+   */
   hasFeeRecord: boolean
 }
 
@@ -449,7 +487,7 @@ export type MultiTokenPoolExpectedSnapshot = {
 export type MultiTokenPoolSnapshotCheck = {
   /** `true` when nothing moved and no error finding remains. */
   ok: boolean
-  /** Paths whose value moved. */
+  /** What moved: `guardInputsHash` when any input the guard reads has moved (rebuild the proposal). */
   changed: CCTStateChange[]
   /** The guard re-run on the exact calldata against current state: error findings make `ok` false. */
   findings: MultiTokenPoolLaneFinding[]
@@ -757,162 +795,3 @@ export type MultiTokenPoolExecutedStep = MultiTokenPoolPlanStep<string> & {
   /** Accounts the step created, by name (e.g. `poolGroupAddress`, `poolGroupId`, `lookupTableAddress`). */
   created?: Record<string, string>
 }
-
-// ─── Shared planner inputs (internal) ─────────────────────────────────────────────────────────
-// The generic shapes both families' integrator-facing planners (onboard tokens, enable a remote
-// chain, remove a token) are built from. Internal: public signatures use each family's flat aliases.
-
-/** A token's counterpart on one remote chain (field names as `TokenOnboardingRemoteChain`). @internal */
-export type MultiTokenPoolRemoteToken = {
-  /** CCIP selector of the remote chain. */
-  remoteChainSelector: bigint
-  /** The counterpart token, in the remote chain's own format (`0x…` for EVM, base58 for Solana). */
-  remoteTokenAddress: string
-  /** Decimals of the token on the remote chain, not on this chain. */
-  remoteTokenDecimals: number
-}
-
-/** The family extension keys. @internal */
-export type MultiTokenPoolExtensionKey = 'evm' | 'solana'
-
-/**
- * `{ evm?: E }` on EVM (`{ evm: E }` when E has a required field) and `solana?: never`, mirrored on
- * Solana: every family-only field of a shared input lives under its family's key, and one config
- * object cannot carry both families' blocks.
- * @internal
- */
-export type MultiTokenPoolFamilyExtension<
-  K extends MultiTokenPoolExtensionKey,
-  E extends object,
-> = ({} extends E ? { [P in K]?: E } : { [P in K]: E }) & {
-  [P in Exclude<MultiTokenPoolExtensionKey, K>]?: never
-}
-
-/** The value types of chain-level fields; a family narrows a value it refuses. @internal */
-export type MultiTokenPoolChainValueTypes = {
-  /** One trusted remote pool. */
-  remotePool: MultiTokenPoolRemotePool
-  /** The pool data the chain record sends. */
-  poolDataFormat: PoolDataFormat
-  /** The chain's fee and destination overheads. */
-  tokenTransferFeeConfig: TokenTransferFeeConfig
-  /** The literal for "every token the shared record serves". */
-  allTokens: string
-}
-
-/** What one flow of one family plugs into the shared shapes. @internal */
-export type MultiTokenPoolFlowBindings = {
-  /** Flat fields naming the pool (`poolAddress` on EVM, the pool group ref on Solana). */
-  target: object
-  /** The shared `policy` field: its type and whether it is required. */
-  policyField: object
-  /** The flow's family-only fields. */
-  extension: object
-  /** The flow's family-only per-token fields. */
-  tokenExtension: object
-  /** The plan type. */
-  plan: unknown
-  /** The unsigned result type. */
-  generated: unknown
-  /** The signed result type. */
-  executed: unknown
-}
-
-/** What a family plugs in; each family module declares one, and nothing here imports family code. @internal */
-export type MultiTokenPoolPlannerBindings = {
-  /** The family's extension key. */
-  extensionKey: MultiTokenPoolExtensionKey
-  /** The unsigned path's signer fields. */
-  unsignedSigner: object
-  /** The signed path's signer fields. */
-  signedSigner: object
-  /** EVM `PolicyName` (string), Solana policy id (number). */
-  policy: string | number
-  /** The chain-level value types. */
-  chainValues: MultiTokenPoolChainValueTypes
-  /** Token onboarding. */
-  onboarding: MultiTokenPoolFlowBindings
-  /** Remote chain enablement. */
-  chainEnablement: MultiTokenPoolFlowBindings
-  /** Token removal. */
-  tokenRemoval: MultiTokenPoolFlowBindings
-}
-
-/**
- * The shared values of one remote chain: what every admitted token's lane resolves to unless that
- * token has its own record. `rateLimits` amounts are in local token units.
- * @internal
- */
-export type MultiTokenPoolRemoteChainConfig<B extends MultiTokenPoolPlannerBindings> = {
-  /** CCIP selector of the remote chain. */
-  remoteChainSelector: bigint
-  /** Trusted remote pools. */
-  remotePools: B['chainValues']['remotePool'][]
-  /** The pool data the chain record sends. */
-  poolDataFormat?: B['chainValues']['poolDataFormat']
-  /** The four buckets. */
-  rateLimits: MultiTokenPoolRateLimits
-  /** Fee and destination overheads. */
-  tokenTransferFeeConfig: B['chainValues']['tokenTransferFeeConfig']
-}
-
-/** Options of every shared planner: the plan options and the shared lane thresholds. @internal */
-export type MultiTokenPoolPlannerOptions = MultiTokenPoolPlanOptions &
-  Pick<CheckMultiTokenPoolLaneParams, 'minDestGasOverhead' | 'maxTransferFeeBps'>
-
-/**
- * When a shared planner unpauses: only a pause its own pause step landed in this run (in memory on
- * the signed path, or listed in `landedStepIds`), after every lane it reaches passes the lane check.
- * @internal
- */
-export type MultiTokenPoolUnpauseOption = {
-  /** Lift this run's own new-chain or new-token pause at the end; defaults to `false`. */
-  unpause?: boolean
-}
-
-/** One token to onboard. @internal */
-export type MultiTokenPoolOnboardingTokenInput<B extends MultiTokenPoolPlannerBindings> = {
-  /** The token. */
-  tokenAddress: string
-  /**
-   * The exact set of remote chains this token has a lane to after the plan, with the counterpart on
-   * each: the plan refuses an input under which the token would get a lane to a chain not listed.
-   */
-  remoteTokens: MultiTokenPoolRemoteToken[]
-  /** Shared policy for every record type or class it carries; the others keep their source. */
-  policy?: B['policy']
-} & MultiTokenPoolFamilyExtension<B['extensionKey'], B['onboarding']['tokenExtension']>
-
-/** Input of `onboardMultiTokenPoolTokens`. @internal */
-export type OnboardMultiTokenPoolTokensInput<B extends MultiTokenPoolPlannerBindings> =
-  MultiTokenPoolPlannerOptions &
-    MultiTokenPoolUnpauseOption &
-    B['onboarding']['target'] & {
-      /** The tokens. */
-      tokens: MultiTokenPoolOnboardingTokenInput<B>[]
-    } & MultiTokenPoolFamilyExtension<B['extensionKey'], B['onboarding']['extension']>
-
-/** Input of `enableMultiTokenPoolChain`. @internal */
-export type EnableMultiTokenPoolChainInput<B extends MultiTokenPoolPlannerBindings> =
-  MultiTokenPoolPlannerOptions &
-    MultiTokenPoolUnpauseOption &
-    B['chainEnablement']['target'] &
-    B['chainEnablement']['policyField'] & {
-      /** The chain's shared values. */
-      remoteChain: MultiTokenPoolRemoteChainConfig<B>
-      /** Admitted tokens: a list, or the family's literal for every token the shared record serves. */
-      tokenAddresses: string[] | B['chainValues']['allTokens']
-      /** Counterparts on this chain; each `tokenAddress` must be admitted by `tokenAddresses`. */
-      remoteTokens?: (Omit<MultiTokenPoolRemoteToken, 'remoteChainSelector'> & {
-        /** The local token. */
-        tokenAddress: string
-      })[]
-    } & MultiTokenPoolFamilyExtension<B['extensionKey'], B['chainEnablement']['extension']>
-
-/** Input of `removeMultiTokenPoolToken`. @internal */
-export type RemoveMultiTokenPoolTokenInput<B extends MultiTokenPoolPlannerBindings> =
-  MultiTokenPoolPlannerOptions &
-    B['tokenRemoval']['target'] & {
-      /** The token. */
-      tokenAddress: string
-    } & MultiTokenPoolFamilyExtension<B['extensionKey'], B['tokenRemoval']['extension']>
