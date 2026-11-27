@@ -18,13 +18,14 @@ import {
   AddressLookupTableProgram,
   Keypair,
   PublicKey,
+  SYSVAR_CLOCK_PUBKEY,
   SystemProgram,
 } from '@solana/web3.js'
 
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { getMultipleAccountsInfoPaged } from '../../../../solana/utils.ts'
 import { CCTOperationUnsupportedError, CCTParamsInvalidError } from '../../../errors.ts'
-import type { SolanaGenerateParams } from '../../operation.ts'
+import type { SolanaExecuteParams, SolanaGenerateParams } from '../../operation.ts'
 import { deriveEventAuthorityPda } from '../../programs/token-pool.ts'
 import {
   parsePublicKey,
@@ -34,7 +35,8 @@ import {
 } from '../../validate.ts'
 import { poolGroupPdas, poolGroupsCoder } from '../accounts.ts'
 import { decodeRoles, keyOrNull, toBigInt } from '../decode.ts'
-import type { PoolGroupPackItem } from '../packer.ts'
+import { clockUnixTimestamp } from '../lane.ts'
+import { type PoolGroupPackItem, firstTransactionItemCount } from '../packer.ts'
 import { createPoolGroupProgram, getPoolGroupProgramFeatures } from '../program.ts'
 import type { PoolGroupRoles } from '../types.ts'
 import type { PoolGroupJudgement } from '../write-guard.ts'
@@ -48,6 +50,7 @@ import type {
   AcceptPoolGroupOwnershipParams,
   CreatePoolGroupParams,
   CreatePoolGroupResult,
+  PoolGroupExecuteResult,
   PoolGroupFollowUp,
   PoolGroupGuardOptions,
   SetPoolGroupRolesParams,
@@ -57,6 +60,7 @@ import type {
 import {
   type ParsedPoolGroupRef,
   decodeOwned,
+  orThrow,
   parsePoolGroupProgram,
   parsePoolGroupRef,
   readPoolGroup,
@@ -218,6 +222,21 @@ function chainRecordMetas(
   }))
 }
 
+/** The CCV notice in force at `now`: a pending decrease applies once its time has come. */
+function minCCVActivationDelayOf(
+  group: {
+    minCcvActivationDelay: { toString(): string }
+    pendingMinCcvActivationDelay: { toString(): string }
+    pendingMinCcvActivationDelayAt: { toString(): string }
+  },
+  now: bigint,
+): bigint {
+  const pendingAt = toBigInt(group.pendingMinCcvActivationDelayAt)
+  return pendingAt !== 0n && now >= pendingAt
+    ? toBigInt(group.pendingMinCcvActivationDelay)
+    : toBigInt(group.minCcvActivationDelay)
+}
+
 // ─── create ──────────────────────────────────────────────────────────────────────────────────
 
 type ParsedCreate = ParsedPoolGroupWrite & {
@@ -230,6 +249,13 @@ type ParsedCreate = ParsedPoolGroupWrite & {
   minCCVActivationDelay: bigint
   roles: PoolGroupRoles
   chains: bigint[]
+  /** What the caller passed explicitly: on a resume only these are compared and written. */
+  requested: {
+    maxBpsFee?: number
+    openMembership?: boolean
+    minCCVActivationDelay?: bigint
+    roles: Partial<PoolGroupRoles>
+  }
 }
 
 /** Creates a pool group, with roles and chains. */
@@ -282,14 +308,25 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
           : parseDelay(this.name, params.minCCVActivationDelay),
       roles,
       chains,
+      requested: {
+        ...(params.maxBpsFee !== undefined && { maxBpsFee }),
+        ...(params.openMembership !== undefined && { openMembership: params.openMembership }),
+        ...(params.minCCVActivationDelay !== undefined && {
+          minCCVActivationDelay: parseDelay(this.name, params.minCCVActivationDelay),
+        }),
+        roles: updates,
+      },
     }
   }
 
   /**
    * A new group: `create_group` + `set_group_roles` as the first item (atomic, so the squatting
    * guard holds), then one `add_group_chain` per chain. An existing group the authority owns (an
-   * earlier run's first transaction landed): only the missing chains. Anyone else's: refused.
-   * @throws {@link CCTParamsInvalidError} if someone else owns a group at the id
+   * earlier run's first transaction landed): a resume, with `set_group_settings` and
+   * `set_group_roles` for what differs from the request first, then the missing chains. Anyone
+   * else's: refused.
+   * @throws {@link CCTParamsInvalidError} if someone else owns a group at the id, or a resume asks
+   *   for a higher fee cap
    * @throws {@link CCTOperationUnsupportedError} if the program has no pool groups
    */
   protected async plan(
@@ -299,11 +336,15 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
     const { program, authority, groupId } = parsed
     const group = parsed.group ?? poolGroupPdas.group(program, groupId)
     const client = createPoolGroupProgram(chain, program, parsed.payer)
-    const [existing] = await getMultipleAccountsInfoPaged(chain.connection, [group])
+    const [existing, clock] = await getMultipleAccountsInfoPaged(chain.connection, [
+      group,
+      SYSVAR_CLOCK_PUBKEY,
+    ])
     const decoded = existing ? decodeOwned('group', existing, group, program) : null
     const extra = {
       poolGroupAddress: group.toBase58(),
       poolGroupId: (decoded?.groupId ?? groupId).toBase58(),
+      resumed: !!decoded,
     }
     if (decoded && !decoded.owner.equals(authority))
       throw new CCTParamsInvalidError(
@@ -330,7 +371,10 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
         'initialChains',
         `the pool group already has ${have.size} chains; ${missing.length} more exceed ${MAX_POOL_GROUP_CHAINS}`,
       )
+    const signerRoles = { [authority.toBase58()]: 'pool-group-owner' } as const
     const items: PoolGroupPackItem[] = []
+    let expected: Record<string, unknown> = { 'group.exists': false }
+    let judged = false
     if (!decoded) {
       const create = await client.methods
         .createGroup({
@@ -354,9 +398,83 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
         tokenAddresses: [],
         instructions: [create, roles],
         createdPdas: [group],
-        signerRoles: { [authority.toBase58()]: 'pool-group-owner' },
+        signerRoles,
       })
+    } else {
+      // a resume: the settings and roles the caller asked for, where the group differs
+      const now = orThrow(clockUnixTimestamp(clock), SYSVAR_CLOCK_PUBKEY.toBase58())
+      const { requested } = parsed
+      const current = {
+        maxBpsFee: decoded.maxBpsFee,
+        openMembership: decoded.openMembership,
+        minCCVActivationDelay: minCCVActivationDelayOf(decoded, now),
+        roles: decodeRoles(decoded.roles),
+      }
+      if (requested.maxBpsFee !== undefined && requested.maxBpsFee > current.maxBpsFee)
+        throw new CCTParamsInvalidError(
+          this.name,
+          'maxBpsFee',
+          `the existing pool group's fee cap is ${current.maxBpsFee} bps and can only be lowered: pass at most that, or leave maxBpsFee unset`,
+        )
+      const settings = {
+        maxBpsFee: requested.maxBpsFee ?? current.maxBpsFee,
+        openMembership: requested.openMembership ?? current.openMembership,
+        minCCVActivationDelay: requested.minCCVActivationDelay,
+      }
+      const lowering = settings.maxBpsFee < current.maxBpsFee
+      if (
+        lowering ||
+        settings.openMembership !== current.openMembership ||
+        (settings.minCCVActivationDelay !== undefined &&
+          settings.minCCVActivationDelay !== current.minCCVActivationDelay)
+      ) {
+        items.push({
+          tokenAddresses: [],
+          instructions: [
+            await client.methods
+              .setGroupSettings({
+                maxBpsFee: settings.maxBpsFee,
+                openMembership: settings.openMembership,
+                minCcvActivationDelay:
+                  settings.minCCVActivationDelay === undefined
+                    ? null
+                    : new BN(settings.minCCVActivationDelay.toString()),
+                hookLookupTable: null,
+              })
+              .accountsStrict({ group, authority, ...eventAccounts(program) })
+              .remainingAccounts(
+                lowering ? chainRecordMetas(program, group, decoded.chainSelectors) : [],
+              )
+              .instruction(),
+          ],
+          signerRoles,
+        })
+        judged = lowering
+      }
+      // roles a bare create_group left unset take the defaults; otherwise only the ones passed
+      const unset = ROLE_NAMES.every((r) => current.roles[r] === null)
+      const roles: PoolGroupRoles = unset ? parsed.roles : { ...current.roles, ...requested.roles }
+      if (ROLE_NAMES.some((r) => roles[r] !== current.roles[r]))
+        items.push({
+          tokenAddresses: [],
+          instructions: [
+            await client.methods
+              .setGroupRoles({ roles: toIdlRoles(roles) })
+              .accountsStrict({ group, authority, ...eventAccounts(program) })
+              .instruction(),
+          ],
+          signerRoles,
+        })
+      expected = {
+        'group.owner': decoded.owner.toBase58(),
+        'group.chainSelectors': [...have].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+        'group.maxBpsFee': current.maxBpsFee,
+        'group.openMembership': current.openMembership,
+        'group.minCCVActivationDelay': current.minCCVActivationDelay,
+        'group.roles': current.roles,
+      }
     }
+    // after the settings: a chain added now copies the cap they set
     for (const selector of missing) {
       const record = poolGroupPdas.groupChain(program, group, selector)
       items.push({
@@ -374,21 +492,70 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
             .instruction(),
         ],
         createdPdas: [record],
-        signerRoles: { [authority.toBase58()]: 'pool-group-owner' },
+        signerRoles,
       })
+    }
+    // a new group: the chains after the first transaction cannot be simulated (nor land) before
+    // it, so they are a resume (same id) once it has landed; the signed form runs it at once
+    let deferred: bigint[] = []
+    if (!decoded) {
+      const fit = await firstTransactionItemCount({
+        operation: this.name,
+        chain,
+        payer: parsed.payer,
+        items,
+        ...(parsed.budget && { budget: parsed.budget }),
+        ...(parsed.durableNonces && { durableNonces: parsed.durableNonces }),
+      })
+      deferred = missing.slice(fit - 1)
+      items.splice(fit)
     }
     return {
       group,
       items,
-      // a new group has no lanes; chain records start with lanes off
-      judge: null,
-      expected: decoded
-        ? {
-            'group.owner': decoded.owner.toBase58(),
-            'group.chainSelectors': [...have].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
-          }
-        : { 'group.exists': false },
+      // a new group has no lanes, and chain records start with lanes off; a resume that lowers the
+      // cap changes the chain records its lanes read
+      judge: judged ? { failsClosedSeverity: 'error' } : null,
+      expected,
       extra,
+      ...(deferred.length && {
+        followUps: () => [
+          {
+            operation: 'createPoolGroup',
+            reason: `${deferred.length} chain(s) did not fit the first transaction and need the group it creates: once it has landed, run createPoolGroup again with the same poolGroupId (a resume builds only the missing chains)`,
+            inputs: { poolGroupId: groupId.toBase58(), initialChains: deferred },
+          },
+        ],
+      }),
+    }
+  }
+
+  /**
+   * Signs and sends; chains that did not fit the first transaction are added by resuming (same
+   * id) once it has landed, until every chain is there.
+   */
+  override async execute(
+    chain: SolanaChain,
+    params: SolanaExecuteParams<CreatePoolGroupParams>,
+  ): Promise<PoolGroupExecuteResult & CreatePoolGroupResult> {
+    const first = await super.execute(chain, params)
+    const transactions = [...first.transactions]
+    let last = first
+    // at most MAX_POOL_GROUP_CHAINS / 1 resumes; each adds at least one chain
+    for (let i = 0; i < MAX_POOL_GROUP_CHAINS; i++) {
+      if (!last.followUps?.some((f) => f.operation === this.name)) break
+      last = await super.execute(chain, { ...params, poolGroupId: first.poolGroupId })
+      transactions.push(...last.transactions)
+    }
+    const { followUps: lastFollowUps, ...rest } = last
+    const followUps = lastFollowUps?.filter((f) => f.operation !== this.name) ?? []
+    return {
+      ...rest,
+      poolGroupAddress: first.poolGroupAddress,
+      poolGroupId: first.poolGroupId,
+      resumed: first.resumed,
+      transactions,
+      ...(followUps.length && { followUps }),
     }
   }
 
@@ -401,13 +568,21 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
     const ixs = decodeOne(
       this.name,
       instructions,
-      ['createGroup', 'setGroupRoles', 'addGroupChain'],
+      ['createGroup', 'setGroupRoles', 'setGroupSettings', 'addGroupChain'],
       false,
     )
     const authority = ixs[0]!.ix.keys[1]!.pubkey
     const create = ixs.find((i) => i.name === 'createGroup')
     const roles = ixs.find((i) => i.name === 'setGroupRoles')
+    const settings = ixs.find((i) => i.name === 'setGroupSettings')
     const groupId = create ? keyField(this.name, create.data, 'params', 'groupId') : null
+    const source = create ?? settings
+    const decodedRoles = rolesFrom((r) =>
+      roles ? keyOrNull(keyField(this.name, roles.data, 'params', 'roles', r)) : null,
+    )
+    const delay = bigField(field(source?.data, 'params', 'minCcvActivationDelay'))
+    const maxBpsFee = field(source?.data, 'params', 'maxBpsFee')
+    const openMembership = field(source?.data, 'params', 'openMembership')
     return {
       payer: authority,
       authority,
@@ -415,16 +590,24 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
       guardOptions,
       group: ixs[0]!.ix.keys[0]!.pubkey,
       groupId: groupId ?? PublicKey.default,
-      callerChoseId: true,
-      maxBpsFee: Number(field(create?.data, 'params', 'maxBpsFee') ?? DEFAULT_MAX_BPS_FEE),
-      openMembership: field(create?.data, 'params', 'openMembership') === true,
-      minCCVActivationDelay: bigField(field(create?.data, 'params', 'minCcvActivationDelay')) ?? 0n,
-      roles: rolesFrom((r) =>
-        roles ? keyOrNull(keyField(this.name, roles.data, 'params', 'roles', r)) : null,
-      ),
+      // a proposal's id is in it already: no front-running warning on the re-check
+      callerChoseId: false,
+      maxBpsFee: Number(maxBpsFee ?? DEFAULT_MAX_BPS_FEE),
+      openMembership: openMembership === true,
+      minCCVActivationDelay: delay ?? 0n,
+      roles: decodedRoles,
       chains: ixs
         .filter((i) => i.name === 'addGroupChain')
         .map((i) => bigField(field(i.data, 'params', 'remoteChainSelector')) ?? 0n),
+      // a resume proposal: what its settings and roles instructions write
+      requested: {
+        ...(settings && {
+          maxBpsFee: Number(maxBpsFee),
+          openMembership: openMembership === true,
+          ...(delay !== undefined && { minCCVActivationDelay: delay }),
+        }),
+        roles: roles ? decodedRoles : {},
+      },
     }
   }
 }
@@ -621,8 +804,6 @@ export class SetPoolGroupSettings extends PoolGroupWriteOperation<
       .accountsStrict({ group: ref.group, authority, ...eventAccounts(ref.program) })
       .remainingAccounts(remaining)
       .instruction()
-    const pendingAt = toBigInt(group.pendingMinCcvActivationDelayAt)
-    const applied = pendingAt !== 0n && now >= pendingAt
     return {
       group: ref.group,
       items: [
@@ -638,9 +819,7 @@ export class SetPoolGroupSettings extends PoolGroupWriteOperation<
         'group.owner': group.owner.toBase58(),
         'group.maxBpsFee': group.maxBpsFee,
         'group.openMembership': group.openMembership,
-        'group.minCCVActivationDelay': applied
-          ? toBigInt(group.pendingMinCcvActivationDelay)
-          : toBigInt(group.minCcvActivationDelay),
+        'group.minCCVActivationDelay': minCCVActivationDelayOf(group, now),
         'group.hookLookupTable': keyOrNull(group.hookLookupTable),
         ...(lowering && { 'group.chainSelectors': group.chainSelectors.map(toBigInt) }),
       },
@@ -795,12 +974,36 @@ export class AcceptPoolGroupOwnership extends PoolGroupWriteOperation<
       if (info)
         addLists(decodeOwned('groupChainPolicy', info, r.pubkey, ref.program).policy.security.hook)
     })
-    const securityPolicies = policyIds.filter((_, i) => {
+    const policies = policyIds.flatMap((policyId, i) => {
       const info = infos[records.length + i]
-      return (
-        !!info &&
-        (decodeOwned('policy', info, policyKeys[i]!, ref.program).classes & SECURITY_BIT) !== 0
-      )
+      return info
+        ? [{ policyId, policy: decodeOwned('policy', info, policyKeys[i]!, ref.program) }]
+        : []
+    })
+    const securityPolicies = policies
+      .filter(({ policy }) => (policy.classes & SECURITY_BIT) !== 0)
+      .map(({ policyId }) => policyId)
+    // named SECURITY policies name hook lists too: their defaults and their chain records
+    const policyRecords = policies.flatMap(({ policyId, policy }) =>
+      (policy.classes & SECURITY_BIT) === 0
+        ? []
+        : policy.chainSelectors.map((c) =>
+            poolGroupPdas.policyChain(
+              ref.program,
+              poolGroupPdas.policy(ref.program, ref.group, policyId),
+              toBigInt(c),
+            ),
+          ),
+    )
+    for (const { policy } of policies)
+      if ((policy.classes & SECURITY_BIT) !== 0) addLists(policy.defaultPolicy.security.hook)
+    const recordInfos = await getMultipleAccountsInfoPaged(chain.connection, policyRecords)
+    recordInfos.forEach((info, i) => {
+      if (info)
+        addLists(
+          decodeOwned('policyChainRecord', info, policyRecords[i]!, ref.program).sections.security
+            .hook,
+        )
     })
     const listInfos = await getMultipleAccountsInfoPaged(
       chain.connection,
@@ -823,9 +1026,9 @@ export class AcceptPoolGroupOwnership extends PoolGroupWriteOperation<
       .accountsStrict({ group: ref.group, authority, ...eventAccounts(ref.program) })
       .remainingAccounts(records)
       .instruction()
-    const followUps = (judgement: PoolGroupJudgement): PoolGroupFollowUp[] => {
+    const followUps = (judgement: PoolGroupJudgement | null): PoolGroupFollowUp[] => {
       const bySelector = new Map<bigint, string[]>()
-      for (const l of judgement.failingClosed)
+      for (const l of judgement?.failingClosed ?? [])
         bySelector.set(l.remoteChainSelector, [
           ...(bySelector.get(l.remoteChainSelector) ?? []),
           l.tokenAddress,
@@ -875,8 +1078,10 @@ export class AcceptPoolGroupOwnership extends PoolGroupWriteOperation<
           signerRoles: { [authority.toBase58()]: 'pool-group-owner' },
         },
       ],
-      // the reset is what accepting does: lanes it leaves failing closed are reported, with fixes
-      judge: { failsClosedSeverity: 'warning' },
+      // the reset is what accepting does: lanes it leaves failing closed (now, or when a cancelled
+      // pending CCV set a lane copied comes due) are reported, with fixes; a hand-over is never
+      // blocked, so lanes it opens are reported too
+      judge: { failsClosedSeverity: 'warning', goingLiveSeverity: 'warning' },
       expected: {
         'group.owner': previousOwner,
         'group.proposedOwner': proposed,

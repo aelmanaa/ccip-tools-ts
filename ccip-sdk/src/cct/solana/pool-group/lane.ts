@@ -411,8 +411,11 @@ const keys = (ks: readonly PublicKey[]) => ks.map((k) => k.toBase58())
 /**
  * The lane's CCV copy against its SECURITY record at the cluster clock
  * (`require_lane_ccvs_synced`): `null` when SECURITY is inline or the lane is unlinked. `synced` is
- * whether transfers enforce the same set now; `failsClosedAt` is the activation of a pending set the
- * lane has not copied (transfers fail closed from then on until it syncs).
+ * whether transfers enforce the same set now; `failsClosedAt` is the earliest time from which they
+ * will not, until the lane syncs: the activation of a pending set of the record that the lane has
+ * not copied, or of a pending set the lane copied that the record no longer schedules (cancelled by
+ * `reset_security` on an ownership accept, or replaced): at its `activates_at` the lane switches to
+ * its copy (`lane_ccvs_at`, groups.rs:728-741) while the record keeps its set.
  * @internal
  */
 export function laneCcvSync(
@@ -443,11 +446,34 @@ export function laneCcvSync(
     ext.ccvPending.activatesAt === BigInt(upcoming.activatesAt.toString()) &&
     sameList(ext.ccvPending.outbound, keys(upcoming.outbound)) &&
     sameList(ext.ccvPending.inbound, keys(upcoming.inbound))
-  return {
-    epoch: copy.epoch,
-    synced,
-    ...(upcoming && !copied && { failsClosedAt: BigInt(upcoming.activatesAt.toString()) }),
-  }
+  // the lane's own pending copy, still to come, that the record no longer schedules
+  const orphaned =
+    ext.ccvPending && now < ext.ccvPending.activatesAt && !copied
+      ? ext.ccvPending.activatesAt
+      : undefined
+  const recordAt = upcoming && !copied ? BigInt(upcoming.activatesAt.toString()) : undefined
+  const at =
+    orphaned !== undefined && recordAt !== undefined
+      ? orphaned < recordAt
+        ? orphaned
+        : recordAt
+      : (orphaned ?? recordAt)
+  return { epoch: copy.epoch, synced, ...(at !== undefined && { failsClosedAt: at }) }
+}
+
+/** A direction of a lane's transfers. @internal */
+export type LaneDirection = 'outbound' | 'inbound'
+
+const BOTH: readonly LaneDirection[] = ['outbound', 'inbound']
+
+/** Why a lane that is not paused reverts transfers, and in which directions. @internal */
+export type LaneFailsClosed = {
+  /** The program error transfers hit. */
+  code: 'BpsFeeAboveGroupMax' | 'PolicySecurityStale' | 'GroupCcvsNotSynced'
+  /** The code with the values that cause it. */
+  reason: string
+  /** The directions that revert. */
+  directions: readonly LaneDirection[]
 }
 
 /**
@@ -456,10 +482,12 @@ export function laneCcvSync(
  * copy out of step with its record (`GroupCcvsNotSynced`), or FEE from a policy whose BPS fee is
  * above the cap the chain record mirrors (`BpsFeeAboveGroupMax`, `resolve_lane_policy_with`,
  * chainlink-ccip-solana 7558722 `base-token-pool/src/groups.rs:903-911`: a cap lowered after the
- * fee was written applies at once). All apply to sends and receives.
+ * fee was written applies at once). The fee rule blocks sends only: FEE is resolved on the send path
+ * alone (`SEND_CLASSES` has it, `RECEIVE_CLASSES` does not, groups.rs:72-83). The SECURITY reasons
+ * block both directions.
  * @internal
  */
-export function laneFailsClosed(state: PoolGroupLaneState): string | undefined | Unread {
+export function laneFailsClosed(state: PoolGroupLaneState): LaneFailsClosed | undefined | Unread {
   const fee = laneSectionsFor(state, 'fee')
   if (isUnread(fee)) return fee
   const gcp = state.groupChain?.record
@@ -467,29 +495,41 @@ export function laneFailsClosed(state: PoolGroupLaneState): string | undefined |
     const { finalityBpsFee, fastFinalityBpsFee } = fee.fee.tokenTransferFeeConfig
     const bps = Math.max(finalityBpsFee, fastFinalityBpsFee)
     if (bps > gcp.maxBpsFee)
-      return `BpsFeeAboveGroupMax: the lane's FEE policy charges ${bps} bps, above the pool group's cap of ${gcp.maxBpsFee} bps`
+      return {
+        code: 'BpsFeeAboveGroupMax',
+        reason: `BpsFeeAboveGroupMax: the lane's FEE policy charges ${bps} bps, above the pool group's cap of ${gcp.maxBpsFee} bps`,
+        directions: ['outbound'],
+      }
   }
   const source = state.ext?.poolGroupAddress ? state.ext.classSource.security : undefined
   if (source?.kind === 'policy') {
     const record = state.named.get(source.slot)
     const group = state.groupChain?.record.securityGeneration
     if (record && group !== undefined && record.record.securityGeneration !== group)
-      return `PolicySecurityStale: the SECURITY record is of security generation ${record.record.securityGeneration}, the pool group's is ${group}`
+      return {
+        code: 'PolicySecurityStale',
+        reason: `PolicySecurityStale: the SECURITY record is of security generation ${record.record.securityGeneration}, the pool group's is ${group}`,
+        directions: BOTH,
+      }
   }
   const sync = laneCcvSync(state)
   if (isUnread(sync)) return sync
   if (sync && !sync.synced)
-    return "GroupCcvsNotSynced: the lane's CCV copy differs from its SECURITY record"
+    return {
+      code: 'GroupCcvsNotSynced',
+      reason: "GroupCcvsNotSynced: the lane's CCV copy differs from its SECURITY record",
+      directions: BOTH,
+    }
   return undefined
 }
 
-/** The finding code, record type and fix of a {@link laneFailsClosed} reason. @internal */
-export function laneFailsClosedFinding(reason: string): {
+/** The finding code, record type and fix of a {@link laneFailsClosed} code. @internal */
+export function laneFailsClosedFinding(code: LaneFailsClosed['code']): {
   check: 'TRANSFER_FEE_ABOVE_CAP' | 'CCVS_NOT_SYNCED'
   recordType: 'fee' | 'security'
   fix: string
 } {
-  return reason.startsWith('BpsFeeAboveGroupMax')
+  return code === 'BpsFeeAboveGroupMax'
     ? {
         check: 'TRANSFER_FEE_ABOVE_CAP',
         recordType: 'fee',

@@ -25,17 +25,22 @@ import {
 import { keccak256 } from 'ethers'
 
 import type { SolanaChain } from '../../../solana/index.ts'
-import { MAX_COMPUTE_UNIT_LIMIT, getMultipleAccountsInfoPaged } from '../../../solana/utils.ts'
+import { deriveTokenPoolChainConfigV2Pda } from '../../../solana/token-pool.ts'
+import { MAX_COMPUTE_UNIT_LIMIT } from '../../../solana/utils.ts'
 import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
-import { CCTDataDecodeError, CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
+import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
 import type { MultiTokenPoolInlineRemotePoolDrop } from '../../evm/pool-config-manager/contracts.ts'
 import type { MultiTokenPoolLaneFinding, MultiTokenPoolSnapshot } from '../../multi-token-pool.ts'
 import { parseUniqueRemoteAddresses } from '../../remote-address.ts'
+import { deriveTokenPoolChainConfigPda } from '../programs/token-pool.ts'
 import { parsePublicKey } from '../validate.ts'
+import { poolGroupPdas } from './accounts.ts'
 import {
+  type LaneFailsClosed,
   type PoolGroupLaneState,
   type Unread,
   isUnread,
+  laneCcvSync,
   laneFailsClosed,
   laneFailsClosedFinding,
   laneFormat,
@@ -79,30 +84,35 @@ type LaneView = {
   pools: { address: string; allowLegacyPoolData: boolean }[]
   outbound: boolean
   inbound: boolean
-  failsClosed?: string
+  failsClosed?: LaneFailsClosed
+  /** When transfers start failing closed although they do not now (a CCV set the lane lacks). */
+  failsClosedAt?: bigint
 }
 
-/** A lane's view; an unreadable lane throws (the guard never passes on a state it cannot read). */
-function viewOf(state: PoolGroupLaneState | null | Unread, where: string): LaneView | null {
+/** A lane's view; an unreadable lane is a reason, never a pass. */
+function viewOf(state: PoolGroupLaneState | null | Unread): LaneView | null | Unread {
   if (state === null) return null
-  if (isUnread(state)) throw new CCTDataDecodeError(where, { context: { reason: state.reason } })
-  const unreadable = (u: Unread) => new CCTDataDecodeError(where, { context: { reason: u.reason } })
+  if (isUnread(state)) return state
   const format = laneFormat(state)
-  if (isUnread(format)) throw unreadable(format)
+  if (isUnread(format)) return format
   const pools = laneRemotePools(state, format)
-  if (isUnread(pools)) throw unreadable(pools)
+  if (isUnread(pools)) return pools
   const fails = laneFailsClosed(state)
-  if (isUnread(fails)) throw unreadable(fails)
+  if (isUnread(fails)) return fails
+  const sync = laneCcvSync(state)
+  if (isUnread(sync)) return sync
   const trusted = pools.map(({ address, allowLegacyPoolData }) => ({
     address,
     allowLegacyPoolData,
   }))
   const { pausedOutbound, pausedInbound } = lanePauses(state)
+  const blocks = (d: 'outbound' | 'inbound') => !!fails?.directions.includes(d)
   return {
     pools: trusted,
-    outbound: !pausedOutbound && fails === undefined,
-    inbound: !pausedInbound && fails === undefined && trusted.length > 0,
+    outbound: !pausedOutbound && !blocks('outbound'),
+    inbound: !pausedInbound && !blocks('inbound') && trusted.length > 0,
     ...(fails !== undefined && { failsClosed: fails }),
+    ...(sync?.failsClosedAt !== undefined && { failsClosedAt: sync.failsClosedAt }),
   }
 }
 
@@ -124,6 +134,11 @@ export type JudgePoolGroupWriteInput = PoolGroupGuardOptions & {
   lookupTables?: AddressLookupTableAccount[]
   /** Severity of a lane the write leaves failing closed; defaults to `'error'` (refused). */
   failsClosedSeverity?: 'error' | 'warning'
+  /**
+   * Lanes the write makes live: refused by default (`'error'`), or only reported in `goingLive`
+   * (`'warning'`, an ownership accept, which must never be blocked).
+   */
+  goingLiveSeverity?: 'error' | 'warning'
   /** Report error findings instead of refusing (the snapshot check). */
   reportFindings?: boolean
 }
@@ -134,9 +149,7 @@ export type PoolGroupJudgement = {
   affectedLanes: PoolGroupLaneKey[]
   /** Lanes live in a direction after the write that were not before. */
   goingLive: PoolGroupLaneKey[]
-  /** Warning findings. */
-  warnings: MultiTokenPoolLaneFinding[]
-  /** Every finding, errors included. */
+  /** Every finding, errors included (errors refuse the write unless `reportFindings`). */
   findings: MultiTokenPoolLaneFinding[]
   /** Lanes the write leaves failing closed, with why. */
   failingClosed: (PoolGroupLaneKey & { reason: string })[]
@@ -156,6 +169,7 @@ const laneKey = (l: PoolGroupLaneKey) => `${l.tokenAddress}:${l.remoteChainSelec
 async function simulateWrite(
   input: JudgePoolGroupWriteInput,
   addresses: readonly PublicKey[],
+  minContextSlot: number,
 ): Promise<{ slot: bigint; accounts: (AccountInfo<Buffer> | null)[] }> {
   const { operation, chain, payer } = input
   const message = new TransactionMessage({
@@ -171,6 +185,9 @@ async function simulateWrite(
     {
       sigVerify: false,
       replaceRecentBlockhash: true,
+      // at least the state read as "before", so a later write is not judged on older state
+      commitment: 'confirmed',
+      minContextSlot,
       accounts: { encoding: 'base64', addresses: addresses.map((a) => a.toBase58()) },
     },
   )
@@ -202,17 +219,55 @@ async function simulateWrite(
 const isLaneAccount = (program: PublicKey, a: AccountInfo<Buffer> | null | undefined) =>
   !!a && a.owner.equals(program) && LANE_ACCOUNTS.some((d) => a.data.subarray(0, 8).equals(d))
 
+/** The accounts and the slot they were read at, at `confirmed`. */
+async function readBefore(
+  chain: SolanaChain,
+  keys: readonly PublicKey[],
+): Promise<{ slot: number; accounts: (AccountInfo<Buffer> | null)[] }> {
+  const accounts: (AccountInfo<Buffer> | null)[] = []
+  let slot = 0
+  for (let i = 0; i < keys.length; i += 100) {
+    const { context, value } = await chain.connection.getMultipleAccountsInfoAndContext(
+      keys.slice(i, i + 100),
+      'confirmed',
+    )
+    slot = Math.max(slot, context.slot)
+    accounts.push(...value)
+  }
+  return { slot, accounts }
+}
+
+/** The accounts a lane's transfers read, listed or not readable: its PDAs and group chain record. */
+function laneAddresses(
+  program: PublicKey,
+  group: PublicKey,
+  mint: PublicKey,
+  selector: bigint,
+  states: readonly (PoolGroupLaneState | null | Unread)[],
+): string[] {
+  const named = states.flatMap((s) =>
+    s && !isUnread(s) ? [...s.named.values()].map((n) => n.address) : [],
+  )
+  return [
+    deriveTokenPoolChainConfigPda(program, selector, mint),
+    deriveTokenPoolChainConfigV2Pda(program, selector, mint),
+    poolGroupPdas.groupChain(program, group, selector),
+    ...named,
+  ].map((a) => a.toBase58())
+}
+
 /**
  * Runs the post-state guard of one pool-group write: simulates it, reads back the accounts it
  * writes, and judges every lane whose state one of them carries (its `ChainConfig`, `ChainConfigV2`,
  * group chain record or named policy records): A21 dropped trusted remote pools (refused unless in
- * `confirmDropped`), lanes going live (refused: no S3 write opens lanes), and lanes left failing
- * closed (refused, or a warning with `failsClosedSeverity: 'warning'`). Lanes are listed only when
- * the write changes a lane account; that listing needs `getProgramAccounts` and fails closed without
- * it.
+ * `confirmDropped`), lanes going live (refused unless `goingLiveSeverity: 'warning'`: no S3 write
+ * checks lanes it opens), lanes left failing closed now or from a later time (refused, or a warning
+ * with `failsClosedSeverity: 'warning'`), and affected lanes that cannot be read (always an error,
+ * `REMOTE_UNREADABLE`: the guard never passes a lane it cannot read). Lanes are listed only when
+ * the write changes a lane account; that listing needs `getProgramAccounts` and fails closed
+ * without it. Fails closed compares the program error, not its text.
  * @throws {@link CCTParamsInvalidError} if the simulation refuses the write, a drop is unconfirmed,
  *   a lane would go live, or an error finding remains (unless `reportFindings`)
- * @throws {@link CCTDataDecodeError} if an affected lane cannot be read before or after
  * @internal
  */
 export async function judgePoolGroupWrite(
@@ -227,10 +282,8 @@ export async function judgePoolGroupWrite(
         .map((k) => [k.pubkey.toBase58(), k.pubkey] as const),
     ).values(),
   ]
-  const [before, { slot, accounts: after }] = await Promise.all([
-    getMultipleAccountsInfoPaged(chain.connection, writable),
-    simulateWrite(input, writable),
-  ])
+  const { slot: beforeSlot, accounts: before } = await readBefore(chain, writable)
+  const { slot, accounts: after } = await simulateWrite(input, writable, beforeSlot)
   const changed = new Map<string, AccountInfo<Buffer> | null>()
   writable.forEach((key, i) => {
     const [b, a] = [before[i], after[i]]
@@ -246,7 +299,6 @@ export async function judgePoolGroupWrite(
     return {
       affectedLanes: [],
       goingLive: [],
-      warnings: [],
       findings: [],
       failingClosed: [],
       guardInputsHash: canonicalHash({ lanes: [], changed: changedInputs }),
@@ -265,35 +317,40 @@ export async function judgePoolGroupWrite(
     readPoolGroupLaneStates(chain, program, requests),
     readPoolGroupLaneStates(chain, program, requests, { overlay: changed }),
   ])
+  const severity = input.failsClosedSeverity ?? 'error'
   const findings: MultiTokenPoolLaneFinding[] = []
   const affectedLanes: PoolGroupLaneKey[] = []
   const goingLive: PoolGroupLaneKey[] = []
   const failingClosed: PoolGroupJudgement['failingClosed'] = []
   const dropped: MultiTokenPoolInlineRemotePoolDrop[] = []
   const inputs: unknown[] = []
+  const nothing: LaneView = { pools: [], outbound: false, inbound: false }
   requests.forEach(({ mint, selector }, i) => {
     const key = { tokenAddress: mint.toBase58(), remoteChainSelector: selector }
-    const where = `the lane of ${key.tokenAddress} toward ${selector}`
     const s0 = statesBefore[i] ?? null
     const s1 = statesAfter[i] ?? null
-    const accountsOf = (s: typeof s0) =>
-      s && !isUnread(s)
-        ? [
-            s.chainConfig.address,
-            ...(s.v2 ? [s.v2.address] : []),
-            ...(s.groupChain ? [s.groupChain.address] : []),
-            ...[...s.named.values()].map((n) => n.address),
-          ].map((a) => a.toBase58())
-        : []
-    const touches = [...accountsOf(s0), ...accountsOf(s1)].some((a) => changed.has(a))
+    // a listed lane is linked to this group: its PDAs and chain record are known even when its
+    // state cannot be read, so an unreadable lane is never skipped (it fails closed below)
+    const touches = laneAddresses(program, group, mint, selector, [s0, s1]).some((a) =>
+      changed.has(a),
+    )
     if (!touches) return
     affectedLanes.push(key)
+    const v0 = viewOf(s0)
+    const v1 = viewOf(s1)
+    inputs.push({ lane: laneKey(key), before: isUnread(v0) ? { unread: v0.reason } : v0 })
+    if (isUnread(v1)) {
+      findings.push({
+        check: 'REMOTE_UNREADABLE',
+        severity: 'error',
+        ...key,
+        reason: `the lane this write changes cannot be read after it (${v1.reason}): it is not judged, so the write is refused`,
+      })
+      return
+    }
     // a lane unreadable before the write is judged as nothing trusted and nothing live
-    const v0 = isUnread(s0) ? null : viewOf(s0, where)
-    const v1 = viewOf(s1, where)
-    inputs.push({ lane: laneKey(key), before: v0 })
-    const after1 = v1 ?? { pools: [], outbound: false, inbound: false }
-    const before0 = v0 ?? { pools: [], outbound: false, inbound: false }
+    const before0 = v0 && !isUnread(v0) ? v0 : nothing
+    const after1 = v1 ?? nothing
     if ((after1.outbound && !before0.outbound) || (after1.inbound && !before0.inbound))
       goingLive.push(key)
     const kept = new Map(after1.pools.map((p) => [p.address, p]))
@@ -307,27 +364,49 @@ export async function judgePoolGroupWrite(
         ...(lost.length && { remotePools: lost }),
         ...(legacyLost && { flags: ['allowLegacyPoolData'] }),
       })
-    if (v1?.failsClosed && v1.failsClosed !== v0?.failsClosed) {
-      failingClosed.push({ ...key, reason: v1.failsClosed })
-      const { check, recordType, fix } = laneFailsClosedFinding(v1.failsClosed)
+    const fails = v1?.failsClosed
+    if (fails && fails.code !== before0.failsClosed?.code) {
+      failingClosed.push({ ...key, reason: fails.reason })
+      const { check, recordType, fix } = laneFailsClosedFinding(fails.code)
+      const what = fails.directions.length > 1 ? 'every transfer' : 'every send'
       findings.push({
         check,
-        severity: input.failsClosedSeverity ?? 'error',
+        severity,
         ...key,
         recordType,
-        reason: `after the write every transfer on the lane reverts: ${v1.failsClosed}; ${fix}`,
+        reason: `after the write ${what} on the lane reverts: ${fails.reason}; ${fix}`,
+      })
+    } else if (
+      !fails &&
+      v1?.failsClosedAt !== undefined &&
+      v1.failsClosedAt !== before0.failsClosedAt
+    ) {
+      const reason = `GroupCcvsNotSynced from ${v1.failsClosedAt}: the lane's CCV copy activates a set its SECURITY record does not (a pending set cancelled or replaced), so every transfer reverts from then until the lane syncs`
+      failingClosed.push({ ...key, reason })
+      findings.push({
+        check: 'CCVS_NOT_SYNCED',
+        severity,
+        ...key,
+        recordType: 'security',
+        reason: `after the write ${reason}; sync the lane`,
       })
     }
   })
 
+  // TODO(M6): the drop confirmation, its sealing and the drop computation move to the family-neutral
+  // guard module (mttp/tools/m6-s3a-dropped-pools.diff); call it from here once it lands
   assertDropsConfirmed(operation, dropped, input.confirmDropped ?? [])
-  if (goingLive.length)
-    throw new CCTParamsInvalidError(
-      operation,
-      'guards',
-      `the write makes ${goingLive.length} lane(s) live (${goingLive.map(laneKey).join(', ')}), which this op does not check: make lanes live with the pause ops, which run the lane check`,
-      { context: { goingLive } },
-    )
+  if (goingLive.length) {
+    const message = `the write makes ${goingLive.length} lane(s) live (${goingLive.map(laneKey).join(', ')}), which this op does not check`
+    if ((input.goingLiveSeverity ?? 'error') === 'error')
+      throw new CCTParamsInvalidError(
+        operation,
+        'guards',
+        `${message}: make lanes live with the pause ops, which run the lane check`,
+        { context: { goingLive } },
+      )
+    chain.logger.warn(`${operation}: ${message}; check them with checkMultiTokenPoolLane`)
+  }
   const errors = findings.filter((f) => f.severity === 'error')
   if (errors.length && !input.reportFindings)
     throw new CCTParamsInvalidError(
@@ -341,7 +420,6 @@ export async function judgePoolGroupWrite(
   return {
     affectedLanes,
     goingLive,
-    warnings: findings.filter((f) => f.severity === 'warning'),
     findings,
     failingClosed,
     guardInputsHash: canonicalHash({ lanes: inputs, changed: changedInputs }),

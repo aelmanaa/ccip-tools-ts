@@ -73,14 +73,20 @@ export type PoolGroupWritePlan<X extends object> = {
   /** Values the write keeps, merges or replaces, by dotted path. */
   expected: Record<string, unknown>
   /** Judge options; `null` skips the lane guard (a new group has no lanes). */
-  judge: Pick<JudgePoolGroupWriteInput, 'failsClosedSeverity'> | null
+  judge: Pick<JudgePoolGroupWriteInput, 'failsClosedSeverity' | 'goingLiveSeverity'> | null
   /** Op-specific result fields. */
   extra: X
-  /** Follow-ups, from the judgement. */
-  followUps?: (judgement: PoolGroupJudgement) => PoolGroupFollowUp[]
+  /** Follow-ups, from the judgement (`null` when the plan skips the lane guard). */
+  followUps?: (judgement: PoolGroupJudgement | null) => PoolGroupFollowUp[]
   /** A measured upper bound of items per transaction. */
   maxItemsPerTransaction?: number
 }
+
+/** A plan's kept values, with the pool group it writes (so a snapshot binds to one group). */
+const expectedOf = (plan: PoolGroupWritePlan<object>): Record<string, unknown> => ({
+  ...plan.expected,
+  'group.address': plan.group.toBase58(),
+})
 
 /** The fields shared by every write's raw params. */
 type RawWriteParams = {
@@ -197,7 +203,7 @@ export abstract class PoolGroupWriteOperation<
   ): Promise<{ result: PoolGroupUnsignedResult; extra: X }> {
     const plan = await this.plan(chain, parsed)
     const extra = plan.extra
-    const empty = { affectedLanes: [], goingLive: [], warnings: [] }
+    const empty = { affectedLanes: [], goingLive: [], findings: [] }
     if (!plan.items.length) return { result: { transactions: [], ...empty }, extra }
     const instructions = plan.items.flatMap((i) => i.instructions)
     const judgement = plan.judge
@@ -224,20 +230,20 @@ export abstract class PoolGroupWriteOperation<
     const snapshot = await sealPoolGroupSnapshot({
       operation: this.name,
       slot: judgement?.slot ?? BigInt(await chain.connection.getSlot()),
-      expected: plan.expected,
+      expected: expectedOf(plan),
       guardOptions: parsed.guardOptions,
       guardInputsHash: judgement?.guardInputsHash ?? 'none',
       calldataHash: poolGroupTransactionsHash(packed.transactions),
       ...(parsed.expectedSnapshot && { expectedSnapshot: parsed.expectedSnapshot }),
     })
-    const followUps = judgement && plan.followUps ? plan.followUps(judgement) : []
+    const followUps = plan.followUps ? plan.followUps(judgement) : []
     return {
       result: {
         ...packed,
         snapshot,
         affectedLanes: judgement?.affectedLanes ?? [],
         goingLive: judgement?.goingLive ?? [],
-        warnings: judgement?.warnings ?? [],
+        findings: (judgement?.findings ?? []).filter((f) => f.severity === 'warning'),
         ...(followUps.length && { followUps }),
       },
       extra,
@@ -308,6 +314,14 @@ export abstract class PoolGroupWriteOperation<
     transactions: readonly { instructions: readonly TransactionInstruction[] }[],
   ): Promise<MultiTokenPoolSnapshotCheck> {
     const instructions = proposalInstructions(ref.program, transactions)
+    // every instruction of these ops names the pool group first: it must be the one checked
+    const foreign = instructions.findIndex((ix) => !ix.keys[0]?.pubkey.equals(ref.group))
+    if (foreign >= 0)
+      throw new CCTParamsInvalidError(
+        this.name,
+        'transactions',
+        `instruction ${foreign} of the proposal writes the pool group ${instructions[foreign]!.keys[0]?.pubkey.toBase58() ?? '(none)'}, not ${ref.group.toBase58()}: pass the pool group the proposal targets`,
+      )
     const sealed: unknown = snapshot.expected[POOL_GROUP_GUARD_OPTIONS_PATH]
     const guardOptions = poolGroupGuardOptionsOf(this.name, {
       confirmDropped:
@@ -333,7 +347,7 @@ export abstract class PoolGroupWriteOperation<
     const { snapshotChanges } = await import('../../evm/pool-config-manager/guard-run.ts')
     const changed = snapshotChanges(snapshot, {
       guardInputsHash: judgement?.guardInputsHash ?? 'none',
-      expected: { ...plan.expected, [POOL_GROUP_GUARD_OPTIONS_PATH]: guardOptions },
+      expected: { ...expectedOf(plan), [POOL_GROUP_GUARD_OPTIONS_PATH]: guardOptions },
     })
     const findings = judgement?.findings ?? []
     return {

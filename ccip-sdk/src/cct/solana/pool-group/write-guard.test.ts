@@ -5,9 +5,13 @@ import { Keypair } from '@solana/web3.js'
 
 import '../../../index.ts'
 import { networkInfo } from '../../../networks.ts'
-import { CCTParamsInvalidError } from '../../errors.ts'
+import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
 import { laneFailsClosedFinding } from './lane.ts'
-import { assertDropsConfirmed, poolGroupGuardOptionsOf } from './write-guard.ts'
+import {
+  assertDropsConfirmed,
+  poolGroupGuardOptionsOf,
+  sealPoolGroupSnapshot,
+} from './write-guard.ts'
 
 const SEPOLIA = networkInfo('ethereum-testnet-sepolia').chainSelector
 const MINT = Keypair.generate().publicKey.toBase58()
@@ -99,8 +103,67 @@ describe('A21: dropped trusted remote pools', () => {
 
 describe('laneFailsClosedFinding', () => {
   it('maps the fee cap to TRANSFER_FEE_ABOVE_CAP and the rest to CCVS_NOT_SYNCED', () => {
-    assert.equal(laneFailsClosedFinding('BpsFeeAboveGroupMax: x').check, 'TRANSFER_FEE_ABOVE_CAP')
-    assert.equal(laneFailsClosedFinding('PolicySecurityStale: x').check, 'CCVS_NOT_SYNCED')
-    assert.equal(laneFailsClosedFinding('GroupCcvsNotSynced: x').recordType, 'security')
+    assert.equal(laneFailsClosedFinding('BpsFeeAboveGroupMax').check, 'TRANSFER_FEE_ABOVE_CAP')
+    assert.equal(laneFailsClosedFinding('PolicySecurityStale').check, 'CCVS_NOT_SYNCED')
+    assert.equal(laneFailsClosedFinding('GroupCcvsNotSynced').recordType, 'security')
+  })
+})
+
+describe('sealPoolGroupSnapshot with expectedSnapshot', () => {
+  const seal = (expected: Record<string, unknown>, calldataHash: string, operation = 'op') =>
+    sealPoolGroupSnapshot({
+      operation,
+      slot: 1n,
+      expected,
+      guardOptions: {},
+      guardInputsHash: 'none',
+      calldataHash,
+    })
+  const HASH_A = `0x${'aa'.repeat(32)}`
+  const HASH_B = `0x${'bb'.repeat(32)}`
+
+  it('state moved and other instructions: the move is reported (CCTStateChangedError)', async () => {
+    const snapshot = await seal({ 'group.roles': 'x' }, HASH_A)
+    await assert.rejects(
+      sealPoolGroupSnapshot({
+        operation: 'op',
+        slot: 2n,
+        expected: { 'group.roles': 'y' },
+        guardOptions: {},
+        guardInputsHash: 'none',
+        calldataHash: HASH_B,
+        expectedSnapshot: snapshot,
+      }),
+      (e: unknown) => e instanceof CCTStateChangedError && /group\.roles/.test(e.message),
+    )
+  })
+
+  it('a snapshot of another op is refused as params, not as a state move', async () => {
+    const snapshot = await seal({ 'group.roles': 'x' }, HASH_A, 'otherOp')
+    await assert.rejects(
+      sealPoolGroupSnapshot({
+        operation: 'op',
+        slot: 2n,
+        expected: { 'group.roles': 'y' },
+        guardOptions: {},
+        guardInputsHash: 'none',
+        calldataHash: HASH_B,
+        expectedSnapshot: snapshot,
+      }),
+      (e: unknown) => e instanceof CCTParamsInvalidError && !(e instanceof CCTStateChangedError),
+    )
+  })
+
+  it('the same state and instructions hold', async () => {
+    const snapshot = await seal({ 'group.roles': 'x' }, HASH_A)
+    await sealPoolGroupSnapshot({
+      operation: 'op',
+      slot: 2n,
+      expected: { 'group.roles': 'x' },
+      guardOptions: {},
+      guardInputsHash: 'none',
+      calldataHash: HASH_A,
+      expectedSnapshot: snapshot,
+    })
   })
 })

@@ -3538,9 +3538,11 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * Builds the unsigned `create_group` transaction, with `set_group_roles` and up to about 8
    * `add_group_chain` for `initialRoles` and `initialChains` in the same transaction.
    * @remarks The id defaults to a fresh random key (a known id can be front-run by anyone, since
-   * `create_group` is permissionless). Refused when the PDA already exists. Unset roles default to
-   * `authority`. More chains go into further transactions that land strictly after the first; a
-   * partial landing is completed by re-reading. Signer: anyone (becomes the owner).
+   * `create_group` is permissionless). Refused when someone else owns a group at the id; on a group
+   * `authority` owns (an earlier run landed), the op resumes (`resumed: true`) with the missing
+   * chains and the passed settings and roles that differ. Unset roles default to `authority`. More
+   * chains go into further transactions that land strictly after the first. Signer: anyone (becomes
+   * the owner).
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
    * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
    * fix
@@ -3598,8 +3600,7 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * the op needs (probe result `missing`)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
    * disagree
-   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
-   * executor every written field must be given explicitly instead of merged)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved
    * @example
    * ```ts
    * const { transactions } = await sol.generateUnsignedSetPoolGroupRoles({
@@ -3625,8 +3626,7 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * the op needs (probe result `missing`)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
    * disagree
-   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
-   * executor every written field must be given explicitly instead of merged)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved
    * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
    * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
    * `context.committedHashes`
@@ -3657,8 +3657,7 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * the op needs (probe result `missing`)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
    * disagree
-   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
-   * executor every written field must be given explicitly instead of merged)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved
    * @example
    * ```ts
    * const { transactions } = await sol.generateUnsignedSetPoolGroupSettings({
@@ -3686,8 +3685,7 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * the op needs (probe result `missing`)
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
    * disagree
-   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
-   * executor every written field must be given explicitly instead of merged)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved
    * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
    * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
    * `context.committedHashes`

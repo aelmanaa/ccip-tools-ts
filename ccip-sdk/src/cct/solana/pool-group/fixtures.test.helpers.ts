@@ -148,6 +148,15 @@ export type Tail = {
   driven?: boolean
   memberIndex?: number
   uid?: Buffer
+  /** A pending CCV set the lane copied. */
+  ccvPending?: { outbound: PublicKey[]; inbound: PublicKey[]; epoch: bigint; activatesAt: bigint }
+}
+
+/** A Borsh `Vec<Pubkey>`. */
+const keyVec = (keys: PublicKey[]) => {
+  const len = Buffer.alloc(4)
+  len.writeUInt32LE(keys.length)
+  return Buffer.concat([len, ...keys.map((k) => k.toBuffer())])
 }
 
 export function chainConfigV2Data(tail?: Tail, mint = MINT): Buffer {
@@ -165,7 +174,16 @@ export function chainConfigV2Data(tail?: Tail, mint = MINT): Buffer {
   ext[175] = tail.driven ? 1 : 0
   ext.writeUInt32LE(tail.memberIndex ?? 0, 176)
   const uid = tail.uid ? Buffer.concat([Buffer.from([1]), tail.uid]) : Buffer.from([0])
-  return Buffer.concat([data, ext, uid, Buffer.from([0])])
+  const p = tail.ccvPending
+  const pending = p
+    ? (() => {
+        const tail8 = Buffer.alloc(16)
+        tail8.writeBigUInt64LE(p.epoch, 0)
+        tail8.writeBigInt64LE(p.activatesAt, 8)
+        return Buffer.concat([Buffer.from([1]), keyVec(p.outbound), keyVec(p.inbound), tail8])
+      })()
+    : Buffer.from([0])
+  return Buffer.concat([data, ext, uid, pending])
 }
 
 export type GroupChainOpts = {
@@ -183,6 +201,10 @@ export type GroupChainOpts = {
   maxBpsFee?: number
   /** The record's FEE BPS (finality tier). */
   feeBps?: number
+  /** The record's CONNECTION remote pools; defaults to `[POLICY_POOL]`. */
+  remotePools?: string[]
+  /** A pending CCV set of the record's SECURITY. */
+  pending?: { outbound: PublicKey[]; inbound: PublicKey[]; epoch: bigint; activatesAt: bigint }
 }
 
 export function groupChainData(opts: GroupChainOpts = {}): Buffer {
@@ -211,9 +233,19 @@ export function groupChainData(opts: GroupChainOpts = {}): Buffer {
     Object.assign(policy.rateLimit.outbound, { enabled: true, capacity: bn(100), rate: bn(1) })
     policy.security.current.outbound = opts.ccvs ?? []
     policy.connection.poolDataFormat = opts.format ? { long: {} } : { legacy32: {} }
-    policy.connection.remotePools = [
-      { address: { address: hex(POLICY_POOL) }, allowLegacyPoolData: !!opts.policyPoolLegacy },
-    ]
+    policy.connection.remotePools = (opts.remotePools ?? [POLICY_POOL]).map((pool) => ({
+      address: { address: hex(pool) },
+      allowLegacyPoolData: !!opts.policyPoolLegacy,
+    }))
+    if (opts.pending)
+      Object.assign(policy.security, {
+        pending: {
+          outbound: opts.pending.outbound,
+          inbound: opts.pending.inbound,
+          epoch: bn(opts.pending.epoch),
+          activatesAt: bn(opts.pending.activatesAt),
+        },
+      })
   })
   const fixed = Buffer.alloc(GROUP_CHAIN_POLICY_FIXED_LEN)
   account('GroupChainPolicy', body).copy(fixed, 0)
@@ -223,7 +255,7 @@ export function groupChainData(opts: GroupChainOpts = {}): Buffer {
 export function policyChainData(
   classes: number,
   format: 0 | 1,
-  opts: { group?: PublicKey; securityGeneration?: number } = {},
+  opts: { group?: PublicKey; securityGeneration?: number; feeBps?: number } = {},
 ): Buffer {
   return account(
     'PolicyChainRecord',
@@ -234,8 +266,17 @@ export function policyChainData(
       v.remoteChainSelector = bn(SEPOLIA)
       v.classes = classes
       v.securityGeneration = opts.securityGeneration ?? 0
-      const connection = (v.sections as { connection: Record<string, unknown> }).connection
-      connection.poolDataFormat = format ? { long: {} } : { legacy32: {} }
+      const sections = v.sections as {
+        connection: Record<string, unknown>
+        fee: { tokenTransferFeeConfig: Record<string, unknown> }
+      }
+      sections.connection.poolDataFormat = format ? { long: {} } : { legacy32: {} }
+      if (opts.feeBps !== undefined)
+        Object.assign(sections.fee.tokenTransferFeeConfig, {
+          finalityBpsFee: opts.feeBps,
+          destBytesOverhead: 32,
+          isEnabled: true,
+        })
     }),
   )
 }
@@ -268,6 +309,10 @@ export function chainWith(
     getMultipleAccountsInfo: async (keys: PublicKey[]) => {
       if (opts.calls) opts.calls.multi++
       return keys.map(get)
+    },
+    getMultipleAccountsInfoAndContext: async (keys: PublicKey[]) => {
+      if (opts.calls) opts.calls.multi++
+      return { context: { slot: 100 }, value: keys.map(get) }
     },
     getSignaturesForAddress: async () => [],
     ...(opts.simulate && { simulateTransaction: opts.simulate }),

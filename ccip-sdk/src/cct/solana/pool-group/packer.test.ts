@@ -40,7 +40,7 @@ const PublicKey_default = () => Keypair.generate().publicKey.toBase58()
 const VersionedTransactionOf = (raw: Uint8Array) => VersionedTransactionClass.deserialize(raw)
 const PAYER = Keypair.generate().publicKey
 const silent = { debug() {}, info() {}, warn() {}, error() {} }
-const NO_LANES = { affectedLanes: [], goingLive: [], warnings: [] }
+const NO_LANES = { affectedLanes: [], goingLive: [], findings: [] }
 
 /** An item of `bytes` instruction data touching `accounts` fresh writable accounts. */
 function item(
