@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { ZeroAddress } from 'ethers'
+import { ZeroAddress, getAddress } from 'ethers'
 
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { OWNER, PCM, defaultStack, stackChain } from '../../multi-token-pool/stack.test.helpers.ts'
+import { CheckMultiTokenPoolSnapshot } from './check-multi-token-pool-snapshot.ts'
 import { RenounceMultiTokenPoolDefaultAdmin } from './role-writes.ts'
 
 const SCHEDULE = 1_700_000_000n
@@ -41,5 +42,90 @@ describe('renounceMultiTokenPoolDefaultAdmin', () => {
     const tx = await renounce(scheduled(Number(SCHEDULE) + 1).chain)
     assert.equal(tx.transactions[0]!.to, PCM)
     assert.equal(tx.simulatedFrom, 'sender')
+  })
+
+  describe('a pauser with no unpauser (the next pause would be permanent)', () => {
+    const ALICE = getAddress('0x' + 'a1'.repeat(20))
+    const BOB = getAddress('0x' + 'b0'.repeat(20))
+    /** A matured renounce, with ALICE holding PAUSER_ROLE, and BOB UNPAUSER_ROLE when asked. */
+    function withPauser(unpauser: boolean) {
+      const { state } = scheduled(Number(SCHEDULE) + 1)
+      state.pcm.roles.PAUSER_ROLE = [ALICE]
+      state.roleLogs.push({
+        event: 'RoleGranted',
+        role: 'PAUSER_ROLE',
+        account: ALICE,
+        blockNumber: 200,
+      })
+      if (unpauser) {
+        state.pcm.roles.UNPAUSER_ROLE = [BOB]
+        state.roleLogs.push({
+          event: 'RoleGranted',
+          role: 'UNPAUSER_ROLE',
+          account: BOB,
+          blockNumber: 201,
+        })
+      }
+      return stackChain(state)
+    }
+
+    it('refuses without confirmPermanentPauses, naming the pausers', async () => {
+      await assert.rejects(renounce(withPauser(false).chain), (e: unknown) => {
+        assert.ok(e instanceof CCTParamsInvalidError)
+        assert.equal(e.context.param, 'confirmPermanentPauses')
+        assert.match(String(e.context.reason), new RegExp(`PAUSER_ROLE has holders \\(${ALICE}\\)`))
+        return true
+      })
+    })
+
+    it('builds with it, sealing the holders and the confirmation; the re-check keeps it', async () => {
+      const { chain } = withPauser(false)
+      const tx = await new RenounceMultiTokenPoolDefaultAdmin().generate(chain, {
+        poolConfigManager: PCM,
+        sender: OWNER,
+        confirmPermanentFreeze: true,
+        confirmPermanentPauses: true,
+      })
+      assert.deepEqual(tx.snapshot.expected['roles.holders.PAUSER_ROLE'], [ALICE])
+      assert.deepEqual(tx.snapshot.expected['roles.holders.UNPAUSER_ROLE'], [])
+      assert.equal(tx.snapshot.expected['confirm.permanentPauses'], true)
+      const check = await new CheckMultiTokenPoolSnapshot().query(chain, {
+        snapshot: tx.snapshot,
+        transaction: tx,
+        sender: OWNER,
+      })
+      assert.deepEqual([check.ok, check.changed], [true, []])
+    })
+
+    it('builds when an unpauser holds the role', async () => {
+      const tx = await renounce(withPauser(true).chain)
+      assert.deepEqual(tx.snapshot.expected['roles.holders.UNPAUSER_ROLE'], [BOB])
+    })
+
+    it('fails closed when the holders cannot be read in full (no archive RPC)', async () => {
+      const { state } = scheduled(Number(SCHEDULE) + 1)
+      state.pruned = true
+      await assert.rejects(renounce(stackChain(state).chain), (e: unknown) => {
+        assert.ok(e instanceof CCTParamsInvalidError)
+        assert.equal(e.context.param, 'confirmPermanentPauses')
+        assert.match(String(e.context.reason), /cannot be read in full/)
+        return true
+      })
+    })
+
+    it('refuses a confirmation that is not the literal true, before any RPC', async () => {
+      const { chain, calls } = withPauser(false)
+      await assert.rejects(
+        new RenounceMultiTokenPoolDefaultAdmin().generate(chain, {
+          poolConfigManager: PCM,
+          sender: OWNER,
+          confirmPermanentFreeze: true,
+          confirmPermanentPauses: 'true' as unknown as true,
+        }),
+        (e: unknown) =>
+          e instanceof CCTParamsInvalidError && e.context.param === 'confirmPermanentPauses',
+      )
+      assert.deepEqual(calls, [])
+    })
   })
 })

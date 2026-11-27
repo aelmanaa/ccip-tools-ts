@@ -158,6 +158,8 @@ export type StackState = {
   writes?: Record<string, (args: readonly unknown[], to: string, from: string | undefined) => void>
   /** The timestamp of every block (`getBlock`); defaults to 0. */
   timestamp?: number
+  /** A node without archive state: historical `getCode` fails as pruned. */
+  pruned?: boolean
 }
 
 /** A consistent default stack: one owner everywhere, PCM authorized on every store. */
@@ -382,6 +384,8 @@ export function stackChain(state: StackState = defaultStack()) {
     },
     getCode: async (address: string, block: number) => {
       calls.push(`getCode:${getAddress(address)}:${block}`)
+      if (state.pruned && block < state.latestBlock)
+        throw makeError('missing trie node', 'SERVER_ERROR')
       return block >= state.deploymentBlock ? '0x60806040' : '0x'
     },
     getBlockNumber: async () => {

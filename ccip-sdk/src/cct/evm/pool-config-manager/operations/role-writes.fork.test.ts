@@ -324,10 +324,38 @@ describe('MTTP role, admin and fee writes (Sepolia fork)', { skip, timeout: 600_
         refused('poolAddress', /matures at/),
       )
     await wait()
+    // a pauser with no unpauser: after the renounce the next pause would be permanent (E7 M1)
+    const { holders } = await cct.getMultiTokenPoolRoleHolders(target)
+    for (const account of holders.UNPAUSER_ROLE)
+      await mined(
+        cct.revokeMultiTokenPoolRole({
+          ...target,
+          role: 'UNPAUSER_ROLE',
+          account,
+          wallet: bobWallet,
+        }),
+      )
+    await mined(
+      cct.grantMultiTokenPoolRole({
+        ...target,
+        role: 'PAUSER_ROLE',
+        account: ALICE,
+        wallet: bobWallet,
+      }),
+    )
+    await assert.rejects(
+      cct.generateUnsignedRenounceMultiTokenPoolDefaultAdmin({
+        ...target,
+        sender: BOB,
+        confirmPermanentFreeze: true,
+      }),
+      refused('confirmPermanentPauses', /PAUSER_ROLE has holders/),
+    )
     await mined(
       cct.renounceMultiTokenPoolDefaultAdmin({
         ...target,
         confirmPermanentFreeze: true,
+        confirmPermanentPauses: true,
         sender: BOB,
         wallet: bobWallet,
       }),

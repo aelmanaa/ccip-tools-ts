@@ -196,11 +196,14 @@ export abstract class PoolConfigManagerWriteOperation<
    * @param args - The decoded calldata.
    * @param target - The PCM, or the pool the proposal was built for.
    * @param sender - The account that will execute.
+   * @param sealed - The values the proposal sealed (a confirmation it was built with, e.g.
+   *   `confirm.*`).
    */
   paramsFromCalldata(
     _args: Result,
     _target: PoolConfigManagerTarget,
     _sender: string,
+    _sealed: Record<string, unknown>,
   ): P | undefined {
     return undefined
   }
@@ -244,7 +247,7 @@ export abstract class PoolConfigManagerWriteOperation<
         { cause: cause instanceof Error ? cause : undefined },
       )
     }
-    const raw = this.paramsFromCalldata(args, target, sender)
+    const raw = this.paramsFromCalldata(args, target, sender, snapshot.expected)
     if (raw === undefined) return
     const params = this.prepare({ ...raw, sender })
     const facts = await this.readFacts(chain, params, {
@@ -252,8 +255,11 @@ export abstract class PoolConfigManagerWriteOperation<
       version,
       blockTag: await latestBlock(chain),
     })
+    // the facts only: the guard options and the confirmations travel with the proposal
     const sealed = Object.fromEntries(
-      Object.entries(snapshot.expected).filter(([path]) => !path.startsWith('guard.')),
+      Object.entries(snapshot.expected).filter(
+        ([path]) => !path.startsWith('guard.') && !path.startsWith('confirm.'),
+      ),
     )
     const moved = snapshotChanges(
       { ...snapshot, expected: sealed },

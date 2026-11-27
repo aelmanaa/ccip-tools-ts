@@ -8040,7 +8040,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @remarks
    * Refused unless `confirmPermanentFreeze` is `true`, `sender` is the default admin, and a renounce
    * is scheduled ({@link generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer} with `ZeroAddress`)
-   * and its delay passed. Role management, pauses and unpauses then freeze forever.
+   * and its delay passed. Role management and admin-only actions then freeze forever: the current
+   * holders of each role keep it. A `PAUSER_ROLE` holder with no `UNPAUSER_ROLE` holder (the next
+   * pause would be permanent), or holders that cannot be read in full, need `confirmPermanentPauses`.
    *
    * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
    * write simulated from it; without it the write is not simulated (`simulatedFrom: 'none'`), since
@@ -8082,7 +8084,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @remarks
    * Refused unless `confirmPermanentFreeze` is `true`, `sender` is the default admin, and a renounce
    * is scheduled ({@link generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer} with `ZeroAddress`)
-   * and its delay passed. Role management, pauses and unpauses then freeze forever.
+   * and its delay passed. Role management and admin-only actions then freeze forever: the current
+   * holders of each role keep it. A `PAUSER_ROLE` holder with no `UNPAUSER_ROLE` holder (the next
+   * pause would be permanent), or holders that cannot be read in full, need `confirmPermanentPauses`.
    *
    * Gate: the default admin, after a scheduled renounce matured.
    *

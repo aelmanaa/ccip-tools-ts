@@ -40,6 +40,7 @@ import {
   type PoolConfigManagerWriteParams,
   PoolConfigManagerWriteOperation,
 } from '../write-operation.ts'
+import { GetMultiTokenPoolRoleHolders } from './get-multi-token-pool-role-holders.ts'
 
 /** The roles `grantRole` / `revokeRole` / `renounceRole` take: every role but the default admin. */
 const GRANTABLE_ROLES = POOL_CONFIG_MANAGER_ROLES.filter(
@@ -65,13 +66,20 @@ export type RenounceMultiTokenPoolRoleParams = PoolConfigManagerTarget & {
 /**
  * Parameters of `renounceMultiTokenPoolDefaultAdmin`: the second step of giving up the default
  * admin for good (`beginMultiTokenPoolDefaultAdminTransfer({ newAdmin: ZeroAddress })`, wait for the
- * delay, then this). Role management, pauses and unpauses freeze forever.
+ * delay, then this). Role management and every admin-only action freeze: no role is ever granted,
+ * revoked or transferred again, and the current holders of each role keep it forever.
  */
 export type RenounceMultiTokenPoolDefaultAdminParams = PoolConfigManagerTarget & {
   /** The default admin, who sends it. */
   sender: string
   /** Must be `true`: the result cannot be undone. */
   confirmPermanentFreeze: true
+  /**
+   * Required when `PAUSER_ROLE` has a holder and `UNPAUSER_ROLE` has none, or the holders cannot be
+   * read in full: after the renounce no one can grant `UNPAUSER_ROLE`, so the next pause stops its
+   * lanes for good. Grant `UNPAUSER_ROLE` (or revoke `PAUSER_ROLE`) first instead.
+   */
+  confirmPermanentPauses?: true
 }
 /** Parameters of `beginMultiTokenPoolDefaultAdminTransfer`. `ZeroAddress` schedules a renounce. */
 export type BeginMultiTokenPoolDefaultAdminTransferParams = PoolConfigManagerWriteParams & {
@@ -110,6 +118,39 @@ const adminOf = (facts: PoolConfigManagerFacts) =>
     delay: facts['admin.delay'],
     pendingDelay: facts['admin.pendingDelay'],
   }) as Omit<PoolConfigManagerAdminState, 'delayIncreaseWait'>
+
+/** Where a renounce seals the holders of the pause roles. */
+const PAUSER_HOLDERS = 'roles.holders.PAUSER_ROLE'
+const UNPAUSER_HOLDERS = 'roles.holders.UNPAUSER_ROLE'
+/** Where a renounce seals its `confirmPermanentPauses`. */
+const CONFIRM_PERMANENT_PAUSES = 'confirm.permanentPauses'
+
+/**
+ * Refuses a renounce that leaves a pauser with no unpauser (the PCM's unpauses take
+ * `DEFAULT_ADMIN_ROLE` or `UNPAUSER_ROLE`, so after the renounce the next pause is permanent), or
+ * whose holders cannot be read in full, unless `confirmPermanentPauses`.
+ */
+function assertPausesRecoverable(
+  operation: string,
+  { confirmPermanentPauses }: RenounceMultiTokenPoolDefaultAdminParams,
+  facts: PoolConfigManagerFacts,
+): void {
+  if (confirmPermanentPauses === true) return
+  const pausers = facts[PAUSER_HOLDERS] as string[] | null
+  const unpausers = facts[UNPAUSER_HOLDERS] as string[] | null
+  if (pausers === null || unpausers === null)
+    throw new CCTParamsInvalidError(
+      operation,
+      'confirmPermanentPauses',
+      'is required: the PoolConfigManager role holders cannot be read in full (the RPC serves no historical code to find its deployment block), so a pauser with no unpauser cannot be ruled out. Use an archive RPC, or pass confirmPermanentPauses: true',
+    )
+  if (pausers.length && !unpausers.length)
+    throw new CCTParamsInvalidError(
+      operation,
+      'confirmPermanentPauses',
+      `is required: PAUSER_ROLE has holders (${pausers.join(', ')}) but UNPAUSER_ROLE has none, and after the renounce no one can grant it, so the next pause stops its lanes for good. Grant UNPAUSER_ROLE or revoke PAUSER_ROLE first, or pass confirmPermanentPauses: true`,
+    )
+}
 
 /** The path a role-membership fact is sealed at. */
 const rolePath = (role: PoolConfigManagerRole, account: string) => `roles.${role}.${account}`
@@ -204,7 +245,12 @@ abstract class AdminWriteOperation<
   }
 
   /** A write that takes no argument but the target. */
-  override paramsFromCalldata(_args: Result, target: PoolConfigManagerTarget, sender: string): P {
+  override paramsFromCalldata(
+    _args: Result,
+    target: PoolConfigManagerTarget,
+    sender: string,
+    _sealed: Record<string, unknown>,
+  ): P {
     return { ...target, sender } as P
   }
 }
@@ -343,10 +389,13 @@ export class RenounceMultiTokenPoolRole extends RoleWriteOperation<RenounceMulti
 /**
  * Renounces the default admin for good: refused unless `confirmPermanentFreeze`, `sender` is the
  * default admin, and a renounce (a transfer to `ZeroAddress`) is scheduled and its delay passed.
- * Role management, pauses and unpauses then freeze forever.
+ * Role management and admin-only actions then freeze: the current holders of each role keep it
+ * forever. The holders of `PAUSER_ROLE` and `UNPAUSER_ROLE` are read and sealed: a pauser with no
+ * unpauser (the next pause would be permanent) needs `confirmPermanentPauses`.
  * @throws {@link CCTParamsInvalidError} if a param is invalid, `sender` is missing or
  *   `confirmPermanentFreeze` is not `true` (before any RPC), `sender` is not the default admin, no
- *   renounce is scheduled, or its delay has not passed
+ *   renounce is scheduled, its delay has not passed, or a pauser has no unpauser (or the holders
+ *   cannot be read in full) without `confirmPermanentPauses`
  */
 export class RenounceMultiTokenPoolDefaultAdmin extends AdminWriteOperation<RenounceMultiTokenPoolDefaultAdminParams> {
   readonly name = 'renounceMultiTokenPoolDefaultAdmin'
@@ -361,20 +410,61 @@ export class RenounceMultiTokenPoolDefaultAdmin extends AdminWriteOperation<Reno
       throw new CCTParamsInvalidError(
         this.name,
         'confirmPermanentFreeze',
-        'must be true: renouncing the default admin freezes role management, pauses and unpauses forever, and cannot be undone',
+        'must be true: renouncing the default admin freezes role management and every admin-only action forever (the current holders of each role keep it), and cannot be undone',
+      )
+    if (
+      params.confirmPermanentPauses !== undefined &&
+      (params.confirmPermanentPauses as unknown) !== true
+    )
+      throw new CCTParamsInvalidError(
+        this.name,
+        'confirmPermanentPauses',
+        'must be true when given',
       )
     return params
+  }
+
+  /**
+   * The admin state, and who can pause and unpause once the role set freezes: every holder of
+   * `PAUSER_ROLE` and `UNPAUSER_ROLE` (from the role logs, each confirmed with `hasRole`), or `null`
+   * when the logs cannot be read from the deployment block.
+   */
+  protected override async readFacts(
+    chain: EVMChain,
+    params: RenounceMultiTokenPoolDefaultAdminParams,
+    ctx: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
+  ): Promise<PoolConfigManagerFacts> {
+    const [admin, holders] = await Promise.all([
+      this.adminFacts(chain, ctx),
+      new GetMultiTokenPoolRoleHolders()
+        .query(chain, { poolConfigManager: ctx.address, toBlock: ctx.blockTag })
+        .then((r) => (r.complete ? r.holders : null))
+        .catch((err: unknown) => {
+          // no archive RPC: the deployment block, so a complete scan, cannot be found
+          if (err instanceof CCTParamsInvalidError && err.context.param === 'fromBlock') return null
+          throw err
+        }),
+    ])
+    return {
+      ...admin,
+      [PAUSER_HOLDERS]: holders?.PAUSER_ROLE ?? null,
+      [UNPAUSER_HOLDERS]: holders?.UNPAUSER_ROLE ?? null,
+    }
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
     return ['DEFAULT_ADMIN_ROLE']
   }
 
-  /** The calldata proves the intent, so a re-check confirms the freeze. */
+  /**
+   * The calldata proves the intent, so a re-check confirms the freeze; a permanent-pause
+   * confirmation is the one the proposal sealed.
+   */
   override paramsFromCalldata(
     args: Result,
     target: PoolConfigManagerTarget,
     sender: string,
+    sealed: Record<string, unknown>,
   ): RenounceMultiTokenPoolDefaultAdminParams {
     if (String(args[0]) !== poolConfigManagerRoleId('DEFAULT_ADMIN_ROLE'))
       throw new CCTParamsInvalidError(
@@ -386,6 +476,7 @@ export class RenounceMultiTokenPoolDefaultAdmin extends AdminWriteOperation<Reno
       ...target,
       sender: renouncedBy(this.name, args[1], sender),
       confirmPermanentFreeze: true,
+      ...(sealed[CONFIRM_PERMANENT_PAUSES] === true && { confirmPermanentPauses: true }),
     }
   }
 
@@ -397,6 +488,7 @@ export class RenounceMultiTokenPoolDefaultAdmin extends AdminWriteOperation<Reno
     const admin = adminOf(ctx.facts)
     const block = await chain.provider.getBlock(ctx.blockTag)
     const at = targetParam(params)
+    assertPausesRecoverable(this.name, params, ctx.facts)
     if (admin.pending.schedule === 0n || admin.pending.newAdmin !== ZeroAddress)
       throw new CCTParamsInvalidError(
         this.name,
@@ -417,6 +509,10 @@ export class RenounceMultiTokenPoolDefaultAdmin extends AdminWriteOperation<Reno
         poolConfigManagerRoleId('DEFAULT_ADMIN_ROLE'),
         getAddress(params.sender),
       ]),
+      // sealed, so the proposal is re-checked with the confirmation it was built with
+      ...(params.confirmPermanentPauses === true && {
+        expected: { [CONFIRM_PERMANENT_PAUSES]: true },
+      }),
     }
   }
 }
