@@ -71,7 +71,9 @@ export type StopMultiTokenPoolLanesParams = PoolConfigManagerWriteParams &
  * rate limit policy gets its inline record removed, so the policy applies again; otherwise
  * `rateLimits` is required. A lift without `restore` cannot tell whose stop it lifts (another
  * operator's, or an incident's): planners use `restore`. A lift never touches a direction outside
- * `direction`. Each lane the lift makes live is judged.
+ * `direction`. Each lane the lift makes live is judged. A restore is exact in configuration, not in
+ * tokens: writing a bucket's config refills it to capacity on chain (`RateLimiter`), so a drained
+ * bucket the stop held comes back full.
  */
 export type LiftMultiTokenPoolLaneStopsParams = StopMultiTokenPoolLanesParams &
   MultiTokenPoolWriteGuards & {

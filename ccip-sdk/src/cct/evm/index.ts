@@ -7650,7 +7650,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * use `restore`. It never touches a direction outside `direction`: from `rateLimits` only the
    * lifted direction's buckets are taken, and a lane also stopped in the other direction is refused
    * on the policy path. Each lane the lift makes live is judged, with no attestations (pass
-   * `getChain` for the remote sides).
+   * `getChain` for the remote sides). A restore is exact in configuration, not in tokens: writing a
+   * bucket's config refills it to capacity, so a drained bucket the stop held comes back full.
    *
    * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
    * write simulated from it; without it each store call is simulated from the PoolConfigManager
@@ -7713,7 +7714,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * use `restore`. It never touches a direction outside `direction`: from `rateLimits` only the
    * lifted direction's buckets are taken, and a lane also stopped in the other direction is refused
    * on the policy path. Each lane the lift makes live is judged, with no attestations (pass
-   * `getChain` for the remote sides).
+   * `getChain` for the remote sides). A restore is exact in configuration, not in tokens: writing a
+   * bucket's config refills it to capacity, so a drained bucket the stop held comes back full.
    *
    * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
    *
