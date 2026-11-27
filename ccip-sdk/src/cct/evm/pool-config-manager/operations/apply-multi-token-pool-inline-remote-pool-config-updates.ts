@@ -11,6 +11,7 @@ import { parseRemoteAddress } from '../../../remote-address.ts'
 import { assertUnique, validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
 import type { MultiTokenPoolLaneKey } from '../contracts.ts'
 import { encodeInlineRemotePoolConfig } from '../decode.ts'
+import { inlineRecordOf } from '../projection.ts'
 import type { InlineRemotePoolConfig } from '../records.ts'
 import type { MultiTokenPoolWriteGuards, PoolConfigManagerWriteParams } from '../write-operation.ts'
 import { type RecordWriteContext, InlineRecordWriteOperation } from './record-writes.ts'
@@ -84,9 +85,7 @@ export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends InlineReco
     { state }: RecordWriteContext,
   ): Promise<void> {
     remove.forEach((l, i) => {
-      const record = state.tokens
-        .find((t) => t.tokenAddress.toLowerCase() === l.tokenAddress.toLowerCase())
-        ?.inline.remotePool.find((r) => r.remoteChainSelector === l.remoteChainSelector)
+      const record = inlineRecordOf(state, 'remotePool', l)
       if (record?.poolDataFormat === 'legacy')
         throw new CCTParamsInvalidError(
           this.name,

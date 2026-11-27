@@ -12,6 +12,7 @@ import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import type { CCTParamsInvalidError } from '../../errors.ts'
 import type { MultiTokenPoolRateLimits } from '../../multi-token-pool.ts'
 import type { RateLimitConfig } from '../../rate-limit.ts'
+import { policyStoresOf } from '../multi-token-pool/contracts.ts'
 import { attestedRemoteFacts } from './guard-facts.ts'
 import { laneJudgingOf } from './guard-run.ts'
 import {
@@ -26,6 +27,7 @@ import {
   multiTokenPoolChainLanes,
   multiTokenPoolDroppedPools,
   multiTokenPoolLaneTransitions,
+  multiTokenPoolPcmCheckedLanes,
   multiTokenPoolPcmLaneCheck,
   stopsOutbound,
   validateMultiTokenPoolGuardOptions,
@@ -834,6 +836,36 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       { kind: 'removeInline', type: 'connection', tokenAddress: T1, remoteChainSelector: C1 },
     ])
     assert.deepEqual(multiTokenPoolDroppedPools(multiTokenPoolAffectedLanes(base, closed)), [])
+  })
+
+  it("derives the PCM's checked lanes and its stores once (D47)", () => {
+    const lanes = multiTokenPoolPcmCheckedLanes([
+      {
+        kind: 'setInline',
+        type: 'connection',
+        record: { tokenAddress: T1.toLowerCase(), remoteChainSelector: C1, remoteToken: REMOTE_A },
+      },
+      {
+        kind: 'updateSubsetTokens',
+        policyName: 'p',
+        remoteChainSelector: C1,
+        add: [T1, T2],
+      } as MultiTokenPoolRecordChange,
+      { kind: 'removeInline', type: 'connection', tokenAddress: T2, remoteChainSelector: 1n },
+    ])
+    // each lane once, checksummed; a removal runs no lane check
+    assert.deepEqual(lanes, [
+      { tokenAddress: T1, remoteChainSelector: C1 },
+      { tokenAddress: T2, remoteChainSelector: C1 },
+    ])
+    assert.deepEqual(
+      policyStoresOf({ connectionPolicyStore: 'c', feePolicyStore: 'f', securityPolicyStore: 's' }),
+      [
+        ['ConnectionPolicyStore', 'c'],
+        ['FeePolicyStore', 'f'],
+        ['SecurityPolicyStore', 's'],
+      ],
+    )
   })
 
   it("judges the PoolConfigManager's post-write lane check from the projection", () => {

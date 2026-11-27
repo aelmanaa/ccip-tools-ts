@@ -9,7 +9,7 @@
  * @packageDocumentation
  */
 
-import { type Result, getAddress, keccak256, toBeHex } from 'ethers'
+import { getAddress, keccak256, toBeHex } from 'ethers'
 
 import type { ChainGetter } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
@@ -36,9 +36,10 @@ import {
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
+  policyStoresOf,
   poolConfigManagerContract,
 } from '../multi-token-pool/contracts.ts'
-import { decodeError, simulateEVMTx } from '../simulate.ts'
+import { type SimulateEVMTxResult, decodeError, simulateEVMTx } from '../simulate.ts'
 import { toTokenTransferFeeConfig } from '../token-pool/contracts.ts'
 import { type DecodedMultiTokenPoolWrite, decodeMultiTokenPoolWrite } from './calldata.ts'
 import {
@@ -61,12 +62,14 @@ import {
   multiTokenPoolChainLanes,
   multiTokenPoolDroppedPools,
   multiTokenPoolLaneTransitions,
+  multiTokenPoolPcmCheckedLanes,
   multiTokenPoolPcmLaneCheck,
   requiredMultiTokenPoolGuardFacts,
 } from './guards.ts'
 import { decodeLaneRecordLevels } from './operations/get-multi-token-pool-lane-record-levels.ts'
 import { decodeLaneVerification } from './operations/get-multi-token-pool-lane-verifications.ts'
 import {
+  type MultiTokenPoolRecordChange,
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
   applyMultiTokenPoolRecordChanges,
@@ -306,27 +309,20 @@ export async function runMultiTokenPoolGuards(
       { from: call.from, blockTag: blockNumber },
     )
     if (!sim.success)
-      throw new CCTParamsInvalidError(
-        errorOperation,
+      throw revertRefusal(
+        input,
         sender ? 'sender' : 'data',
         sender
-          ? `the write reverts when ${sender} executes it: ${sim.errorName ?? sim.revertData}`
-          : `the write reverts in the PoolConfigManager's store ${call.to}: ${sim.errorName ?? sim.revertData}`,
-        {
-          context: {
-            ...input.errorContext,
-            simulatedFrom,
-            errorName: sim.errorName,
-            errorArgs: sim.errorArgs,
-            revertData: sim.revertData,
-          },
-        },
+          ? `the write reverts when ${sender} executes it`
+          : `the write reverts in the PoolConfigManager's store ${call.to}`,
+        sim,
+        simulatedFrom,
       )
   }
   // without a sender, the PCM's own post-write lane checks join the bundle after the store calls
   const bundle = sender
     ? writes
-    : [...writes, ...pcmLaneChecks(poolConfigManager, version, data, staticConfig)]
+    : [...writes, ...pcmLaneChecks(poolConfigManager, version, decoded.changes, staticConfig)]
   const projectionVerified = writes.length
     ? await crossCheckWithSimulateV1(chain, input, bundle, afterLanes, blockNumber)
     : false
@@ -628,13 +624,7 @@ function forwardedStoreCalls(
       },
     ]
   const selector = data.slice(0, 10)
-  return (
-    [
-      ['ConnectionPolicyStore', stores.connectionPolicyStore],
-      ['FeePolicyStore', stores.feePolicyStore],
-      ['SecurityPolicyStore', stores.securityPolicyStore],
-    ] as const
-  )
+  return policyStoresOf(stores)
     .filter(([type]) => getMultiTokenPoolInterface(type, version).getFunction(selector) !== null)
     .map(([, to]) => ({ from, to, data }))
 }
@@ -672,38 +662,24 @@ const PAUSE_STORE_CALLS: Record<
 function pcmLaneChecks(
   poolConfigManager: string,
   version: MultiTokenPoolVersion,
-  data: string,
+  changes: readonly MultiTokenPoolRecordChange[],
   stores: Pick<
     PoolConfigManagerStaticConfig,
     'connectionPolicyStore' | 'feePolicyStore' | 'securityPolicyStore'
   >,
 ): WriteCall[] {
-  const tx = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).parseTransaction({
-    data,
-  })
-  const lanes =
-    tx?.name === 'applyInlineConnectionConfigUpdates' || tx?.name === 'applySubsetTokenUpdates'
-      ? (tx.args[1] as Result).map(
-          (r) => resultToObject(r) as { localToken: string; remoteChainSelector: bigint },
-        )
-      : []
   const from = getAddress(poolConfigManager)
-  return lanes.flatMap(({ localToken, remoteChainSelector }) =>
-    (
-      [
-        ['ConnectionPolicyStore', stores.connectionPolicyStore],
-        ['FeePolicyStore', stores.feePolicyStore],
-        ['SecurityPolicyStore', stores.securityPolicyStore],
-      ] as const
-    ).map(([type, to]) => ({
-      from,
-      to,
-      data: getMultiTokenPoolInterface(type, version).encodeFunctionData('checkLaneRecords', [
-        localToken,
-        remoteChainSelector,
-      ]),
-      label: `the PoolConfigManager's post-write lane check of ${getAddress(localToken)} → ${remoteChainSelector} (${type})`,
-    })),
+  return multiTokenPoolPcmCheckedLanes(changes).flatMap(
+    ({ tokenAddress: localToken, remoteChainSelector }) =>
+      policyStoresOf(stores).map(([type, to]) => ({
+        from,
+        to,
+        data: getMultiTokenPoolInterface(type, version).encodeFunctionData('checkLaneRecords', [
+          localToken,
+          remoteChainSelector,
+        ]),
+        label: `the PoolConfigManager's post-write lane check of ${getAddress(localToken)} → ${remoteChainSelector} (${type})`,
+      })),
   )
 }
 
@@ -764,20 +740,12 @@ async function crossCheckWithSimulateV1(
   if (failed >= 0) {
     const call = writes[failed]!
     const revertData = calls[failed]!.returnData
-    const { errorName, errorArgs } = decodeError(revertData)
-    throw new CCTParamsInvalidError(
-      input.errorOperation ?? operation,
+    throw revertRefusal(
+      input,
       'data',
-      `${call.label ?? `the write (its call to ${call.to})`} reverts with the state the write leaves: ${errorName ?? revertData}`,
-      {
-        context: {
-          ...input.errorContext,
-          simulatedFrom: input.sender ? 'sender' : 'pcm',
-          errorName,
-          errorArgs,
-          revertData,
-        },
-      },
+      `${call.label ?? `the write (its call to ${call.to})`} reverts with the state the write leaves`,
+      { revertData, ...decodeError(revertData) },
+      input.sender ? 'sender' : 'pcm',
     )
   }
   // views that did not run are not a confirmation
@@ -864,4 +832,33 @@ const LANE_JUDGING: Readonly<Record<string, 'loosened' | 'none'>> = {
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolChains')]: 'none',
   [multiTokenPoolFunctionOf('applyMultiTokenPoolInlineRateLimitBucketUpdates')]: 'loosened',
   [multiTokenPoolFunctionOf('applyMultiTokenPoolRateLimitPolicyBucketUpdates')]: 'loosened',
+}
+
+/**
+ * The refusal of a write whose simulation reverts, single `eth_call` or `eth_simulateV1` bundle
+ * alike: the decoded revert (`errorName`, `errorArgs`, `revertData`) and who it was simulated from.
+ */
+function revertRefusal(
+  input: Pick<RunMultiTokenPoolGuardsInput, 'operation' | 'errorOperation' | 'errorContext'>,
+  param: string,
+  reason: string,
+  revert: Pick<Extract<SimulateEVMTxResult, { success: false }>, 'errorName' | 'errorArgs'> & {
+    revertData: string
+  },
+  simulatedFrom: MultiTokenPoolSimulatedFrom,
+): CCTParamsInvalidError {
+  return new CCTParamsInvalidError(
+    input.errorOperation ?? input.operation,
+    param,
+    `${reason}: ${revert.errorName ?? revert.revertData}`,
+    {
+      context: {
+        ...input.errorContext,
+        simulatedFrom,
+        errorName: revert.errorName,
+        errorArgs: revert.errorArgs,
+        revertData: revert.revertData,
+      },
+    },
+  )
 }

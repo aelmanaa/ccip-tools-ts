@@ -161,13 +161,13 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
       findings.push(...evaluated.findings)
       // fail closed: a fact that could not be read is an error finding, never a pass
       for (const f of evaluated.factFailures)
-        add(
-          'REMOTE_UNREADABLE',
-          'error',
-          f.scope === 'remote'
-            ? `the remote side could not be checked (${f.reason}): pass getChain for ${key.remoteChainSelector}, or a remoteAttestations entry where the family has no reader`
-            : `a local fact could not be read: ${f.reason}`,
-        )
+        if (f.scope === 'remote')
+          add(
+            'REMOTE_UNREADABLE',
+            'error',
+            `the remote side could not be checked (${f.reason}): pass getChain for ${key.remoteChainSelector}, or a remoteAttestations entry where the family has no reader`,
+          )
+        else add('LANE_UNREADABLE', 'error', `a local fact could not be read: ${f.reason}`)
       const read = facts.remoteLanes.get(guardLaneKey(key))
       remote = laneCheckRemote(evaluated.factFailures, read)
       // a remote burst the local inbound cannot absorb waits here until the bucket refills; the

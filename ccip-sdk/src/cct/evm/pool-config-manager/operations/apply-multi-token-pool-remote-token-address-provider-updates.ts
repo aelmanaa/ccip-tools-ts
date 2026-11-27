@@ -8,9 +8,7 @@
 import { ZeroAddress, getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { laneFamilyOf } from '../../../remote-address.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
@@ -18,7 +16,6 @@ import {
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
-import { readContractTypeOrNull } from '../../query.ts'
 import { assertUnique, validateAddress, validateArray } from '../../validate.ts'
 import { type PolicyName, assertProviderHasCode, encodePolicyName } from '../contracts.ts'
 import { policyKey } from '../projection.ts'
@@ -29,6 +26,7 @@ import {
   type PoolConfigManagerWriteParams,
   PoolConfigManagerWriteOperation,
 } from '../write-operation.ts'
+import { sameAddressProviderConflicts } from './record-writes.ts'
 
 /** A remote token address provider assignment. */
 export type MultiTokenPoolRemoteTokenAddressProviderUpdate = {
@@ -45,9 +43,6 @@ export type ApplyMultiTokenPoolRemoteTokenAddressProviderUpdatesParams =
       /** The updates, at least one; each policy at most once. */
       updates: MultiTokenPoolRemoteTokenAddressProviderUpdate[]
     }
-
-/** The provider that answers the local token's own address (chainlink-ccip c950d9bc). @internal */
-export const SAME_ADDRESS_PROVIDER_TYPE = 'SameAddressRemoteTokenAddressProvider'
 
 /**
  * Sets connection policies' remote token address providers. A provider answers the remote token of
@@ -119,13 +114,9 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
         'deploy the provider first, or pass null to clear it',
         context,
       )
-      const type = await readContractTypeOrNull(chain, provider)
       // the local token's own address is a remote token only where addresses are EVM's
-      const nonEvm = state.policies.connection
-        .filter((r) => policyKey(r.policyName, 'policyName') === word)
-        .map((r) => r.remoteChainSelector)
-        .filter((c) => laneFamilyOf(c) !== ChainFamily.EVM)
-      if (type === SAME_ADDRESS_PROVIDER_TYPE && nonEvm.length)
+      const nonEvm = await sameAddressProviderConflicts(chain, state, word, { provider })
+      if (nonEvm.length)
         throw new CCTParamsInvalidError(
           this.name,
           `${at}.remoteTokenAddressProvider`,

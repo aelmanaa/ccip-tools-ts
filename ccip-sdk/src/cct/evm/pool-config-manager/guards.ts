@@ -55,6 +55,7 @@ import {
   multiTokenPoolSupportedChains,
   policyKey,
   resolveMultiTokenPoolLanes,
+  tokenRecordsOf,
 } from './projection.ts'
 
 // the guard defaults and pool-data sizes are family-neutral: they live in the shared module, re-exported
@@ -659,9 +660,7 @@ function policyBlastRadius(
   type: LaneRecordType,
 ): string {
   if (lane.levels[type] !== 'policy-chain' && lane.levels[type] !== 'policy-default') return ''
-  const token = state.tokens.find(
-    (t) => getAddress(t.tokenAddress) === getAddress(lane.tokenAddress),
-  )
+  const token = tokenRecordsOf(state, lane.tokenAddress)
   const name = token?.policies[type]
   if (!name) return ''
   const word = policyKey(name, 'policyName')
@@ -849,21 +848,7 @@ export function multiTokenPoolPcmLaneCheck(
   after: MultiTokenPoolRecordState,
   changes: readonly MultiTokenPoolRecordChange[],
 ): MultiTokenPoolLaneFinding[] {
-  const keys = new Map<string, MultiTokenPoolLaneKey>()
-  for (const c of changes) {
-    if (c.kind === 'setInline' && c.type === 'connection')
-      keys.set(guardLaneKey(c.record), {
-        tokenAddress: c.record.tokenAddress,
-        remoteChainSelector: c.record.remoteChainSelector,
-      })
-    if (c.kind === 'updateSubsetTokens')
-      for (const t of c.add ?? [])
-        keys.set(guardLaneKey({ tokenAddress: t, remoteChainSelector: c.remoteChainSelector }), {
-          tokenAddress: getAddress(t),
-          remoteChainSelector: c.remoteChainSelector,
-        })
-  }
-  return resolveMultiTokenPoolLanes(after, [...keys.values()]).flatMap((lane) =>
+  return resolveMultiTokenPoolLanes(after, multiTokenPoolPcmCheckedLanes(changes)).flatMap((lane) =>
     PCM_CHECKED_RECORD_TYPES.filter((type) => lane.levels[type] === 'none').map(
       (type): MultiTokenPoolLaneFinding => ({
         check: 'RECORD_MISSING',
@@ -909,4 +894,30 @@ export function loosensRateLimits(
     if (!b.enabled) return false
     return a.capacity > b.capacity || a.rate > b.rate
   })
+}
+
+/**
+ * The lanes the PCM's post-write `_checkLane` runs on (chainlink-ccip c950d9bc
+ * `PoolConfigManager.sol:587,603`, its only callers): each inline connection set, and each token a
+ * subset update adds. The projected check and the `eth_simulateV1` bundle both use it.
+ * @internal
+ */
+export function multiTokenPoolPcmCheckedLanes(
+  changes: readonly MultiTokenPoolRecordChange[],
+): MultiTokenPoolLaneKey[] {
+  const keys = new Map<string, MultiTokenPoolLaneKey>()
+  for (const c of changes) {
+    if (c.kind === 'setInline' && c.type === 'connection')
+      keys.set(guardLaneKey(c.record), {
+        tokenAddress: getAddress(c.record.tokenAddress),
+        remoteChainSelector: c.record.remoteChainSelector,
+      })
+    if (c.kind === 'updateSubsetTokens')
+      for (const t of c.add ?? [])
+        keys.set(guardLaneKey({ tokenAddress: t, remoteChainSelector: c.remoteChainSelector }), {
+          tokenAddress: getAddress(t),
+          remoteChainSelector: c.remoteChainSelector,
+        })
+  }
+  return [...keys.values()]
 }

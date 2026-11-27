@@ -12,7 +12,11 @@ import { encodeAddressToAny } from '../../../../utils.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { parseRemoteAddress } from '../../../remote-address.ts'
 import type { MultiTokenPoolLaneKey } from '../contracts.ts'
-import { applyMultiTokenPoolRecordChanges, resolveMultiTokenPoolLanes } from '../projection.ts'
+import {
+  applyMultiTokenPoolRecordChanges,
+  inlineRecordOf,
+  resolveMultiTokenPoolLanes,
+} from '../projection.ts'
 import { fillProviderAnswers } from '../record-state.ts'
 import type { InlineConnectionConfig } from '../records.ts'
 import type { MultiTokenPoolWriteGuards, PoolConfigManagerWriteParams } from '../write-operation.ts'
@@ -81,12 +85,8 @@ export class ApplyMultiTokenPoolInlineConnectionConfigUpdates extends InlineReco
       remove.map((l) => ({ kind: 'removeInline', type: 'connection', ...l })),
     )
     await fillProviderAnswers(chain, after, remove, blockTag)
-    const inline = (l: MultiTokenPoolLaneKey) =>
-      state.tokens
-        .find((t) => getAddress(t.tokenAddress) === getAddress(l.tokenAddress))
-        ?.inline.connection.find((r) => r.remoteChainSelector === l.remoteChainSelector)
     resolveMultiTokenPoolLanes(after, remove).forEach((lane, i) => {
-      const was = inline(lane)?.remoteToken
+      const was = inlineRecordOf(state, 'connection', lane)?.remoteToken
       const policy = lane.connection.remoteToken
       if (policy !== null && was !== undefined && policy !== was)
         throw new CCTParamsInvalidError(
