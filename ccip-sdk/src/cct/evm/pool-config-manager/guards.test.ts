@@ -688,4 +688,11 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     ])
     assert.deepEqual(withRemote([{ address: RPOOL, allowLegacyPoolData: true }]), [])
   })
+
+  it('refuses a lane that trusts no remote pool as a finding that names the fix, not an unread fact', () => {
+    const r = judge(inlineLane(T1, { pools: [] }))
+    assert.deepEqual(r.errors, ['NO_REMOTE_POOL'])
+    assert.match(r.findings[0]!.reason, /trusts no remote pool[\s\S]*add the remote pool/)
+    assert.deepEqual(r.factFailures, [])
+  })
 })

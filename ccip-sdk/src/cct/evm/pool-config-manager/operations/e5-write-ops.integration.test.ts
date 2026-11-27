@@ -198,8 +198,7 @@ describe(
 
     it('refuses removing a remote pool policy record its lanes still trust', async (t) => {
       if (!deployed) return t.skip('mttp-core not deployed')
-      // the policy lanes then trust no remote pool, so their remote side cannot be located: the
-      // guard fails closed on every such lane
+      // the policy lanes then trust no remote pool: refused, naming the fix
       await assert.rejects(
         cct.generateUnsignedApplyMultiTokenPoolRemotePoolPolicyConfigUpdates({
           ...core,
@@ -208,11 +207,15 @@ describe(
         }),
         (e: unknown) =>
           e instanceof CCTParamsInvalidError &&
-          e.context.param === 'remoteSide' &&
+          e.context.param === 'guards' &&
           e.context.recordType === 'remotePool' &&
-          (e.context.factFailures as { reason: string }[]).every((f) =>
-            /trusts no remote pool/.test(f.reason),
-          ),
+          new Set(
+            (e.context.findings as { check: string; tokenAddress: string }[])
+              .filter((f) => f.check === 'NO_REMOTE_POOL')
+              .map((f) => f.tokenAddress),
+          ).size ===
+            new Set((e.context.findings as { tokenAddress: string }[]).map((f) => f.tokenAddress))
+              .size,
       )
     })
 

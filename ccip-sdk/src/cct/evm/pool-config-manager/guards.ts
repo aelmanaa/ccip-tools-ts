@@ -472,6 +472,17 @@ export function evaluateMultiTokenPoolGuards({
     }
 
     // remote side: the registry's pool, its pool data format, and the reverse mapping
+    // a lane that trusts no remote pool accepts nothing inbound, and its remote side cannot be
+    // located to check: allowed on chain, refused here (the SDK never opens what it cannot check)
+    if (!c.remotePools.length) {
+      add(
+        'NO_REMOTE_POOL',
+        'error',
+        'the lane trusts no remote pool: an empty list is allowed on chain, but the SDK refuses a lane that trusts no remote pool, since nothing inbound is accepted and its remote side cannot be checked; add the remote pool (applyMultiTokenPoolInlineRemotePoolConfigUpdates, or a remote pool policy record)',
+        'remotePool',
+      )
+      continue
+    }
     const remote = facts.remoteLanes.get(guardLaneKey(key))
     if (!remote || remote.status !== 'known') {
       factFailures.push({
