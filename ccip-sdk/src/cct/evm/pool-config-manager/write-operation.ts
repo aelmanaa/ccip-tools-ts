@@ -50,8 +50,9 @@ export type { MultiTokenPoolGuardOptions } from './guards.ts'
 import type { Result, TransactionReceipt } from 'ethers'
 
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
-import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
+import { CCTDataDecodeError, CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
 import { latestBlock, noteMinedBlock } from '../mined-block.ts'
+import { NO_RECORD_CHANGE_FUNCTIONS } from './calldata.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
 /** Common fields of every PoolConfigManager write. */
@@ -345,6 +346,7 @@ export abstract class PoolConfigManagerWriteOperation<
       rateLimitPolicyDecimals: read.rateLimitPolicyDecimals,
       facts,
     })
+    if (!this.changesRecords()) assertRecordFree(this.name, address, version, data)
     const sealed = { ...facts, ...expected }
     const context = this.errorContext(params)
     const result = await runMultiTokenPoolGuards({
@@ -486,4 +488,30 @@ function emptyRecordStateRead(
     policyNames,
     rateLimitPolicyDecimals: new Map(),
   }
+}
+
+/**
+ * The tripwire of the record-free path: a write that skips the record state read must call a
+ * function that changes no record, or it would be judged on an empty state with no lane rules.
+ * @throws {@link CCTDataDecodeError} if it does not (an SDK bug)
+ */
+function assertRecordFree(
+  operation: string,
+  address: string,
+  version: MultiTokenPoolVersion,
+  data: string,
+): void {
+  const fn = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).parseTransaction({
+    data,
+  })?.name
+  if (fn !== undefined && NO_RECORD_CHANGE_FUNCTIONS.has(fn)) return
+  throw new CCTDataDecodeError(address, {
+    recovery:
+      'An SDK bug: this write skips the record state read, but its calldata changes records. Report it; do not send the transaction.',
+    context: {
+      operation,
+      function: fn ?? null,
+      reason: 'a record-free write encodes a record change',
+    },
+  })
 }
