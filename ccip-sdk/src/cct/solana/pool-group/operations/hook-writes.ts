@@ -760,7 +760,7 @@ function parseEngine(
   value: unknown,
 ): ParsedEngine['engine'] {
   if (value === null) return null
-  if (typeof value !== 'object' || value === undefined)
+  if (typeof value !== 'object')
     throw new CCTParamsInvalidError(operation, 'engine', 'must be an engine, or null to remove it')
   const e = (k: keyof PoolGroupPolicyEngine): unknown => Reflect.get(value, k)
   const engineProgram = parsePublicKey(operation, 'engine.program', e('program'))

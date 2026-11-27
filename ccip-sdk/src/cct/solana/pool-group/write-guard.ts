@@ -140,11 +140,16 @@ const openOf = (v: LaneView): ('outbound' | 'inbound')[] => [
  * The lane's effective configuration of one class, as a stable hash: the record section it resolves
  * (decoded), or its own inline fields; `'unread'` when the record cannot be read.
  */
-function classFingerprint(state: PoolGroupLaneState, cls: 'connection' | 'fee'): string {
+function classFingerprint(
+  state: PoolGroupLaneState,
+  cls: 'connection' | 'fee' | 'security',
+): string {
   const sections = laneSectionsFor(state, cls)
   if (isUnread(sections)) return 'unread'
   if (sections) return canonicalHash({ [cls]: sectionValue(sections, cls, state.selector) })
   if (cls === 'fee') return 'inline'
+  // inline SECURITY: the lane's own CCV configuration; it has no hook (S4 H1)
+  if (cls === 'security') return canonicalHash({ inline: effectiveCcvs(state) })
   const { remote } = state.chainConfig.base
   return canonicalHash({
     token: Buffer.from(remote.tokenAddress.address).toString('hex'),
@@ -648,8 +653,10 @@ export async function judgePoolGroupWrite(
       !isUnread(s0) &&
       s1 &&
       !isUnread(s1) &&
-      (classFingerprint(s0, 'connection') !== classFingerprint(s1, 'connection') ||
-        classFingerprint(s0, 'fee') !== classFingerprint(s1, 'fee'))
+      // CONNECTION and FEE (A23), and SECURITY, whose hooks the lane check judges (S4 H1)
+      (['connection', 'fee', 'security'] as const).some(
+        (cls) => classFingerprint(s0, cls) !== classFingerprint(s1, cls),
+      )
     )
       checkedLanes.push({ key, mint, selector, open: openOf(after1), mode: 'changed' })
     // the send lock budget is measured on the state before the write: a write that changes the

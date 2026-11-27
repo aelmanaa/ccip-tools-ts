@@ -153,6 +153,8 @@ const judge = (
     group: GROUP,
     payer: PAYER,
     instructions: [writeOf()],
+    // the lane check on mock chains: clean unless a case injects its own
+    checkLane: checker().checkLane,
     ...opts,
   })
 
@@ -308,7 +310,7 @@ describe('judgePoolGroupWrite', () => {
     )
   })
 
-  it('A23: a SECURITY source change on a live lane is refused unless the CCVs stay or it is confirmed', async () => {
+  it('A23: a SECURITY source change on a live lane is refused unless the CCVs stay or it is confirmed; H1: it runs the lane check', async () => {
     const pending = { outbound: [CCV], inbound: [], epoch: 2n, activatesAt: NOW + 3_600n }
     const before = linked({ sources: [0, 0, 0, 0] }, groupChainData())
     // the write moves SECURITY to the group default, and the lane's CCV copy changes
@@ -340,6 +342,20 @@ describe('judgePoolGroupWrite', () => {
       [V2, chainConfigV2Data({ group: GROUP, slots: [POLICY], sources: [0, 0, 0, 1] })],
     ])
     await judge(chainFor(before, same), { instructions: ix, failsClosedSeverity: 'warning' })
+    // H1: a SECURITY source change on a live lane runs the full lane check (its hooks change)
+    const hooked = checker(['HOOK_CALLER_MISSING'])
+    await assert.rejects(
+      judge(chainFor(before, same), {
+        instructions: ix,
+        failsClosedSeverity: 'warning',
+        ...hooked,
+      }),
+      /HOOK_CALLER_MISSING/,
+    )
+    assert.deepEqual(
+      hooked.calls.map((c) => c.post),
+      [true, false],
+    )
   })
 
   it('A23 (N1): a SECURITY source change that clears threshold CCVs needs a confirmation, base lists equal', async () => {

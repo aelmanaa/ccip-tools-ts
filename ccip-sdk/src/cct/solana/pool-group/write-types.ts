@@ -21,8 +21,8 @@ import type { SolanaDurableNonce } from '../serialize.ts'
 import type {
   PoolGroupConnectionSection,
   PoolGroupLaneKey,
-  PoolGroupPolicyEngine,
   PoolGroupPolicyClass,
+  PoolGroupPolicyEngine,
   PoolGroupProgramRef,
   PoolGroupRateLimitSection,
   PoolGroupRef,
@@ -786,7 +786,10 @@ export type SchedulePoolGroupCCVsParams = PoolGroupWriteParams &
   (
     | {
         /** A wallet executes the transaction. */
-        budget?: SolanaTxBudget & { executor?: 'wallet' }
+        budget?: SolanaTxBudget & {
+          /** The wallet executes. */
+          executor?: 'wallet'
+        }
         /** Unix seconds; defaults to the earliest allowed plus `approvalWindowSeconds`. */
         activatesAt?: bigint
         /** Seconds between building and landing; defaults to 60. */
@@ -794,7 +797,10 @@ export type SchedulePoolGroupCCVsParams = PoolGroupWriteParams &
       }
     | {
         /** A Squads vault executes: the time is checked at execution, so `activatesAt` is required. */
-        budget: SolanaTxBudget & { executor: 'squads-v4' }
+        budget: SolanaTxBudget & {
+          /** A Squads v4 vault executes. */
+          executor: 'squads-v4'
+        }
         /** Unix seconds, at least the group's minimum notice after the proposal executes. */
         activatesAt: bigint
         /** Not with `activatesAt`. */
@@ -802,7 +808,10 @@ export type SchedulePoolGroupCCVsParams = PoolGroupWriteParams &
       }
     | {
         /** A Squads vault executes: the time is checked at execution. */
-        budget: SolanaTxBudget & { executor: 'squads-v4' }
+        budget: SolanaTxBudget & {
+          /** A Squads v4 vault executes. */
+          executor: 'squads-v4'
+        }
         /** Seconds the approvals may take; `activatesAt` is the earliest allowed plus this. */
         approvalWindowSeconds: number
         /** Not with `approvalWindowSeconds`. */
