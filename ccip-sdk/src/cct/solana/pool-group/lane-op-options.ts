@@ -17,8 +17,10 @@ export type PoolGroupLaneOpReport = {
   /** Lanes the write makes live (each passed the lane check). */
   goingLive: PoolGroupLaneKey[]
   /**
-   * Unsigned path: the guard inputs and the instruction the write was judged on; run
-   * `checkPoolGroupSnapshot`'s comparison before a delayed proposal executes.
+   * The judgement as evidence: the slot, the hash of the lane accounts the guard read
+   * (`guardInputsHash`) and of the instruction (`calldataHash`). `checkPoolGroupSnapshot` cannot
+   * re-check it (no re-check is registered for the extended lane ops, so it refuses the snapshot):
+   * a delayed proposal of an extended op has no SDK re-check; rebuild it right before execution.
    */
   snapshot?: MultiTokenPoolSnapshot
 }
