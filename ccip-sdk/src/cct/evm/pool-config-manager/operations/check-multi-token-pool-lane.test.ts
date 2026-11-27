@@ -9,7 +9,7 @@ import { getAddress } from 'ethers'
 
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { POOL, stackChain } from '../../multi-token-pool/stack.test.helpers.ts'
-import { CheckMultiTokenPoolLane } from './check-multi-token-pool-lane.ts'
+import { CheckMultiTokenPoolLane, laneCheckRemote } from './check-multi-token-pool-lane.ts'
 
 const lane = {
   poolAddress: POOL,
@@ -31,5 +31,32 @@ describe('CheckMultiTokenPoolLane (cct/evm pool-config-manager)', () => {
         (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === param,
       )
     assert.deepEqual(calls, [])
+  })
+
+  it("reports a remote registry with no pool as 'missing', even when the waiver leaves ok true", () => {
+    const known = {
+      status: 'known',
+      readsLongData: true,
+      mapsBack: true,
+      remoteTokenHasCode: true,
+    } as const
+    assert.equal(laneCheckRemote([], { ...known, registryPool: null }), 'missing')
+    assert.equal(laneCheckRemote([], { ...known, registryPool: getAddress(POOL) }), 'known')
+    assert.equal(laneCheckRemote([], undefined), 'unknown')
+    // a remote failure wins over the read
+    assert.equal(
+      laneCheckRemote(
+        [
+          { scope: 'local', status: 'unknown' },
+          { scope: 'remote', status: 'missing' },
+        ],
+        {
+          ...known,
+          registryPool: getAddress(POOL),
+        },
+      ),
+      'missing',
+    )
+    assert.equal(laneCheckRemote([{ scope: 'local', status: 'unknown' }], undefined), 'unknown')
   })
 })
