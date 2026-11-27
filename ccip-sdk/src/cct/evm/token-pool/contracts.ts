@@ -75,6 +75,7 @@ import LOCK_RELEASE_TOKEN_POOL_V2_0_0_BYTECODE from '../artifacts/bytecode/V2_0_
 import SILOED_LOCK_RELEASE_TOKEN_POOL_V2_0_0_BYTECODE from '../artifacts/bytecode/V2_0_0/siloed-lock-release-token-pool.ts'
 import type { DeployArtifact } from '../operation.ts'
 import { getTypedContract } from '../query.ts'
+import { validateUint32 } from '../validate.ts'
 
 /**
  * Pool families, grouping types by how CCT ops treat them; the ABI and version allowlist are per
@@ -1807,4 +1808,51 @@ export function resolveEncoderIn<V extends string, F>(
     if (encoder !== undefined) return encoder
   }
   throw new CCTOperationUnsupportedError(op, version)
+}
+
+/**
+ * The destination overhead fields of a token transfer fee config: `uint32` gas, non-zero, and
+ * `uint32` bytes. Shared by `applyTokenTransferFeeConfigUpdates` and the multi-token pool overhead
+ * records.
+ * @throws {@link CCTParamsInvalidError} at `<param>.<field>`
+ * @internal
+ */
+export function validateDestOverheadFields(
+  operation: string,
+  param: string,
+  config: Record<string, unknown>,
+): void {
+  validateUint32(operation, `${param}.destGasOverhead`, config.destGasOverhead)
+  validateUint32(operation, `${param}.destBytesOverhead`, config.destBytesOverhead)
+  if (config.destGasOverhead === 0)
+    throw new CCTParamsInvalidError(
+      operation,
+      `${param}.destGasOverhead`,
+      'must be greater than zero',
+    )
+}
+
+/**
+ * The fee fields of a token transfer fee config: `uint32` USD cents per tier, and transfer fee bps
+ * per tier below 10,000. Shared by `applyTokenTransferFeeConfigUpdates` and the multi-token pool fee
+ * records.
+ * @throws {@link CCTParamsInvalidError} at `<param>.<field>`
+ * @internal
+ */
+export function validateTokenTransferFeeFields(
+  operation: string,
+  param: string,
+  config: Record<string, unknown>,
+): void {
+  for (const field of ['finalityFeeUSDCents', 'fastFinalityFeeUSDCents'])
+    validateUint32(operation, `${param}.${field}`, config[field])
+  for (const field of ['finalityTransferFeeBps', 'fastFinalityTransferFeeBps']) {
+    const value = config[field]
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value >= 10000)
+      throw new CCTParamsInvalidError(
+        operation,
+        `${param}.${field}`,
+        'must be an integer in [0, 9999]',
+      )
+  }
 }

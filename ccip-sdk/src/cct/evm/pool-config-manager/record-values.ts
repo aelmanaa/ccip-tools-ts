@@ -10,16 +10,14 @@
 import { ZeroAddress, getAddress } from 'ethers'
 
 import { CCTParamsInvalidError } from '../../errors.ts'
-import type { MultiTokenPoolRateLimits } from '../../multi-token-pool.ts'
-import { parseRateLimitConfig } from '../token-pool/rate-limit.ts'
+import { type MultiTokenPoolRateLimits, RATE_LIMIT_BUCKETS } from '../../multi-token-pool.ts'
+import { validateCCVList } from '../advanced-pool-hooks/contracts.ts'
 import {
-  assertUnique,
-  parseRecord,
-  validateAddress,
-  validateArray,
-  validateUint16,
-  validateUint32,
-} from '../validate.ts'
+  validateDestOverheadFields,
+  validateTokenTransferFeeFields,
+} from '../token-pool/contracts.ts'
+import { parseRateLimitConfig } from '../token-pool/rate-limit.ts'
+import { parseRecord, validateAddress } from '../validate.ts'
 import type {
   MultiTokenPoolDestOverheadConfig,
   MultiTokenPoolFeeConfig,
@@ -27,8 +25,6 @@ import type {
 } from './records.ts'
 
 /** The four bucket names of a rate limit record. */
-const BUCKETS = ['outbound', 'inbound', 'fastFinalityOutbound', 'fastFinalityInbound'] as const
-
 /**
  * The four buckets of a rate limit record: each enabled with `rate <= capacity`, or disabled with
  * zero amounts (an omitted amount of a disabled bucket is `0n`).
@@ -46,12 +42,12 @@ export function parseMultiTokenPoolRateLimits(
     'rate limits (outbound, inbound, fastFinalityOutbound, fastFinalityInbound)',
   )
   return Object.fromEntries(
-    BUCKETS.map((b) => [b, parseRateLimitConfig(operation, `${at}.${b}`, input[b], null)]),
+    RATE_LIMIT_BUCKETS.map((b) => [
+      b,
+      parseRateLimitConfig(operation, `${at}.${b}`, input[b], null),
+    ]),
   ) as MultiTokenPoolRateLimits
 }
-
-/** The basis points a store accepts: below 100%. */
-const BPS_DIVIDER = 10_000
 
 /**
  * A fee record: `uint32` USD cents per tier, `uint16` token fee bps below 10,000 per tier.
@@ -63,18 +59,13 @@ export function parseMultiTokenPoolFeeConfig(
   value: unknown,
 ): MultiTokenPoolFeeConfig {
   const c = parseRecord(operation, at, value, 'fee config')
-  validateUint32(operation, `${at}.finalityFeeUSDCents`, c.finalityFeeUSDCents)
-  validateUint32(operation, `${at}.fastFinalityFeeUSDCents`, c.fastFinalityFeeUSDCents)
-  for (const f of ['finalityTransferFeeBps', 'fastFinalityTransferFeeBps'] as const) {
-    validateUint16(operation, `${at}.${f}`, c[f])
-    if ((c[f] as number) >= BPS_DIVIDER)
-      throw new CCTParamsInvalidError(
-        operation,
-        `${at}.${f}`,
-        `is ${String(c[f])}: a token fee must be below 10,000 bps (100%)`,
-      )
+  validateTokenTransferFeeFields(operation, at, c)
+  return {
+    finalityFeeUSDCents: c.finalityFeeUSDCents as number,
+    fastFinalityFeeUSDCents: c.fastFinalityFeeUSDCents as number,
+    finalityTransferFeeBps: c.finalityTransferFeeBps as number,
+    fastFinalityTransferFeeBps: c.fastFinalityTransferFeeBps as number,
   }
-  return c as MultiTokenPoolFeeConfig
 }
 
 /** The pool data a v1 release returns: the decimals word (`Pool.CCIP_LOCK_OR_BURN_V1_RET_BYTES`). */
@@ -91,21 +82,17 @@ export function parseMultiTokenPoolDestOverheadConfig(
   value: unknown,
 ): MultiTokenPoolDestOverheadConfig {
   const c = parseRecord(operation, at, value, 'destination overhead config')
-  validateUint32(operation, `${at}.destGasOverhead`, c.destGasOverhead)
-  validateUint32(operation, `${at}.destBytesOverhead`, c.destBytesOverhead)
-  if (c.destGasOverhead === 0)
-    throw new CCTParamsInvalidError(
-      operation,
-      `${at}.destGasOverhead`,
-      'must not be 0: the release needs gas',
-    )
+  validateDestOverheadFields(operation, at, c)
   if ((c.destBytesOverhead as number) < MIN_DEST_BYTES_OVERHEAD)
     throw new CCTParamsInvalidError(
       operation,
       `${at}.destBytesOverhead`,
       `is ${String(c.destBytesOverhead)}: it must be at least ${MIN_DEST_BYTES_OVERHEAD} (the pool data of a release)`,
     )
-  return c as MultiTokenPoolDestOverheadConfig
+  return {
+    destGasOverhead: c.destGasOverhead as number,
+    destBytesOverhead: c.destBytesOverhead as number,
+  }
 }
 
 /**
@@ -119,15 +106,8 @@ export function parseMultiTokenPoolSecurityConfig(
   value: unknown,
 ): MultiTokenPoolSecurityConfig {
   const c = parseRecord(operation, at, value, 'security config')
-  const list = (field: 'outboundCCVs' | 'inboundCCVs') => {
-    validateArray(operation, `${at}.${field}`, c[field])
-    const ccvs = Array.from(c[field] as readonly unknown[], (a, i) => {
-      validateAddress(operation, `${at}.${field}[${i}]`, a)
-      return getAddress(a as string)
-    })
-    assertUnique(operation, `${at}.${field}`, ccvs, (a) => a, 'CCV')
-    return ccvs
-  }
+  const list = (field: 'outboundCCVs' | 'inboundCCVs') =>
+    validateCCVList(operation, `${at}.${field}`, c[field])
   if (c.hook !== null) validateAddress(operation, `${at}.hook`, c.hook)
   const hook = c.hook === null ? null : getAddress(c.hook as string)
   if (hook === ZeroAddress)

@@ -10,9 +10,9 @@
 
 import { getAddress } from 'ethers'
 
+import type { TransferDirection } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { canonicalHash } from '../../../canonical.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   type MultiTokenPoolExpectedSnapshot,
   type MultiTokenPoolRateLimits,
@@ -25,9 +25,9 @@ import {
   type MultiTokenPoolSingleFunctionOperation,
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
-  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
+  tokenRolesGate,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateOneOf } from '../../validate.ts'
 import { type MultiTokenPoolLaneKey, toAbiLaneKey, validateLaneKeys } from '../contracts.ts'
@@ -35,6 +35,7 @@ import { encodeRateLimits } from '../decode.ts'
 import {
   inlineRecordOf,
   laneKey,
+  rateLimitBucketOf,
   resolveMultiTokenPoolLanes,
   tokenRecordsOf,
 } from '../projection.ts'
@@ -50,7 +51,9 @@ import {
 
 /**
  * Parameters of `stopMultiTokenPoolLanes`: the lanes to stop, and the direction. A stop is the
- * emergency action: it is never refused by a lane rule (it only tightens).
+ * emergency action: it is never refused by a lane rule (it only tightens). An inline record holds all
+ * four buckets, so the direction not stopped is pinned to its values at the build until the lift
+ * (policy edits no longer reach the lane): on a policy lane, stop `'both'` in an incident.
  */
 export type StopMultiTokenPoolLanesParams = PoolConfigManagerWriteParams &
   MultiTokenPoolExpectedSnapshot & {
@@ -68,7 +71,9 @@ export type StopMultiTokenPoolLanesParams = PoolConfigManagerWriteParams &
  * rate limit policy gets its inline record removed, so the policy applies again; otherwise
  * `rateLimits` is required. A lift without `restore` cannot tell whose stop it lifts (another
  * operator's, or an incident's): planners use `restore`. A lift never touches a direction outside
- * `direction`. Each lane the lift makes live is judged.
+ * `direction`. Each lane the lift makes live is judged. A restore is exact in configuration, not in
+ * tokens: writing a bucket's config refills it to capacity on chain (`RateLimiter`), so a drained
+ * bucket the stop held comes back full.
  */
 export type LiftMultiTokenPoolLaneStopsParams = StopMultiTokenPoolLanesParams &
   MultiTokenPoolWriteGuards & {
@@ -82,11 +87,15 @@ export type LiftMultiTokenPoolLaneStopsParams = StopMultiTokenPoolLanesParams &
   }
 
 /** The buckets of each direction (a stop holds them; a lift writes only the lifted direction's). */
-const DIRECTION_BUCKETS = {
-  outbound: ['outbound', 'fastFinalityOutbound'],
-  inbound: ['inbound', 'fastFinalityInbound'],
-  both: ['outbound', 'fastFinalityOutbound', 'inbound', 'fastFinalityInbound'],
-} as const satisfies Record<PauseDirection, readonly (keyof MultiTokenPoolRateLimits)[]>
+const bucketsOf = (d: TransferDirection) => [
+  rateLimitBucketOf(d, false),
+  rateLimitBucketOf(d, true),
+]
+const DIRECTION_BUCKETS: Record<PauseDirection, readonly (keyof MultiTokenPoolRateLimits)[]> = {
+  outbound: bucketsOf('outbound'),
+  inbound: bucketsOf('inbound'),
+  both: [...bucketsOf('outbound'), ...bucketsOf('inbound')],
+}
 
 const STOP: RateLimitConfig = { enabled: true, capacity: 0n, rate: 0n }
 
@@ -100,6 +109,8 @@ export function stoppedRateLimits(
   return out
 }
 
+/** The snapshot path the stop seals its PoolConfigManager under (a restore must match it). */
+const STOP_PCM_PATH = 'stop.poolConfigManager'
 /** The snapshot path of a lane's inline rate limit record (absent: `null`). */
 const inlinePath = (l: MultiTokenPoolLaneKey) =>
   `inline.rateLimit.${laneKey(l.tokenAddress, l.remoteChainSelector)}`
@@ -143,7 +154,7 @@ abstract class LaneStopWriteOperation<
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', TOKEN_POLICY_ROLES.rateLimit]
+    return tokenRolesGate('rateLimit')
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -160,13 +171,6 @@ abstract class LaneStopWriteOperation<
       multiTokenPoolFunctionOf(this.name),
       [remove.map(toAbiLaneKey), set.map((s) => encodeRecord(s.lane, s.rateLimits))],
     )
-  }
-
-  /** A refusal at `lanes[i]`, with the record type. */
-  protected refuse(param: string, reason: string): CCTParamsInvalidError {
-    return new CCTParamsInvalidError(this.name, param, reason, {
-      context: { recordType: 'rateLimit' },
-    })
   }
 }
 
@@ -185,7 +189,7 @@ export class StopMultiTokenPoolLanes extends LaneStopWriteOperation<StopMultiTok
   protected async encode(
     _chain: EVMChain,
     { lanes, direction }: StopMultiTokenPoolLanesParams,
-    { version, state }: PoolConfigManagerWriteContext,
+    { address, version, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
     const resolved = resolveMultiTokenPoolLanes(state, lanes)
     const set = lanes.map((lane, i) => {
@@ -207,13 +211,17 @@ export class StopMultiTokenPoolLanes extends LaneStopWriteOperation<StopMultiTok
         )
       return { lane, rateLimits: stoppedRateLimits(rateLimits, direction), before: rateLimits }
     })
-    // the record each stop replaces (absent: `null`) and the buckets it copied: what a lift restores
-    const expected = Object.fromEntries(
-      set.flatMap(({ lane, before }) => [
-        [inlinePath(lane), inlineRecordOf(state, 'rateLimit', lane) ?? null],
-        [resolvedPath(lane), before],
-      ]),
-    )
+    // the record each stop replaces (absent: `null`) and the buckets it copied: what a lift restores;
+    // the PCM binds the snapshot to this pool's records (another pool may name the same token)
+    const expected = {
+      [STOP_PCM_PATH]: getAddress(address),
+      ...Object.fromEntries(
+        set.flatMap(({ lane, before }) => [
+          [inlinePath(lane), inlineRecordOf(state, 'rateLimit', lane) ?? null],
+          [resolvedPath(lane), before],
+        ]),
+      ),
+    }
     return { data: this.calldata(version, [], set), expected }
   }
 }
@@ -268,7 +276,12 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
         `lanes[${i}]`,
         'is not in the restore snapshot: lift only the lanes that stop covered, or give rateLimits',
       )
-    const prior = expected[inlinePath(lane)] as { rateLimits?: unknown } | null
+    const prior = expected[inlinePath(lane)]
+    if (prior !== null && (typeof prior !== 'object' || Array.isArray(prior)))
+      throw this.refuse(
+        `restore.${inlinePath(lane)}`,
+        'must be the inline rate limit record the stop replaced, or null',
+      )
     return {
       prior:
         prior === null
@@ -276,7 +289,7 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
           : parseMultiTokenPoolRateLimits(
               this.name,
               `restore.${inlinePath(lane)}`,
-              prior.rateLimits,
+              (prior as { rateLimits?: unknown }).rateLimits,
             ),
       copied: parseMultiTokenPoolRateLimits(
         this.name,
@@ -286,16 +299,17 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
     }
   }
 
-  // the lift makes its lanes live: no attestations
-  protected override makesLive(): boolean {
-    return true
-  }
-
   protected async encode(
     _chain: EVMChain,
     { lanes, direction, restore, rateLimits }: LiftMultiTokenPoolLaneStopsParams,
-    { version, state }: PoolConfigManagerWriteContext,
+    { address, version, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
+    // a restore is this pool's stop: the same token on another pool has other records
+    if (restore && restore.expected[STOP_PCM_PATH] !== getAddress(address))
+      throw this.refuse(
+        'restore',
+        `is a stop on PoolConfigManager ${String(restore.expected[STOP_PCM_PATH])}, not ${getAddress(address)}: pass this pool's stop snapshot`,
+      )
     const remove: MultiTokenPoolLaneKey[] = []
     const set: { lane: MultiTokenPoolLaneKey; rateLimits: MultiTokenPoolRateLimits }[] = []
     lanes.forEach((lane, i) => {

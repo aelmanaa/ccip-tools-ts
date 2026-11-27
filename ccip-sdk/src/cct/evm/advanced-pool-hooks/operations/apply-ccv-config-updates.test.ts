@@ -188,4 +188,16 @@ describe('ApplyCCVConfigUpdates (cct/evm advanced-pool-hooks)', () => {
       },
     )
   })
+
+  it("names the multi-token pool op when given a multi-token pool's hooks (no threshold CCVs there)", async () => {
+    await assert.rejects(
+      generate(stubChain(OWNER, undefined, 'MultiTokenPoolHooks')),
+      (e: unknown) => {
+        assert.ok(e instanceof CCTContractTypeInvalidError)
+        assert.match(String(e.context.reason), /applyMultiTokenPoolInlineSecurityConfigUpdates/)
+        assert.match(String(e.context.reason), /no threshold CCVs/)
+        return true
+      },
+    )
+  })
 })

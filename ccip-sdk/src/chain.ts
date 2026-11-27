@@ -706,6 +706,19 @@ export type LaneRecordType =
 export type TransferDirection = 'outbound' | 'inbound'
 
 /**
+ * The pool data a lane sends.
+ * - `'legacy'`: `abi.encode(uint256 decimals)`, 32 bytes, which every 2.0 pool accepts.
+ * - `'long'`: `abi.encode(uint256 decimals, bytes sourceToken, bytes additionalData)`, at least
+ *   192 bytes (224 with a 32-byte factory UID). Only a remote EVM multi-token pool, or a Solana
+ *   pool-group lane whose format is `'long'`, reads it; any other remote pool burns on the source and
+ *   never mints. A canonical Solana pool on interface 1 counts as "does not read long data":
+ *   it ignores the data now and strands it after a later move to interface 2.
+ */
+export type PoolDataFormat = 'legacy' | 'long'
+/** Every {@link PoolDataFormat}, for validation. @internal */
+export const POOL_DATA_FORMATS = ['legacy', 'long'] as const satisfies readonly PoolDataFormat[]
+
+/**
  * Whether a token pool lets a transfer of a token on a lane go through now, for one direction.
  *
  * @remarks

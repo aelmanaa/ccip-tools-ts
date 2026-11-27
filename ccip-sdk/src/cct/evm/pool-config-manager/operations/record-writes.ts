@@ -10,7 +10,6 @@ import { getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
-import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { laneFamilyOf } from '../../../remote-address.ts'
@@ -19,9 +18,10 @@ import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
   SAME_ADDRESS_PROVIDER_TYPE,
-  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
+  policyRolesGate,
+  tokenRolesGate,
 } from '../../multi-token-pool/contracts.ts'
 import { readContractTypeOrNull } from '../../query.ts'
 import { assertUnique, validateArray } from '../../validate.ts'
@@ -38,6 +38,7 @@ import {
   inlineRecordOf,
   laneKey,
   policyKey,
+  policyRecordOf,
   recordKey,
   tokenRecordsOf,
 } from '../projection.ts'
@@ -49,17 +50,6 @@ import {
   type PoolConfigManagerWriteParams,
   PoolConfigManagerWriteOperation,
 } from '../write-operation.ts'
-
-/**
- * The policy names of one record type from a `getPolicyNames` result (one list per type, in
- * `LANE_RECORD_TYPES` order), as lower-case words.
- * @internal
- */
-export function policyNamesOf(lists: readonly unknown[], type: LaneRecordType): Set<string> {
-  return new Set(
-    ((lists[LANE_RECORD_TYPES.indexOf(type)] ?? []) as string[]).map((w) => w.toLowerCase()),
-  )
-}
 
 /** The removal and set lists of a policy record write. @internal */
 export type PolicyRecordWrite = {
@@ -119,9 +109,8 @@ export function checkPolicyRecordWrite(
 ): void {
   const records = state.policies[type] as readonly PolicyRecordKey[]
   const key = (k: PolicyRecordKey) => recordKey(k.policyName, k.remoteChainSelector)
-  const stored = new Set(records.map(key))
   recordsToRemove.forEach((k, i) => {
-    if (!stored.has(key(k)))
+    if (!policyRecordOf(state, type, k))
       throw new CCTParamsInvalidError(
         operation,
         `recordsToRemove[${i}]`,
@@ -301,7 +290,7 @@ export abstract class PolicyRecordWriteOperation<
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES[this.recordType]]
+    return policyRolesGate(this.recordType)
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -332,12 +321,10 @@ export abstract class PolicyRecordWriteOperation<
       [remove, policies, set],
     )
     // the values the write replaces: each touched record as stored (absent: `null`)
-    const stored = state.policies[this.recordType] as readonly PolicyRecordKey[]
-    const keyOf = (k: PolicyRecordKey) => recordKey(k.policyName, k.remoteChainSelector)
     const expected = Object.fromEntries(
       [...(params.recordsToRemove ?? []), ...(params.recordsToSet ?? [])].map((k) => [
-        `policies.${this.recordType}.${keyOf(k)}`,
-        stored.find((s) => keyOf(s) === keyOf(k)) ?? null,
+        `policies.${this.recordType}.${recordKey(k.policyName, k.remoteChainSelector)}`,
+        policyRecordOf(state, this.recordType, k) ?? null,
       ]),
     )
     return { data, expected }
@@ -392,7 +379,7 @@ export abstract class InlineRecordWriteOperation<
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', TOKEN_POLICY_ROLES[this.recordType]]
+    return tokenRolesGate(this.recordType)
   }
 
   protected override errorContext(): Record<string, unknown> {

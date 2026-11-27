@@ -30,7 +30,11 @@ import {
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from './contracts.ts'
-import { type MultiTokenPoolSimulatedFrom, runMultiTokenPoolGuards } from './guard-run.ts'
+import {
+  type MultiTokenPoolSimulatedFrom,
+  runMultiTokenPoolGuards,
+  snapshotChanges,
+} from './guard-run.ts'
 import {
   type MultiTokenPoolRecordStateRead,
   readMultiTokenPoolRecordState,
@@ -39,6 +43,8 @@ import {
 export type { MultiTokenPoolSimulatedFrom } from './guard-run.ts'
 export type { MultiTokenPoolGuardOptions } from './guards.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
+import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
+import { latestBlock, noteMinedBlock } from '../mined-block.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
 /** Common fields of every PoolConfigManager write. */
@@ -92,7 +98,10 @@ export type MultiTokenPoolTransactionResult = TransactionResult &
   Pick<
     MultiTokenPoolUnsignedTx,
     'projectionVerified' | 'simulatedFrom' | 'affectedLanes' | 'goingLive' | 'warnings' | 'snapshot'
-  >
+  > & {
+    /** The block the write mined in; every later MTTP read or build on the provider is at or after it. */
+    blockNumber: number
+  }
 
 /**
  * A resolved PCM, the block a write is built at, and the PCM's stored records read once at that
@@ -101,7 +110,7 @@ export type MultiTokenPoolTransactionResult = TransactionResult &
  */
 export type PoolConfigManagerWriteContext = Pick<
   MultiTokenPoolRecordStateRead,
-  'state' | 'staticConfig' | 'policyNames'
+  'state' | 'staticConfig' | 'policyNames' | 'rateLimitPolicyDecimals'
 > & {
   /** The PCM. */
   address: string
@@ -137,14 +146,6 @@ export abstract class PoolConfigManagerWriteOperation<
     params: Parsed,
     ctx: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> | PoolConfigManagerWrite
-
-  /**
-   * Whether the write can make lanes live (an unpause): its guard then never uses attestations.
-   * Defaults to `false`.
-   */
-  protected makesLive(_params: Parsed): boolean {
-    return false
-  }
 
   /** Context every refusal of this op carries (e.g. a merged op's kind). */
   protected errorContext(_params: Parsed): Record<string, unknown> | undefined {
@@ -182,6 +183,15 @@ export abstract class PoolConfigManagerWriteOperation<
     )
   }
 
+  /**
+   * A refusal of this op at `param`, carrying its {@link errorContext} (pass `params` when the op's
+   * context depends on them).
+   */
+  protected refuse(param: string, reason: string, params?: Parsed): CCTParamsInvalidError {
+    const context = this.errorContext(params as Parsed)
+    return new CCTParamsInvalidError(this.name, param, reason, context && { context })
+  }
+
   /** Validates the target, sender and guard options; subclasses validate their own fields after it. */
   protected override prepare(params: P): Parsed {
     validatePoolConfigManagerTarget(this.name, params)
@@ -195,7 +205,7 @@ export abstract class PoolConfigManagerWriteOperation<
     params: Parsed,
   ): Promise<MultiTokenPoolUnsignedTx> {
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
-    const blockTag = await chain.provider.getBlockNumber()
+    const blockTag = await latestBlock(chain)
     if (params.sender !== undefined)
       await this.preflight(chain, params, { address, version, blockTag }, params.sender)
     // the stored records, read once: the op checks and encodes from them, the guard judges on them
@@ -212,6 +222,7 @@ export abstract class PoolConfigManagerWriteOperation<
       state: read.state,
       staticConfig: read.staticConfig,
       policyNames: read.policyNames,
+      rateLimitPolicyDecimals: read.rateLimitPolicyDecimals,
     })
     const context = this.errorContext(params)
     const result = await runMultiTokenPoolGuards({
@@ -226,7 +237,6 @@ export abstract class PoolConfigManagerWriteOperation<
       ...(params.sender !== undefined && { sender: params.sender }),
       ...(expected && { expected }),
       ...(context && { errorContext: context }),
-      ...(this.makesLive(params) && { makesLive: true }),
       ...writeGuardsOf(params),
     })
     return {
@@ -252,14 +262,34 @@ export abstract class PoolConfigManagerWriteOperation<
   ): Promise<MultiTokenPoolTransactionResult> {
     const sender = await this.resolveWalletSender(params.wallet, params.sender)
     const first = await this.generate(chain, { ...params, sender })
-    const unsigned = await this.generate(chain, {
-      ...params,
-      sender,
-      expectedSnapshot: params.expectedSnapshot ?? first.snapshot,
-    })
-    const { response } = await submit(chain, params.wallet, unsigned, this.name)
+    // the rebuild right before sending: with the caller's snapshot it must hold; without one, any
+    // move since the first build (the state-derived calldata included) is a state change
+    const unsigned = await this.generate(
+      chain,
+      params.expectedSnapshot
+        ? { ...params, sender }
+        : { ...params, sender, expectedSnapshot: undefined },
+    )
+    if (!params.expectedSnapshot) {
+      const changed = snapshotChanges(first.snapshot, unsigned.snapshot)
+      if (first.snapshot.calldataHash !== unsigned.snapshot.calldataHash)
+        changed.unshift({
+          path: 'calldataHash',
+          expected: first.snapshot.calldataHash,
+          actual: unsigned.snapshot.calldataHash,
+        })
+      if (changed.length)
+        throw new CCTStateChangedError(
+          this.name,
+          `${changed.map((c) => c.path).join(', ')} moved between the build and the send`,
+          { context: { ...this.errorContext(params as unknown as Parsed), changed } },
+        )
+    }
+    const { response, receipt } = await submit(chain, params.wallet, unsigned, this.name)
+    // the next read or build on this provider never pins before this write (ethers' block cache)
+    noteMinedBlock(chain, receipt.blockNumber)
     const { family: _, transactions: __, ...impact } = unsigned
-    return { hash: response.hash, ...impact }
+    return { hash: response.hash, blockNumber: receipt.blockNumber, ...impact }
   }
 }
 
@@ -315,5 +345,6 @@ function emptyRecordStateRead(
     lanes: [],
     staticConfig,
     policyNames,
+    rateLimitPolicyDecimals: new Map(),
   }
 }

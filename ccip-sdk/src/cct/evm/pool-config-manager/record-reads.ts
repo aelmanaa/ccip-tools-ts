@@ -65,8 +65,9 @@ export const POLICY_RECORD_READERS = {
     const decoded = records.map((raw) => POLICY_RECORD_DECODERS.rateLimit(resultToObject(raw)))
     return {
       tokenCount: Number(tokenCount),
-      // the policy's decimals are fixed by its first record; `0` with no record means unset
-      localDecimals: decoded.length ? Number(decimals) : null,
+      // fixed when the policy is created, and kept after its last record is removed (the store checks
+      // them on every assignment); the query reports `null` only for a policy that does not exist
+      localDecimals: Number(decimals),
       records: decoded,
     }
   },

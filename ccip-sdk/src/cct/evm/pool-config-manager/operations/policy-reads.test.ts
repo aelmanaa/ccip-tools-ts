@@ -57,7 +57,7 @@ describe('policy reads (cct/evm pool-config-manager)', () => {
     })
   })
 
-  it('re-keys rate limits to enabled, and reads no decimals before a first record', async () => {
+  it('re-keys rate limits to enabled; a policy keeps its stored decimals after its records go, a missing one reads null', async () => {
     const state = policyStack()
     const b = (on: boolean) => [on, on ? 100n : 0n, on ? 1n : 0n]
     state.views.getRateLimitPolicy = () => [
@@ -72,12 +72,22 @@ describe('policy reads (cct/evm pool-config-manager)', () => {
     assert.equal(r.localDecimals, 18)
     assert.deepEqual(r.records[0]!.rateLimits.outbound, { enabled: true, capacity: 100n, rate: 1n })
     assert.deepEqual(r.records[0]!.rateLimits.inbound, { enabled: false, capacity: 0n, rate: 0n })
-    state.views.getRateLimitPolicy = () => [0, 0, []]
-    const empty = await new GetMultiTokenPoolRateLimitPolicy().query(stackChain(state).chain, {
+    // every record removed: the policy still exists, and the store still checks its decimals
+    state.views.getRateLimitPolicy = () => [0, 18, []]
+    const emptied = await new GetMultiTokenPoolRateLimitPolicy().query(stackChain(state).chain, {
       poolAddress: POOL,
       policyName: 'v5',
     })
-    assert.equal(empty.localDecimals, null)
+    assert.equal(emptied.localDecimals, 18)
+    // a policy that does not exist (its stored decimals read 0): null
+    state.views.getPolicyNames = () => Array.from({ length: 6 }, () => [])
+    state.views.getRateLimitPolicy = () => [0, 0, []]
+    const missing = await new GetMultiTokenPoolRateLimitPolicy().query(stackChain(state).chain, {
+      poolAddress: POOL,
+      policyName: 'v5',
+    })
+    assert.equal(missing.exists, false)
+    assert.equal(missing.localDecimals, null)
   })
 
   it('decodes fee and security records', async () => {

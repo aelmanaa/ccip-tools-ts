@@ -12,6 +12,7 @@ import type { EVMChain } from '../../../evm/index.ts'
 import { LANE_RECORD_TYPES, isZeroHex } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
+import { latestBlock } from '../mined-block.ts'
 import {
   type MultiTokenPoolVersion,
   connectionPolicyStoreContract,
@@ -24,6 +25,7 @@ import {
   LANE_BATCH_SIZE,
   decodeTokenProfile,
   policyNameOf,
+  policyNamesOf,
   readChainPauseFlags,
   readConfiguredTokens,
   readInBatches,
@@ -63,6 +65,8 @@ export type MultiTokenPoolRecordStateRead = {
   staticConfig: PoolConfigManagerStaticConfig
   /** The policy names of each record type, as lower-case words. */
   policyNames: Record<LaneRecordType, ReadonlySet<string>>
+  /** Each rate limit policy's stored decimals, by lower-case word (the store checks assignments against them). */
+  rateLimitPolicyDecimals: ReadonlyMap<string, number>
 }
 
 /**
@@ -83,7 +87,7 @@ export async function readMultiTokenPoolRecordState(
   version: MultiTokenPoolVersion,
   { tokenAddresses, blockTag, extraChains = [] }: ReadMultiTokenPoolRecordStateOptions = {},
 ): Promise<MultiTokenPoolRecordStateRead> {
-  const blockNumber = blockTag ?? (await chain.provider.getBlockNumber())
+  const blockNumber = blockTag ?? (await latestBlock(chain))
   const at = { blockTag: blockNumber }
   const pcm = poolConfigManagerContract(chain, address, version)
   const [staticConfig, tokens, nameLists] = await Promise.all([
@@ -129,6 +133,7 @@ export async function readMultiTokenPoolRecordState(
     { batchSize: LANE_BATCH_SIZE },
   )
 
+  const rateLimitPolicyDecimals = new Map<string, number>()
   // every policy of every type, with connection subsets and providers
   const policies: MultiTokenPoolPolicyRecords = {
     connection: [],
@@ -165,6 +170,8 @@ export async function readMultiTokenPoolRecordState(
           } else {
             const read = await POLICY_RECORD_READERS[type](pcm, word, at)
             ;(policies[type] as unknown[]).push(...read.records)
+            if ('localDecimals' in read && read.localDecimals !== null)
+              rateLimitPolicyDecimals.set(word.toLowerCase(), read.localDecimals)
           }
         }),
       )
@@ -197,10 +204,8 @@ export async function readMultiTokenPoolRecordState(
     blockNumber,
   )
   const policyNames = {} as Record<LaneRecordType, ReadonlySet<string>>
-  LANE_RECORD_TYPES.forEach((type, t) => {
-    policyNames[type] = new Set((nameLists[t] ?? []).map((w) => String(w).toLowerCase()))
-  })
-  return { state, blockNumber, lanes, staticConfig, policyNames }
+  for (const type of LANE_RECORD_TYPES) policyNames[type] = policyNamesOf(nameLists, type)
+  return { state, blockNumber, lanes, staticConfig, policyNames, rateLimitPolicyDecimals }
 }
 
 /**

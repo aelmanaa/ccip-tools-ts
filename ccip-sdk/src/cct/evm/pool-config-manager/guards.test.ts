@@ -7,18 +7,17 @@ import { describe, it } from 'node:test'
 
 import { ZeroAddress, getAddress } from 'ethers'
 
-import type { LaneRecordType } from '../../../chain.ts'
-import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import type { CCTParamsInvalidError } from '../../errors.ts'
 import {
   type MultiTokenPoolRateLimits,
   effectiveRateLimit,
   isLaneStopped,
+  isStop,
 } from '../../multi-token-pool.ts'
 import type { RateLimitConfig } from '../../rate-limit.ts'
 import { policyStoresOf } from '../multi-token-pool/contracts.ts'
 import { attestedRemoteFacts } from './guard-facts.ts'
-import { laneJudgingOf } from './guard-run.ts'
+import { judgedLanesOf, laneJudgingOf } from './guard-run.ts'
 import {
   type MultiTokenPoolGuardFacts,
   type MultiTokenPoolGuardOptions,
@@ -31,10 +30,12 @@ import {
   multiTokenPoolChainLanes,
   multiTokenPoolDroppedPools,
   multiTokenPoolLaneTransitions,
+  multiTokenPoolMakesLive,
   multiTokenPoolPcmCheckedLanes,
   multiTokenPoolPcmLaneCheck,
   validateMultiTokenPoolGuardOptions,
 } from './guards.ts'
+import { C1, REMOTE_A, RPOOL, empty, inlineLane, on } from './projection.test.helpers.ts'
 import {
   type MultiTokenPoolRecordChange,
   type MultiTokenPoolRecordState,
@@ -49,113 +50,7 @@ const POOL = addr(0x11)
 const OTHER_POOL = addr(0x12)
 const HOOK = addr(0xcc)
 const CCV = addr(0xdd)
-const REMOTE_A = addr(0xe1)
 const REMOTE_B = addr(0xe2)
-const RPOOL = addr(0xf1)
-const C1 = 16015286601757825753n
-
-const empty = (): MultiTokenPoolRecordState => ({
-  isGloballyPaused: false,
-  chainPauses: [],
-  tokens: [],
-  policies: {
-    connection: [],
-    remoteTokenAddressProviders: [],
-    remotePool: [],
-    rateLimit: [],
-    fee: [],
-    destOverhead: [],
-    security: [],
-  },
-  providerAnswers: [],
-})
-const on = (enabled: boolean) =>
-  ({ enabled, capacity: enabled ? 100n : 0n, rate: enabled ? 1n : 0n }) as const
-
-/** Inline records of every type for `token` on C1, overridable per type. */
-function inlineLane(
-  token: string,
-  o: {
-    remoteToken?: string
-    format?: 'legacy' | 'long'
-    pools?: { address: string; allowLegacyPoolData: boolean }[]
-    bytes?: number
-    gas?: number
-    bps?: number
-    ccvs?: string[]
-    hook?: string | null
-    skip?: LaneRecordType[]
-  } = {},
-): MultiTokenPoolRecordChange[] {
-  const key = { tokenAddress: token, remoteChainSelector: C1 }
-  const all: Record<LaneRecordType, MultiTokenPoolRecordChange> = {
-    connection: {
-      kind: 'setInline',
-      type: 'connection',
-      record: { ...key, remoteToken: o.remoteToken ?? REMOTE_A },
-    },
-    remotePool: {
-      kind: 'setInline',
-      type: 'remotePool',
-      record: {
-        ...key,
-        trustPolicyRemotePools: false,
-        poolDataFormat: o.format ?? 'long',
-        remotePools: o.pools ?? [{ address: RPOOL, allowLegacyPoolData: false }],
-      },
-    },
-    rateLimit: {
-      kind: 'setInline',
-      type: 'rateLimit',
-      record: {
-        ...key,
-        rateLimits: {
-          outbound: on(true),
-          inbound: on(true),
-          fastFinalityOutbound: on(false),
-          fastFinalityInbound: on(false),
-        },
-      },
-    },
-    fee: {
-      kind: 'setInline',
-      type: 'fee',
-      record: {
-        ...key,
-        feeConfig: {
-          finalityFeeUSDCents: 1,
-          fastFinalityFeeUSDCents: 2,
-          finalityTransferFeeBps: o.bps ?? 5,
-          fastFinalityTransferFeeBps: o.bps ?? 5,
-        },
-      },
-    },
-    destOverhead: {
-      kind: 'setInline',
-      type: 'destOverhead',
-      record: {
-        ...key,
-        destOverheadConfig: {
-          destGasOverhead: o.gas ?? 350_000,
-          destBytesOverhead: o.bytes ?? 224,
-        },
-      },
-    },
-    security: {
-      kind: 'setInline',
-      type: 'security',
-      record: {
-        ...key,
-        securityConfig: {
-          outboundCCVs: o.ccvs ?? [ZeroAddress],
-          inboundCCVs: o.ccvs ?? [ZeroAddress],
-          hook: o.hook ?? null,
-        },
-      },
-    },
-  }
-  return LANE_RECORD_TYPES.filter((t) => !o.skip?.includes(t)).map((t) => all[t])
-}
 
 const knownRemote = (
   o: Partial<{ readsLongData: boolean; registryPool: string | null; mapsBack: boolean }> = {},
@@ -417,6 +312,137 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     }
   })
 
+  it('R3 B1 repro: enabling the fast-finality bucket of a lane stopped through its default bucket is judged', () => {
+    const stop = { enabled: true, capacity: 0n, rate: 0n } as const
+    const off = { enabled: false } as const
+    const before = {
+      outbound: stop,
+      inbound: on(true),
+      fastFinalityOutbound: off,
+      fastFinalityInbound: off,
+    }
+    const after = {
+      ...before,
+      fastFinalityOutbound: { enabled: true, capacity: 10n ** 24n, rate: 10n ** 22n } as const,
+    }
+    assert.equal(isLaneStopped(before, 'outbound'), true) // the NO_REMOTE_POOL waiver applies before
+    assert.equal(isLaneStopped(after, 'outbound'), false) // FTF sends flow after
+    assert.equal(loosensRateLimits(before, after), true) // so the write is judged
+  })
+
+  it('derives "makes lanes live" from the projection: a lifted stop or an unpause, not an opening (R1 m4, R3 m3)', () => {
+    const stop = { enabled: true, capacity: 0n, rate: 0n } as const
+    const rateLimits = (outbound: RateLimitConfig): MultiTokenPoolRecordChange => ({
+      kind: 'setInline',
+      type: 'rateLimit',
+      record: {
+        tokenAddress: T1,
+        remoteChainSelector: C1,
+        rateLimits: {
+          outbound,
+          inbound: on(true),
+          fastFinalityOutbound: on(false),
+          fastFinalityInbound: on(false),
+        },
+      },
+    })
+    const key = { tokenAddress: T1, remoteChainSelector: C1 }
+    const lanesOf = (before: MultiTokenPoolRecordState, after: MultiTokenPoolRecordState) => {
+      const [b] = resolveMultiTokenPoolLanes(before, [key])
+      const [a] = resolveMultiTokenPoolLanes(after, [key])
+      return [{ before: b!, after: a! }]
+    }
+    const stopped = applyMultiTokenPoolRecordChanges(empty(), [...inlineLane(T1), rateLimits(stop)])
+    // a bucket or record write that lifts the stop makes the lane live: no attestations
+    const lifted = applyMultiTokenPoolRecordChanges(stopped, [rateLimits(on(true))])
+    assert.equal(multiTokenPoolMakesLive(lanesOf(stopped, lifted)), true)
+    // stopping, or a write that keeps it stopped, does not
+    assert.equal(multiTokenPoolMakesLive(lanesOf(lifted, stopped)), false)
+    // opening a new lane does not (its remote side may be attested)
+    const opened = applyMultiTokenPoolRecordChanges(empty(), inlineLane(T1))
+    assert.equal(multiTokenPoolMakesLive(lanesOf(empty(), opened)), false)
+  })
+
+  it('applies each judging scope to the projected lanes (R3 M3: M9, M10, M11, M14, M15)', () => {
+    const stop = { enabled: true, capacity: 0n, rate: 0n } as const
+    const rl = (token: string, outbound: RateLimitConfig): MultiTokenPoolRecordChange => ({
+      kind: 'setInline',
+      type: 'rateLimit',
+      record: {
+        tokenAddress: token,
+        remoteChainSelector: C1,
+        rateLimits: {
+          outbound,
+          inbound: on(true),
+          fastFinalityOutbound: on(false),
+          fastFinalityInbound: on(false),
+        },
+      },
+    })
+    const before = applyMultiTokenPoolRecordChanges(empty(), [
+      ...inlineLane(T1),
+      ...inlineLane(T2, { remoteToken: REMOTE_B }),
+      rl(T2, stop),
+    ])
+    // T1 loosens (more capacity); T2 is clamped further (still stopped)
+    const after = applyMultiTokenPoolRecordChanges(before, [
+      rl(T1, { enabled: true, capacity: 200n, rate: 1n }),
+    ])
+    const keys = [T1, T2].map((t) => ({ tokenAddress: t, remoteChainSelector: C1 }))
+    const b = resolveMultiTokenPoolLanes(before, keys)
+    const a = resolveMultiTokenPoolLanes(after, keys)
+    const lanes = keys.map((_, i) => ({ before: b[i]!, after: a[i]! }))
+    const tokensOf = (l: typeof lanes) => l.map((x) => x.after.tokenAddress)
+    assert.deepEqual(judgedLanesOf('none', lanes), [])
+    assert.deepEqual(tokensOf(judgedLanesOf('loosened', lanes)), [T1])
+    assert.deepEqual(tokensOf(judgedLanesOf('all', lanes)), [T1, T2])
+    // an unpause judges only the lanes going live: lifting T2's stop makes it live, T1 was live
+    const lifted = applyMultiTokenPoolRecordChanges(before, [rl(T2, on(true))])
+    const l2 = resolveMultiTokenPoolLanes(lifted, keys)
+    assert.deepEqual(
+      tokensOf(
+        judgedLanesOf(
+          'goingLive',
+          keys.map((_, i) => ({ before: b[i]!, after: l2[i]! })),
+        ),
+      ),
+      [T2],
+    )
+    // every pause is unjudged; every unpause judges what goes live
+    for (const fn of ['pauseGlobally', 'pauseTokens', 'pauseChains'])
+      assert.equal(laneJudgingOf(fn), 'none')
+  })
+
+  it('enforcing a limit that was not enforced only tightens (M4)', () => {
+    const limits = (outbound: RateLimitConfig): MultiTokenPoolRateLimits => ({
+      outbound,
+      inbound: on(true),
+      fastFinalityOutbound: on(false),
+      fastFinalityInbound: on(false),
+    })
+    // the default outbound bucket goes from no limit to 100/1: every transfer is limited more
+    assert.equal(loosensRateLimits(limits(on(false)), limits(on(true))), false)
+  })
+
+  it('a stop is enabled with no capacity and no rate (M16, M17), and more rate alone loosens (M5)', () => {
+    assert.equal(isStop({ isEnabled: true, capacity: 0n, rate: 0n }), true)
+    assert.equal(isStop({ isEnabled: true, capacity: 0n, rate: 1n }), false)
+    assert.equal(isStop({ isEnabled: false, capacity: 0n, rate: 0n }), false)
+    const limits = (outbound: RateLimitConfig): MultiTokenPoolRateLimits => ({
+      outbound,
+      inbound: on(true),
+      fastFinalityOutbound: on(false),
+      fastFinalityInbound: on(false),
+    })
+    assert.equal(
+      loosensRateLimits(
+        limits({ enabled: true, capacity: 100n, rate: 1n }),
+        limits({ enabled: true, capacity: 100n, rate: 2n }),
+      ),
+      true,
+    )
+  })
+
   it('reports a lifted stop as going live (stops are part of liveness)', () => {
     const stop = { enabled: true, capacity: 0n, rate: 0n } as const
     const rateLimits = (outbound: RateLimitConfig): MultiTokenPoolRecordChange => ({
@@ -472,7 +498,8 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     assert.equal(loosensRateLimits(null, null), false)
     // the scope is read from the calldata's function
     assert.equal(laneJudgingOf('pauseTokens'), 'none')
-    assert.equal(laneJudgingOf('unpauseTokens'), 'all')
+    for (const fn of ['unpauseTokens', 'unpauseChains', 'unpauseGlobally'])
+      assert.equal(laneJudgingOf(fn), 'goingLive')
     assert.equal(laneJudgingOf('applyRateLimitPolicyBucketUpdates'), 'loosened')
     assert.equal(laneJudgingOf('applyInlineRateLimitBucketUpdates'), 'loosened')
     assert.equal(laneJudgingOf('applyInlineRateLimitConfigUpdates'), 'loosened')

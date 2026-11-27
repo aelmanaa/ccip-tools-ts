@@ -21,6 +21,7 @@ import type {
   ChainGetter,
   LaneRecordType,
   LaneStatus,
+  PoolDataFormat,
   RateLimiterState,
   TokenTransferFeeConfig,
   TransferDirection,
@@ -36,18 +37,8 @@ import { encodeRemoteAddress } from './remote-address.ts'
 /** A transfer direction: core {@link TransferDirection}, the one direction type of the SDK. */
 export type MultiTokenPoolDirection = TransferDirection
 
-/**
- * The pool data a lane sends.
- * - `'legacy'`: `abi.encode(uint256 decimals)`, 32 bytes, which every 2.0 pool accepts.
- * - `'long'`: `abi.encode(uint256 decimals, bytes sourceToken, bytes additionalData)`, at least
- *   192 bytes (224 with a 32-byte factory UID). Only a remote EVM multi-token pool, or a Solana
- *   pool-group lane whose format is `'long'`, reads it; any other remote pool burns on the source and
- *   never mints. A canonical Solana pool on interface 1 counts as "does not read long data":
- *   it ignores the data now and strands it after a later move to interface 2.
- */
-export type PoolDataFormat = (typeof POOL_DATA_FORMATS)[number]
-/** Every {@link PoolDataFormat}, for validation. @internal */
-export const POOL_DATA_FORMATS = ['legacy', 'long'] as const
+// owned by core (chain.ts), next to `LaneRecordType`; re-exported for the CCT surfaces
+export { type PoolDataFormat, POOL_DATA_FORMATS } from '../chain.ts'
 
 /** A reference to a shared policy: an EVM policy name, or a Solana policy id. */
 export type MultiTokenPoolPolicyRef =
@@ -103,6 +94,14 @@ export type MultiTokenPoolRateLimits = {
   /** Inbound faster-than-finality bucket. */
   fastFinalityInbound: RateLimitConfig
 }
+
+/** The four buckets of a {@link MultiTokenPoolRateLimits}, in one place. @internal */
+export const RATE_LIMIT_BUCKETS = [
+  'outbound',
+  'inbound',
+  'fastFinalityOutbound',
+  'fastFinalityInbound',
+] as const satisfies readonly (keyof MultiTokenPoolRateLimits)[]
 
 /** The four rate-limit buckets of one lane, as core `RateLimiterState` (`null` = disabled). */
 export type MultiTokenPoolLaneRateLimits = {
@@ -871,7 +870,11 @@ export type MultiTokenPoolLaneKey = {
   remoteChainSelector: bigint
 }
 
-/** Flags a write may turn off on a lane's trusted pools, confirmed in `confirmDropped`. */
+/**
+ * Flags a write may turn off on a lane's trusted pools, confirmed in `confirmDropped` (the type of
+ * `MultiTokenPoolInlineRemotePoolDrop.flags` is derived from it).
+ * @internal
+ */
 export const DROPPABLE_REMOTE_POOL_FLAGS = [
   'trustPolicyRemotePools',
   'allowLegacyPoolData',

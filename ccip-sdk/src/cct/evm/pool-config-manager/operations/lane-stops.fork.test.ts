@@ -17,10 +17,18 @@ import { Instance } from 'prool'
 
 import { reachableRpcEndpoint, rpcEndpoint } from '../../../../../../scripts/test-endpoints.ts'
 import type { ChainGetter } from '../../../../chain.ts'
-import { forkProvider, withForkRetry } from '../../../../evm/fork-retry.test.helpers.ts'
+import {
+  forkProvider,
+  rejectionOf,
+  withForkRetry,
+} from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
+import { canonicalHash } from '../../../canonical.ts'
+import { CCTParamsInvalidError, CCTStateChangedError } from '../../../errors.ts'
+import type { RateLimitConfig } from '../../../rate-limit.ts'
 import { EVMTokenManager } from '../../index.ts'
+import { ApplyMultiTokenPoolInlineRateLimitBucketUpdates } from './apply-multi-token-pool-inline-rate-limit-bucket-updates.ts'
+import { ApplyMultiTokenPoolRateLimitPolicyBucketUpdates } from './apply-multi-token-pool-rate-limit-policy-bucket-updates.ts'
 import { mined as minedOn } from './fork.test.helpers.ts'
 import {
   LiftMultiTokenPoolLaneStops,
@@ -108,6 +116,12 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     )
     return { sources: sources.rateLimit, stopped, rateLimits }
   }
+  /**
+   * Asserts a build is refused as `expected` says. An upstream fork error is retried (it is never a
+   * test failure); only the SDK's own refusal is judged.
+   */
+  const refused = async (build: () => Promise<unknown>, expected: (e: unknown) => boolean) =>
+    assert.ok(expected(await withForkRetry(() => rejectionOf(build(), 'expected a refusal'))))
   const mined = async (write: Promise<{ hash: string }>) =>
     assert.equal(await minedOn(chain.provider as JsonRpcProvider, write), 1)
 
@@ -181,14 +195,15 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     await mined(
       stop.execute(chain, { poolAddress: V5V9_POOL, lanes, direction: 'outbound', wallet }),
     )
-    await assert.rejects(
-      lift.generate(chain, {
-        poolAddress: V5V9_POOL,
-        lanes,
-        direction: 'outbound',
-        sender: V5V9_OPERATOR,
-        getChain,
-      }),
+    await refused(
+      () =>
+        lift.generate(chain, {
+          poolAddress: V5V9_POOL,
+          lanes,
+          direction: 'outbound',
+          sender: V5V9_OPERATOR,
+          getChain,
+        }),
       (e: unknown) =>
         e instanceof CCTParamsInvalidError &&
         (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
@@ -203,8 +218,9 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     const target = { poolAddress: CORE_POOL, lanes, wallet, getChain }
     await mined(stop.execute(chain, { ...target, direction: 'both' }))
     // from chain state, removing the inline record would lift inbound too: refused
-    await assert.rejects(
-      lift.generate(chain, { poolAddress: CORE_POOL, lanes, direction: 'outbound', getChain }),
+    await refused(
+      () =>
+        lift.generate(chain, { poolAddress: CORE_POOL, lanes, direction: 'outbound', getChain }),
       (e: unknown) =>
         e instanceof CCTParamsInvalidError &&
         e.context.param === 'lanes[0]' &&
@@ -231,5 +247,306 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     const after = await laneView(CORE_POOL, POLICY_TOKEN)
     assert.equal(after.sources.kind, 'policy')
     assert.deepEqual(after, before)
+  })
+
+  it('R3 B1 repro: re-enabling fast-finality on a stopped broken lane is judged and refused', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lane = { tokenAddress: V5V9_FUJI_TOKEN, remoteChainSelector: FUJI }
+    const wallet = await signer(V5V9_OPERATOR)
+    const bucket = new ApplyMultiTokenPoolInlineRateLimitBucketUpdates()
+    const ftf = (config: RateLimitConfig) => ({
+      poolAddress: V5V9_POOL,
+      getChain,
+      updates: [{ ...lane, direction: 'outbound' as const, fastFinality: true, config }],
+    })
+    // stop the lane outbound (both outbound buckets 0/0) unless an earlier case did
+    if (!(await laneView(V5V9_POOL, V5V9_FUJI_TOKEN)).stopped.outbound)
+      await mined(
+        stop.execute(chain, {
+          poolAddress: V5V9_POOL,
+          lanes: [lane],
+          direction: 'outbound',
+          wallet,
+        }),
+      )
+    // disabling the FTF bucket only makes FTF traffic use the stopped default bucket: still held
+    await mined(bucket.execute(chain, { ...ftf({ enabled: false }), wallet }))
+    assert.deepEqual((await laneView(V5V9_POOL, V5V9_FUJI_TOKEN)).stopped, {
+      outbound: true,
+      inbound: false,
+    })
+    // enabling it at 1e24 reopens FTF sends toward a chain with no pool: judged, refused
+    await refused(
+      () =>
+        bucket.generate(chain, {
+          ...ftf({ enabled: true, capacity: 10n ** 24n, rate: 10n ** 22n }),
+          sender: V5V9_OPERATOR,
+        }),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
+    )
+  })
+
+  it('binds the copied direction: a pending Safe stop goes stale when the policy moves under it (R1 M3)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: POLICY_TOKEN, remoteChainSelector: FUJI }]
+    // the proposal: an unsigned outbound stop, which copies inbound from the policy as it is now
+    const built = await stop.generate(chain, {
+      poolAddress: CORE_POOL,
+      lanes,
+      direction: 'outbound',
+    })
+    const policy = await withForkRetry(() =>
+      cct.getMultiTokenPoolRateLimitPolicy({ poolAddress: CORE_POOL, policyName: 'core-pol' }),
+    )
+    const inbound = policy.records.find((r) => r.remoteChainSelector === FUJI)!.rateLimits.inbound
+    assert.ok(inbound.enabled)
+    // meanwhile the policy's inbound is clamped (a tightening: never judged)
+    await mined(
+      new ApplyMultiTokenPoolRateLimitPolicyBucketUpdates().execute(chain, {
+        poolAddress: CORE_POOL,
+        wallet: await signer(CORE_CONFIG),
+        updates: [
+          {
+            policyName: 'core-pol',
+            remoteChainSelector: FUJI,
+            direction: 'inbound',
+            fastFinality: false,
+            config: { enabled: true, capacity: inbound.capacity / 2n, rate: inbound.rate / 2n },
+          },
+        ],
+      }),
+    )
+    // executing the stop now would pin inbound back to the old, looser copy: the re-check says stale
+    const check = await withForkRetry(() =>
+      cct.checkMultiTokenPoolSnapshot({
+        snapshot: built.snapshot,
+        transaction: built,
+        sender: CORE_CONFIG,
+        getChain,
+      }),
+    )
+    assert.equal(check.ok, false)
+    assert.ok(check.changed.some((c) => c.path === 'guardInputsHash'))
+  })
+
+  it('an unpause judges only the lanes it makes live (R3 M2: token-paused lanes never block it)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const wallet = await signer(V5V9_OPERATOR)
+    // every registered token, some with lanes to Solana Devnet (which getChain cannot read)
+    const { tokens } = await withForkRetry(() =>
+      cct.getMultiTokenPoolConfiguredTokens({ poolAddress: V5V9_POOL }),
+    )
+    const v5 = { poolAddress: V5V9_POOL, wallet }
+    await mined(cct.pauseMultiTokenPoolTokens({ ...v5, tokenAddresses: tokens, direction: 'both' }))
+    await mined(cct.pauseMultiTokenPoolGlobally(v5))
+    // every lane stays held by its token pause, so no lane goes live: nothing is judged, and a
+    // getChain that serves only Fuji (no Devnet) is enough; before the fix, a Devnet lane that stays
+    // paused refused it
+    const unsigned = await cct.generateUnsignedUnpauseMultiTokenPoolGlobally({
+      poolAddress: V5V9_POOL,
+      sender: V5V9_OPERATOR,
+      getChain,
+    })
+    assert.deepEqual(unsigned.goingLive, [])
+    // lifting a broken lane's own token pause makes it live: judged, refused (0x08f7: its lane is
+    // not stopped, unlike 0x0a75's after the B1 case, which an unpause correctly does not judge)
+    await mined(cct.unpauseMultiTokenPoolGlobally({ ...v5, getChain }))
+    await refused(
+      () =>
+        cct.generateUnsignedUnpauseMultiTokenPoolTokens({
+          poolAddress: V5V9_POOL,
+          sender: V5V9_OPERATOR,
+          tokenAddresses: ['0x08f749F5Ee026753e88920088bE5F54590A8B14f'],
+          direction: 'outbound',
+          getChain,
+        }),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
+    )
+  })
+
+  it('R3 M5 repro: a build right after a signed write sees the write (no sleep)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: INLINE_TOKEN, remoteChainSelector: FUJI }]
+    const wallet = await signer(CORE_CONFIG)
+    const stopped = await cct.stopMultiTokenPoolLanes({
+      poolAddress: CORE_POOL,
+      lanes,
+      direction: 'outbound',
+      wallet,
+    })
+    // immediately: before the fix this read the block before the stop ("not stopped: nothing to lift")
+    const lift = await cct.generateUnsignedLiftMultiTokenPoolLaneStops({
+      poolAddress: CORE_POOL,
+      lanes,
+      direction: 'outbound',
+      getChain,
+      restore: stopped.snapshot,
+    })
+    assert.ok(lift.snapshot.observedAt >= BigInt(stopped.blockNumber))
+    await mined(
+      cct.liftMultiTokenPoolLaneStops({
+        poolAddress: CORE_POOL,
+        lanes,
+        direction: 'outbound',
+        wallet,
+        getChain,
+        restore: stopped.snapshot,
+      }),
+    )
+  })
+
+  it('a state move between the build and the send raises CCTStateChangedError (R1 m1)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: POLICY_TOKEN, remoteChainSelector: FUJI }]
+    const wallet = await signer(CORE_CONFIG)
+    const clamp = async () => {
+      const policy = await withForkRetry(() =>
+        cct.getMultiTokenPoolRateLimitPolicy({ poolAddress: CORE_POOL, policyName: 'core-pol' }),
+      )
+      const inbound = policy.records.find((r) => r.remoteChainSelector === FUJI)!.rateLimits.inbound
+      assert.ok(inbound.enabled)
+      await mined(
+        new ApplyMultiTokenPoolRateLimitPolicyBucketUpdates().execute(chain, {
+          poolAddress: CORE_POOL,
+          wallet,
+          updates: [
+            {
+              policyName: 'core-pol',
+              remoteChainSelector: FUJI,
+              direction: 'inbound',
+              fastFinality: false,
+              config: { enabled: true, capacity: inbound.capacity - 1n, rate: inbound.rate },
+            },
+          ],
+        }),
+      )
+    }
+    // the policy moves right after the first build: the stop copies inbound, so the rebuilt
+    // calldata differs, and the send is refused as a state change, not as a bad param
+    class RacingStop extends StopMultiTokenPoolLanes {
+      #builds = 0
+      override async generate(...args: Parameters<StopMultiTokenPoolLanes['generate']>) {
+        const unsigned = await super.generate(...args)
+        if (this.#builds++ === 0) await clamp()
+        return unsigned
+      }
+    }
+    await refused(
+      () =>
+        new RacingStop().execute(chain, {
+          poolAddress: CORE_POOL,
+          lanes,
+          direction: 'outbound',
+          wallet,
+        }),
+      (e: unknown) =>
+        e instanceof CCTStateChangedError &&
+        (e.context.changed as { path: string }[]).some((c) => c.path === 'calldataHash'),
+    )
+  })
+
+  it("refuses a restore from another pool's stop (R3 m1)", async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: INLINE_TOKEN, remoteChainSelector: FUJI }]
+    const built = await stop.generate(chain, {
+      poolAddress: CORE_POOL,
+      lanes,
+      direction: 'outbound',
+    })
+    // the same lanes, sealed by another PCM (rehashed: the hash guards integrity, not origin)
+    const { hash: _, ...fields } = {
+      ...built.snapshot,
+      expected: { ...built.snapshot.expected, 'stop.poolConfigManager': V5V9_POOL },
+    }
+    const foreign = { ...fields, hash: canonicalHash(fields) }
+    await refused(
+      () =>
+        lift.generate(chain, {
+          poolAddress: CORE_POOL,
+          lanes,
+          direction: 'outbound',
+          restore: foreign,
+        }),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        e.context.param === 'restore' &&
+        /is a stop on PoolConfigManager/.test(e.message),
+    )
+  })
+
+  it('the guard enforces the drop confirmation (A21; kills R3 M36 off the live suite)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const TWO_POOL_TOKEN = '0x84557ba2481E757553F479299f6Df129017320Dc'
+    const [kept, dropped] = [
+      '0xD14C91AD5C5cb41c5E58e75FD09f1EE60aA08F2e',
+      '0x45289275807E88A197391E060589D647e64519D5',
+    ]
+    // a set that keeps one of the two trusted pools drops the other: refused until confirmed
+    await refused(
+      () =>
+        cct.generateUnsignedApplyMultiTokenPoolInlineRemotePoolConfigUpdates({
+          poolAddress: CORE_POOL,
+          getChain,
+          set: [
+            {
+              tokenAddress: TWO_POOL_TOKEN,
+              remoteChainSelector: FUJI,
+              trustPolicyRemotePools: false,
+              poolDataFormat: 'long',
+              remotePools: [{ address: kept, allowLegacyPoolData: false }],
+            },
+          ],
+        }),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        e.context.param === 'confirmDropped' &&
+        JSON.stringify((e.context.dropped as { remotePools: string[] }[])[0]?.remotePools) ===
+          JSON.stringify([dropped]),
+    )
+  })
+
+  it('a pending stop is not made stale by an unrelated edit on the chain (R3 m4)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: POLICY_TOKEN, remoteChainSelector: FUJI }]
+    const built = await stop.generate(chain, {
+      poolAddress: CORE_POOL,
+      lanes,
+      direction: 'outbound',
+    })
+    // another token's fee moves on the same chain
+    const { fee } = await withForkRetry(() =>
+      cct.getMultiTokenPoolInlineConfigs({ poolAddress: CORE_POOL, tokenAddress: INLINE_TOKEN }),
+    )
+    const record = fee!.find((r) => r.remoteChainSelector === FUJI)!
+    await mined(
+      cct.applyMultiTokenPoolInlineFeeConfigUpdates({
+        poolAddress: CORE_POOL,
+        wallet: await signer(CORE_CONFIG),
+        getChain,
+        set: [
+          {
+            ...record,
+            feeConfig: {
+              ...record.feeConfig,
+              finalityFeeUSDCents: record.feeConfig.finalityFeeUSDCents + 1,
+            },
+          },
+        ],
+      }),
+    )
+    const check = await withForkRetry(() =>
+      cct.checkMultiTokenPoolSnapshot({
+        snapshot: built.snapshot,
+        transaction: built,
+        sender: CORE_CONFIG,
+        getChain,
+      }),
+    )
+    assert.deepEqual(check.changed, [])
+    assert.equal(check.ok, true)
   })
 })

@@ -9,6 +9,7 @@ import { getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { CCTDataDecodeError } from '../../../errors.ts'
+import { latestBlock } from '../../mined-block.ts'
 import {
   type MultiTokenPoolVersion,
   poolConfigManagerContract,
@@ -70,7 +71,7 @@ export abstract class LaneBatchQuery<
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
     const pcm = poolConfigManagerContract(chain, address, version)
     // one block for every chunk, so a large read does not mix states
-    const blockTag = params.blockTag ?? (await chain.provider.getBlockNumber())
+    const blockTag = params.blockTag ?? (await latestBlock(chain))
     const lanes = params.lanes.map((l) => ({
       tokenAddress: getAddress(l.tokenAddress),
       remoteChainSelector: l.remoteChainSelector,

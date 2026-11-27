@@ -7,6 +7,7 @@
 import { getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
+import { latestBlock } from '../../mined-block.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_ROLES,
@@ -59,7 +60,7 @@ export class GetMultiTokenPoolRoles extends EVMQuery<
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
     const pcm = poolConfigManagerContract(chain, address, version)
     // every account at one block, so the answers are consistent
-    const blockTag = await chain.provider.getBlockNumber()
+    const blockTag = await latestBlock(chain)
     return Promise.all(
       params.accounts.map(async (raw) => ({
         account: getAddress(raw),

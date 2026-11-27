@@ -15,9 +15,8 @@ import {
   type PoolConfigManagerRole,
   MULTI_TOKEN_POOL_OPERATIONS,
   POOL_CONFIG_MANAGER_TYPE,
-  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
-  poolConfigManagerContract,
+  tokenRolesGate,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateAddress, validateArray, validateOneOf } from '../../validate.ts'
 import { type PolicyName, encodePolicyName } from '../contracts.ts'
@@ -89,7 +88,7 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
   protected gate({
     recordType,
   }: ApplyMultiTokenPoolTokenPolicyUpdatesParams): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', TOKEN_POLICY_ROLES[recordType]]
+    return tokenRolesGate(recordType)
   }
 
   /** Every refusal names the record type. */
@@ -102,7 +101,7 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
   protected async encode(
     chain: EVMChain,
     { recordType, assignments }: ApplyMultiTokenPoolTokenPolicyUpdatesParams,
-    { address, version, blockTag, state, policyNames }: PoolConfigManagerWriteContext,
+    { version, state, policyNames, rateLimitPolicyDecimals }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
     const iface = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version)
     const fn =
@@ -116,7 +115,6 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
           : encodePolicyName(this.name, `assignments[${i}].policyName`, a.policyName),
       ]),
     ])
-    const pcm = poolConfigManagerContract(chain, address, version)
     const names = policyNames[recordType]
     const context = { recordType }
     const current = await Promise.all(
@@ -145,12 +143,13 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
             )
           if (recordType === 'rateLimit') {
             // a policy's rate limits are raw amounts in token units: its decimals must be the token's
-            const [, decimals] = await pcm.getRateLimitPolicy(word, { blockTag })
-            if (Number(decimals) !== profile.localDecimals)
+            // the stored decimals, from the build's one state read
+            const decimals = rateLimitPolicyDecimals.get(word)
+            if (decimals !== undefined && decimals !== profile.localDecimals)
               throw new CCTParamsInvalidError(
                 this.name,
                 `${at}.policyName`,
-                `rate limit policy ${a.policyName} has ${Number(decimals)} decimals, but ${token} has ${profile.localDecimals} (InvalidRateLimitPolicyDecimals): use a policy made for ${profile.localDecimals}-decimal tokens`,
+                `rate limit policy ${a.policyName} has ${decimals} decimals, but ${token} has ${profile.localDecimals} (InvalidRateLimitPolicyDecimals): use a policy made for ${profile.localDecimals}-decimal tokens`,
                 { context },
               )
           }

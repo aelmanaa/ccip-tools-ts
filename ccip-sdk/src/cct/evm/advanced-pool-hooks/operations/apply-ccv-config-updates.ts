@@ -15,14 +15,12 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
-
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { redirectMultiTokenPool } from '../../multi-token-pool/pool-reads.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
-import { parseRecord, validateAddress, validateArray, validateUint64 } from '../../validate.ts'
+import { parseRecord, validateArray, validateUint64 } from '../../validate.ts'
 import {
   type AdvancedPoolHooksTarget,
   type CCVConfigUpdate,
@@ -30,6 +28,7 @@ import {
   assertAdvancedPoolHooksOwner,
   resolveAdvancedPoolHooksTarget,
   validateAdvancedPoolHooksTarget,
+  validateCCVList,
 } from '../contracts.ts'
 
 /** Parameters for {@link ApplyCCVConfigUpdates}. */
@@ -43,23 +42,6 @@ export type ApplyCCVConfigUpdatesParams = AdvancedPoolHooksTarget & {
    * the signing wallet.
    */
   sender?: string
-}
-
-function validateCCVList(operation: string, param: string, value: unknown): string[] {
-  validateArray(operation, param, value)
-  const seen = new Set<string>()
-  return value.map((address, i) => {
-    validateAddress(operation, `${param}[${i}]`, address)
-    const normalized = getAddress(address)
-    if (seen.has(normalized))
-      throw new CCTParamsInvalidError(
-        operation,
-        `${param}[${i}]`,
-        'must not duplicate an earlier CCV',
-      )
-    seen.add(normalized)
-    return normalized
-  })
 }
 
 function validateCCVConfig(operation: string, param: string, value: unknown): void {
@@ -137,7 +119,8 @@ export class ApplyCCVConfigUpdates extends EVMOperation<ApplyCCVConfigUpdatesPar
         redirectMultiTokenPool(
           err,
           'applyMultiTokenPoolInlineSecurityConfigUpdates',
-          'set: [{ tokenAddress, remoteChainSelector, securityConfig: { outboundCCVs, inboundCCVs, hook } }] per lane, since a multi-token pool keeps its CCVs in the PoolConfigManager, not in AdvancedPoolHooks; for a policy every token shares, applyMultiTokenPoolSecurityPolicyConfigUpdates',
+          "set: [{ tokenAddress, remoteChainSelector, securityConfig: { outboundCCVs, inboundCCVs, hook } }] per lane, since a multi-token pool keeps its CCVs in the PoolConfigManager, not in AdvancedPoolHooks. It has no threshold CCVs: thresholdOutboundCCVs and thresholdInboundCCVs have no counterpart. A set replaces the lane's whole record, the hook included (hook: null removes one). For a policy every token shares, applyMultiTokenPoolSecurityPolicyConfigUpdates",
+          { alsoHooks: true },
         ),
     )
     if (sender !== undefined) await assertAdvancedPoolHooksOwner(this.name, chain, hooks, sender)

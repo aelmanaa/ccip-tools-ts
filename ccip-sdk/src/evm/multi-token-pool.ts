@@ -11,7 +11,7 @@
 
 import { ZeroAddress, getAddress } from 'ethers'
 
-import type { LaneRecordType, LaneStatus, TransferDirection } from '../chain.ts'
+import type { LaneRecordType, LaneStatus, PoolDataFormat, TransferDirection } from '../chain.ts'
 import { type FinalityAllowed, decodeFinalityAllowed } from '../extra-args.ts'
 
 /**
@@ -129,7 +129,7 @@ export type DecodedLaneConnection = LanePauseFlags & {
   /** Any pause in the inbound direction. */
   isInboundPaused: boolean
   /** `'legacy'` when the lane sends 32-byte pool data (`useLegacyPoolDataOnSend`). */
-  poolDataFormat: 'legacy' | 'long'
+  poolDataFormat: PoolDataFormat
   /** The remote token, or `null` when empty or all zero. */
   remoteToken: string | null
   /** Trusted remote pools; empty or all-zero entries are dropped. */
