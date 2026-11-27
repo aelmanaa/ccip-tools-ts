@@ -56,8 +56,9 @@ describe('readSolanaRemoteLaneFacts on Devnet pool groups', { skip, timeout: 120
     assert.equal(facts.status, 'known', 'reason' in facts ? facts.reason : '')
     assert.equal(facts.registryPool, stateOf(LINKED_MINT))
     assert.equal(facts.poolProgram, PROGRAM.toBase58())
-    // no `router` given: Devnet's Router from the table
-    assert.equal(facts.routerVerified, true)
+    assert.equal(facts.router, 'Ccip842gzYHhvdDkSyi2YVCoAWPbYJoApMFzSxQroE9C')
+    // the 2.0 OffRamp trims EVM source pools to 20 bytes
+    assert.equal(facts.sourcePoolAddressLength, 20)
     assert.equal(facts.laneKind, 'linked')
     // the lane's own format is legacy; the group's chain record sends the long format
     assert.equal(facts.poolDataFormat, 'long')
