@@ -716,7 +716,7 @@ export async function checkSolanaMultiTokenPoolLane(
         const length = await readSourcePoolAddressLength(chain, router, lane.remoteChainSelector)
         if (length === null || length < 20 || length > 32)
           add(
-            'REMOTE_UNREADABLE',
+            'LANE_UNREADABLE',
             'error',
             `the Solana OffRamp's address length for ${lane.remoteChainSelector} could not be read (${String(length)}), so the stored remote pool bytes cannot be judged`,
             'remotePool',
