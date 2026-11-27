@@ -116,8 +116,10 @@ describe('MTTP lane view and lane check (Sepolia, read-only)', { skip, timeout: 
     const r = await cct.checkMultiTokenPoolLane({ ...V5V9_SOLANA, getChain: withSolana })
     assert.equal(r.remote, 'known')
     assert.equal(r.ok, true, JSON.stringify(r.findings.map((f) => f.reason)))
-    // a policy governs the Solana lane's RATE_LIMIT, unread until S1b: said, never passed silently
-    assert.ok(r.findings.some((f) => f.check === 'REMOTE_UNREADABLE' && f.severity === 'warning'))
+    // the policy RATE_LIMIT's outbound bucket is read, so the inbound limit is compared; and the lane
+    // back stores the token as the 32-byte word and the pool as the 20-byte address the OffRamp hands it
+    assert.ok(!r.findings.some((f) => f.check === 'REMOTE_UNREADABLE'))
+    assert.ok(!r.findings.some((f) => f.check === 'REMOTE_LANE_MISMATCH'))
   })
 
   it('quotes a transfer with the token fee the Router leaves out, rounded down as the pool does', async (t) => {

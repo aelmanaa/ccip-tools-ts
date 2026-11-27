@@ -5,7 +5,7 @@
  * @packageDocumentation
  */
 
-import { dataLength, getAddress } from 'ethers'
+import { dataLength, getAddress, hexlify, zeroPadValue } from 'ethers'
 
 import type { Chain, ChainGetter } from '../../../chain.ts'
 import { CCIPTokenPoolChainConfigNotFoundError } from '../../../errors/index.ts'
@@ -81,7 +81,11 @@ export async function readMultiTokenPoolGuardFacts(
   input: ReadMultiTokenPoolGuardFactsInput,
 ): Promise<MultiTokenPoolGuardFacts> {
   const { chain, requests, blockTag } = input
-  const [hookCallers, servingPools, additionalPoolDataBytes] = await Promise.all([
+  const [
+    hookCallers,
+    servingPools,
+    { lengths: additionalPoolDataBytes, bytes: additionalPoolData },
+  ] = await Promise.all([
     readHookCallers(chain, requests.hooks, blockTag),
     readServingPools(input),
     readProviderDataLengths(input),
@@ -103,7 +107,14 @@ export async function readMultiTokenPoolGuardFacts(
       ),
     ),
   ])
-  return { remoteLanes, remotePools, hookCallers, servingPools, additionalPoolDataBytes }
+  return {
+    remoteLanes,
+    remotePools,
+    hookCallers,
+    servingPools,
+    additionalPoolDataBytes,
+    additionalPoolData,
+  }
 }
 
 async function readHookCallers(chain: EVMChain, hooks: readonly string[], blockTag: number) {
@@ -147,10 +158,14 @@ async function readProviderDataLengths({
   version,
   blockTag,
   requests,
-}: ReadMultiTokenPoolGuardFactsInput): Promise<Map<string, number>> {
+}: ReadMultiTokenPoolGuardFactsInput): Promise<{
+  lengths: Map<string, number>
+  bytes: Map<string, string>
+}> {
   const lengths = new Map<string, number>()
+  const bytes = new Map<string, string>()
   const tokens = [...new Set(requests.providerLanes.map((l) => getAddress(l.tokenAddress)))]
-  if (!tokens.length) return lengths
+  if (!tokens.length) return { lengths, bytes }
   const pcm = poolConfigManagerContract(chain, poolConfigManager, version)
   const configs = await pcm.getTokenConfigBatch(tokens, { blockTag })
   const providers = new Map(
@@ -173,9 +188,10 @@ async function readProviderDataLengths({
         { blockTag },
       )
       lengths.set(guardLaneKey(lane), dataLength(data))
+      bytes.set(guardLaneKey(lane), hexlify(data))
     }),
   )
-  return lengths
+  return { lengths, bytes }
 }
 
 /**
@@ -339,6 +355,14 @@ async function readRemotePool(
 /**
  * The remote side of a lane to Solana, from the pool-groups reader (loaded on first use, so EVM-only
  * callers never load the Solana stack), mapped to the facts the rules read.
+ *
+ * The pool compares stored bytes exactly. The v2 OnRamp sends the source token and pool as
+ * `abi.encode(address)`, 32 bytes (chainlink-ccip c950d9bc `OnRamp.sol:776`, `MessageV1Codec.sol:115`).
+ * The Solana OffRamp passes the token on as sent, so the lane back stores it as those 32 bytes; it
+ * trims the pool to the source chain's `legacy_address_length` (20 for EVM) before the pool sees it
+ * (chainlink-ccip-solana 7558722 `ccip-offramp/.../token_transfer.rs:301`, `normalized_address`),
+ * so the lane back stores the pool as the native 20 bytes. Either form wrong refuses every transfer,
+ * though both are equal once checksummed.
  */
 async function readSolanaRemoteLane(
   input: ReadMultiTokenPoolGuardFactsInput,
@@ -357,20 +381,38 @@ async function readSolanaRemoteLane(
   })
   if (facts.status !== 'known') return facts
   const { back } = facts
-  // a back lane enforces the token its ChainConfig names, toward a pool this chain serves from
-  const pointsBack =
-    !!back &&
-    getAddress(back.remoteToken) === getAddress(lane.tokenAddress) &&
-    back.remotePools.some((p) => servingPools.includes(getAddress(p)))
+  const legacy = lane.connection.poolDataFormat === 'legacy'
+  const abiWord = (address: string) => zeroPadValue(getAddress(address), 32).toLowerCase()
+  const native = (address: string) => getAddress(address).toLowerCase()
+  let mapsBackReason: string | undefined
+  if (!back)
+    mapsBackReason = `the remote pool ${facts.registryPool} has no lane back toward this chain: inbound transfers revert there`
+  else if (back.remoteTokenRaw.toLowerCase() !== abiWord(lane.tokenAddress))
+    mapsBackReason = `the remote lane back stores the token as ${back.remoteTokenRaw}, but this chain sends ${abiWord(lane.tokenAddress)} (abi.encode of ${getAddress(lane.tokenAddress)}): the program compares the bytes, so every transfer reverts (SourceTokenMismatch); store the 32-byte form`
+  else {
+    const serving = back.remotePools.filter((p) => servingPools.includes(getAddress(p.address)))
+    const exact = serving.filter((p) => p.raw.toLowerCase() === native(p.address))
+    if (!serving.length)
+      mapsBackReason = `the remote lane back trusts none of the pools serving this token here (${servingPools.join(', ')}): inbound transfers revert there`
+    else if (!exact.length)
+      mapsBackReason = `the remote lane back stores the serving pool as ${serving.map((p) => p.raw).join(', ')}, but the OffRamp hands the pool the native 20-byte address (it trims the 32-byte form this chain sends): the pool compares the bytes, so every transfer reverts; store the 20-byte form`
+    else if (legacy && !exact.some((p) => p.allowLegacyPoolData))
+      mapsBackReason =
+        'the lane sends legacy pool data, but the remote lane back accepts legacy data from none of the serving pools (a long or UID lane, or a policy pool without allow_legacy_pool_data): every transfer reverts there'
+  }
   return {
     status: 'known',
     readsLongData: facts.readsLongData,
     registryPool: facts.registryPool,
-    mapsBack: lane.connection.poolDataFormat === 'legacy' ? pointsBack : true,
+    mapsBack: mapsBackReason === undefined,
+    ...(mapsBackReason !== undefined && { mapsBackReason }),
+    ...(back?.failsClosed !== undefined && { failsClosed: back.failsClosed }),
+    ...(back?.admitted !== undefined && { admitted: back.admitted }),
+    ...(facts.uid !== undefined && { uid: facts.uid }),
     ...(input.readRemoteRateLimits &&
       back &&
       (back.outboundRateLimiterState !== undefined
         ? { remoteOutbound: back.outboundRateLimiterState, remoteDecimals: back.remoteDecimals }
-        : { remoteOutboundUnknownReason: back.outboundUnknownReason ?? 'not returned' })),
+        : { remoteOutboundUnknownReason: 'the remote reader returned no outbound bucket' })),
   }
 }

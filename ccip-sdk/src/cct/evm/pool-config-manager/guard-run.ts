@@ -354,6 +354,7 @@ function hashGuardInputs(
       hookCallers: sorted(facts.hookCallers),
       servingPools: [...facts.servingPools].sort(),
       additionalPoolDataBytes: sorted(facts.additionalPoolDataBytes),
+      additionalPoolData: sorted(facts.additionalPoolData ?? new Map()),
     },
   })
 }

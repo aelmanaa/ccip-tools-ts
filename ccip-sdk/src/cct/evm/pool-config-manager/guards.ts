@@ -71,6 +71,17 @@ export type MultiTokenPoolRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   registryPool: string | null
   /** Whether that pool's lane back points at this token and trusts a local serving pool. */
   mapsBack: boolean
+  /** Why `mapsBack` is `false`, when the reader can say (e.g. the stored bytes differ). */
+  mapsBackReason?: string
+  /**
+   * Set when every transfer on the remote lane reverts although it is not paused (Solana: a stale
+   * SECURITY record or an unsynced CCV copy): the lane is not live.
+   */
+  failsClosed?: string
+  /** The remote lane's UID (`0x` hex), which every inbound long transfer must carry; `null`: none. */
+  uid?: string | null
+  /** A group-driven remote lane: whether its chain record admits the member now. */
+  admitted?: boolean
   /** Whether the remote token has code on the remote chain (read when the registry names no pool). */
   remoteTokenHasCode?: boolean
   /** The remote pool's outbound bucket toward this chain (read for the lane check), `null` when disabled. */
@@ -101,6 +112,8 @@ export type MultiTokenPoolGuardFacts = {
   servingPools: readonly string[]
   /** Bytes of additional pool data the token's provider adds, per lane key, for lanes with one. */
   additionalPoolDataBytes: ReadonlyMap<string, number>
+  /** The additional pool data itself (`0x` hex), per lane key, for lanes with a provider. */
+  additionalPoolData?: ReadonlyMap<string, string>
 }
 
 /** The facts to read for a set of projected lanes. @internal */
@@ -467,13 +480,43 @@ export function evaluateMultiTokenPoolGuards({
         `the lane sends long pool data but remote pool ${remote.registryPool} reads only legacy data: the destination release reverts and the burned tokens are stuck`,
         'remotePool',
       )
-    if (c.poolDataFormat === 'legacy' && !remote.mapsBack)
+    // the EVM reader judges the reverse mapping only on legacy lanes (`true` on long ones); a reader
+    // that compares the stored bytes judges both, and says why
+    if (!remote.mapsBack)
       add(
         'REMOTE_LANE_MISMATCH',
         'error',
-        'the lane sends legacy pool data (no source token), but the remote lane back does not point at this token and a serving pool: the destination cannot tell which token was sent',
+        remote.mapsBackReason ??
+          'the lane sends legacy pool data (no source token), but the remote lane back does not point at this token and a serving pool: the destination cannot tell which token was sent',
         'connection',
       )
+    // the lane has a connection here: live outbound unless paused
+    const liveOutbound = !c.isOutboundPaused
+    if (remote.failsClosed !== undefined)
+      add(
+        'REMOTE_LANE_MISMATCH',
+        // a send into a lane that reverts is stuck; a write that leaves the lane paused may proceed
+        liveOutbound ? 'error' : 'warning',
+        `the remote lane reverts every transfer in both directions: ${remote.failsClosed}`,
+        'security',
+      )
+    if (remote.admitted === false)
+      add(
+        'LANE_NOT_ADMITTED',
+        'warning',
+        "the remote group's chain record does not admit this member now, so the remote lane is paused: transfers wait until it is admitted",
+        'connection',
+      )
+    if (remote.uid != null && c.poolDataFormat === 'long') {
+      const data = facts.additionalPoolData?.get(guardLaneKey(key))
+      if (data === undefined || data.toLowerCase() !== remote.uid.toLowerCase())
+        add(
+          'UID_MISMATCH',
+          'error',
+          `the remote lane requires UID ${remote.uid} as the additional pool data of every inbound transfer, but this lane sends ${data ?? 'none'}: the destination refuses it (InvalidAdditionalPoolData); give the token the provider that answers this UID`,
+          'connection',
+        )
+    }
   }
   return { findings: sortFindings(findings), factFailures }
 }

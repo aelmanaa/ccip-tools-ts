@@ -541,4 +541,59 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       goingLive: [],
     })
   })
+
+  it('reads the remote facts a byte-exact reader reports (Solana): mapping, fail-closed, UID, admission', () => {
+    const lane = guardLaneKey({ tokenAddress: T1, remoteChainSelector: C1 })
+    const withRemote = (
+      extra: Partial<MultiTokenPoolRemoteLaneFacts>,
+      over: Partial<MultiTokenPoolGuardFacts> = {},
+    ) =>
+      goodFacts({
+        remoteLanes: new Map([
+          [lane, { ...knownRemote(), ...extra } as MultiTokenPoolRemoteLaneFacts],
+        ]),
+        ...over,
+      })
+    // a long lane whose remote stores the 20-byte form: refused, with the reader's reason
+    const short = judge(inlineLane(T1), {
+      facts: withRemote({ mapsBack: false, mapsBackReason: 'stores 20 bytes' }),
+    })
+    assert.deepEqual(short.errors, ['REMOTE_LANE_MISMATCH'])
+    assert.equal(short.findings[0]?.reason, 'stores 20 bytes')
+    // a remote lane that reverts every transfer: refused while live outbound, reported once paused
+    const closed = withRemote({ failsClosed: 'stale SECURITY record' })
+    assert.deepEqual(judge(inlineLane(T1), { facts: closed }).errors, ['REMOTE_LANE_MISMATCH'])
+    const paused: MultiTokenPoolRecordChange = {
+      kind: 'setTokenPause',
+      tokenAddress: T1,
+      outbound: true,
+    }
+    const pausedRun = judge([...inlineLane(T1), paused], { facts: closed })
+    assert.deepEqual(pausedRun.errors, [])
+    assert.ok(
+      pausedRun.findings.some(
+        (f) => f.check === 'REMOTE_LANE_MISMATCH' && f.severity === 'warning',
+      ),
+    )
+    // a UID lane needs that UID as the provider data
+    const UID = '0x' + 'ab'.repeat(32)
+    assert.deepEqual(judge(inlineLane(T1), { facts: withRemote({ uid: UID }) }).errors, [
+      'UID_MISMATCH',
+    ])
+    assert.deepEqual(
+      judge(inlineLane(T1), {
+        facts: withRemote(
+          { uid: UID },
+          { additionalPoolData: new Map([[lane, UID.toUpperCase().replace('0X', '0x')]]) },
+        ),
+      }).errors,
+      [],
+    )
+    // a driven lane not admitted: a warning, transfers wait
+    const waiting = judge(inlineLane(T1), { facts: withRemote({ admitted: false }) })
+    assert.deepEqual(waiting.errors, [])
+    assert.ok(
+      waiting.findings.some((f) => f.check === 'LANE_NOT_ADMITTED' && f.severity === 'warning'),
+    )
+  })
 })
