@@ -70,12 +70,15 @@ describe('GetMultiTokenPoolProvider (cct/evm multi-token-pool-providers)', () =>
     )
   })
 
-  it('propagates a UID read failure that is not TokenNotFromFactory', async () => {
+  it('propagates a UID read failure that is not TokenNotFromFactory, for a token with a uid()', async () => {
     const state = providerStack('FactoryTokenWithUIDPoolDataProvider')
     state.views.getTokenFactory = () => [OTHER]
     state.views.getAdditionalPoolData = () => {
       throw new Error('a bare revert, with no data')
     }
+    // the token answers uid(), so the bare revert is not "no UID"
+    state.others[TOKEN] = 'FactoryToken 1.0.0'
+    state.views.uid = () => ['0x' + '11'.repeat(32)]
     await assert.rejects(
       new GetMultiTokenPoolProvider().query(stackChain(state).chain, {
         provider: PROVIDER,
@@ -83,5 +86,18 @@ describe('GetMultiTokenPoolProvider (cct/evm multi-token-pool-providers)', () =>
       }),
       (e: unknown) => (e as { code?: string }).code === 'CALL_EXCEPTION',
     )
+  })
+
+  it('reads a token with no uid() as having no UID (the provider reverts with no data)', async () => {
+    const state = providerStack('FactoryTokenWithUIDPoolDataProvider')
+    state.views.getTokenFactory = () => [OTHER]
+    state.views.getAdditionalPoolData = () => {
+      throw new Error('a bare revert, with no data')
+    }
+    const r = await new GetMultiTokenPoolProvider().query(stackChain(state).chain, {
+      provider: PROVIDER,
+      tokenAddress: TOKEN,
+    })
+    assert.equal(r.additionalPoolData, null)
   })
 })

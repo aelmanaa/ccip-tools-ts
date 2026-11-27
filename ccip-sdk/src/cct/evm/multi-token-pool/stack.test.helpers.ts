@@ -76,6 +76,7 @@ export const AUX_IFACE = new Interface([
   'function getRemoteTokenAddress(address localToken, uint64 remoteChainSelector) view returns (bytes)',
   'function getTokenFactory() view returns (address)',
   'function getAdditionalPoolData(address localToken, uint64 remoteChainSelector, bytes4 finality, bytes extraArgs) view returns (bytes)',
+  'function uid() view returns (bytes32)',
 ])
 /** The TokenAdminRegistry view the registry reads use. */
 export const TAR_IFACE = new Interface([
