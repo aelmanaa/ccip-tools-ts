@@ -589,3 +589,26 @@ export function decodeTokenProfile(
     ),
   }
 }
+
+/**
+ * Refuses a provider address with no code at `blockTag`, as the stores do (`ProviderHasNoCode`).
+ * @throws {@link CCTParamsInvalidError} at `param` if the address has no code
+ * @internal
+ */
+export async function assertProviderHasCode(
+  operation: string,
+  chain: EVMChain,
+  param: string,
+  provider: string,
+  blockTag: number,
+  fix: string,
+  context?: Record<string, unknown>,
+): Promise<void> {
+  if ((await chain.provider.getCode(provider, blockTag)) !== '0x') return
+  throw new CCTParamsInvalidError(
+    operation,
+    param,
+    `${provider} has no code, so the store refuses it (ProviderHasNoCode): ${fix}`,
+    context && { context },
+  )
+}

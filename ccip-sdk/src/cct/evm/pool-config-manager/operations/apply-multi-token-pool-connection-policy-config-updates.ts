@@ -9,7 +9,7 @@ import type { EVMChain } from '../../../../evm/index.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { laneFamilyOf } from '../../../remote-address.ts'
-import { isNotCcipContract } from '../../query.ts'
+import { readContractTypeOrNull } from '../../query.ts'
 import { validateBoolean } from '../../validate.ts'
 import { policyKey } from '../projection.ts'
 import type { ConnectionPolicyRecord, PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
@@ -87,10 +87,7 @@ export class ApplyMultiTokenPoolConnectionPolicyConfigUpdates extends PolicyReco
         (p) => policyKey(p.policyName, 'policyName') === word,
       )?.provider
       if (!provider) continue
-      const [type] = await chain.typeAndVersion(provider).catch((err: unknown) => {
-        if (isNotCcipContract(err)) return ['']
-        throw err
-      })
+      const type = await readContractTypeOrNull(chain, provider)
       if (type === SAME_ADDRESS_PROVIDER_TYPE)
         throw new CCTParamsInvalidError(
           this.name,
