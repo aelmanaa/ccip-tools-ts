@@ -16,7 +16,8 @@ import {
   type MultiTokenPoolConfigSource,
   type MultiTokenPoolLane,
   type MultiTokenPoolLaneParams,
-  isStop,
+  type MultiTokenPoolRateLimits,
+  isLaneStopped,
 } from '../../../multi-token-pool.ts'
 import {
   type MultiTokenPoolVersion,
@@ -168,7 +169,11 @@ export async function readMultiTokenPoolLane(
         fastFinalityInbound: toRateLimiterState(b.fastFinalityInbound),
       }),
     },
-    stopped: { outbound: isStop(b.outbound), inbound: isStop(b.inbound) },
+    // the one stop rule, on the buckets in the SDK's config form
+    stopped: {
+      outbound: isLaneStopped(asRateLimits(b), 'outbound'),
+      inbound: isLaneStopped(asRateLimits(b), 'inbound'),
+    },
     ...(fee!.isEnabled && {
       tokenTransferFeeConfig: (({ tokenAddress: _t, remoteChainSelector: _c, ...f }) => f)(fee!),
     }),
@@ -208,5 +213,21 @@ export class GetMultiTokenPoolLane extends EVMQuery<MultiTokenPoolLaneParams, Mu
       await chain.provider.getBlockNumber(),
       this.#reads,
     )
+  }
+}
+
+/** Decoded buckets (`isEnabled`) in the config form the shared stop rule reads (`enabled`). */
+function asRateLimits(
+  b: Record<keyof MultiTokenPoolRateLimits, { isEnabled: boolean; capacity: bigint; rate: bigint }>,
+): MultiTokenPoolRateLimits {
+  const config = (x: { isEnabled: boolean; capacity: bigint; rate: bigint }) =>
+    x.isEnabled
+      ? { enabled: true as const, capacity: x.capacity, rate: x.rate }
+      : { enabled: false as const }
+  return {
+    outbound: config(b.outbound),
+    inbound: config(b.inbound),
+    fastFinalityOutbound: config(b.fastFinalityOutbound),
+    fastFinalityInbound: config(b.fastFinalityInbound),
   }
 }

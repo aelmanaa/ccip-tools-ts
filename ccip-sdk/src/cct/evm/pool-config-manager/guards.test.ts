@@ -10,7 +10,11 @@ import { ZeroAddress, getAddress } from 'ethers'
 import type { LaneRecordType } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import type { CCTParamsInvalidError } from '../../errors.ts'
-import type { MultiTokenPoolRateLimits } from '../../multi-token-pool.ts'
+import {
+  type MultiTokenPoolRateLimits,
+  effectiveRateLimit,
+  isLaneStopped,
+} from '../../multi-token-pool.ts'
 import type { RateLimitConfig } from '../../rate-limit.ts'
 import { policyStoresOf } from '../multi-token-pool/contracts.ts'
 import { attestedRemoteFacts } from './guard-facts.ts'
@@ -29,13 +33,13 @@ import {
   multiTokenPoolLaneTransitions,
   multiTokenPoolPcmCheckedLanes,
   multiTokenPoolPcmLaneCheck,
-  stopsOutbound,
   validateMultiTokenPoolGuardOptions,
 } from './guards.ts'
 import {
   type MultiTokenPoolRecordChange,
   type MultiTokenPoolRecordState,
   applyMultiTokenPoolRecordChanges,
+  resolveMultiTokenPoolLanes,
 } from './projection.ts'
 
 const addr = (n: number) => getAddress('0x' + n.toString(16).padStart(40, '0'))
@@ -380,6 +384,67 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     )
   })
 
+  it('compares the limit each transfer consumes: a disabled fast-finality bucket falls back to the default (B1)', () => {
+    const stop = { enabled: true, capacity: 0n, rate: 0n } as const
+    const big = { enabled: true, capacity: 10n ** 24n, rate: 10n ** 20n } as const
+    const limits = (o: Partial<MultiTokenPoolRateLimits> = {}): MultiTokenPoolRateLimits => ({
+      outbound: on(true),
+      inbound: on(true),
+      fastFinalityOutbound: on(false),
+      fastFinalityInbound: on(false),
+      ...o,
+    })
+    for (const [direction, fast] of [
+      ['outbound', 'fastFinalityOutbound'],
+      ['inbound', 'fastFinalityInbound'],
+    ] as const) {
+      // a lane stopped through its default bucket, fast-finality disabled: FTF traffic is held too
+      const stopped = limits({ [direction]: stop })
+      assert.equal(isLaneStopped(stopped, direction), true)
+      // enabling the fast-finality bucket opens FTF transfers: a loosening, judged
+      assert.equal(loosensRateLimits(stopped, limits({ [direction]: stop, [fast]: big })), true)
+      assert.equal(isLaneStopped(limits({ [direction]: stop, [fast]: big }), direction), false)
+      // enabling it above the default raises the FTF limit: judged
+      assert.equal(loosensRateLimits(limits(), limits({ [fast]: big })), true)
+      // enabling it below the default tightens FTF traffic: not judged
+      assert.equal(
+        loosensRateLimits(limits(), limits({ [fast]: { enabled: true, capacity: 1n, rate: 1n } })),
+        false,
+      )
+      // the effective FTF limit is the default bucket while the FTF bucket is disabled
+      assert.deepEqual(effectiveRateLimit(limits(), direction, true), on(true))
+      assert.deepEqual(effectiveRateLimit(limits({ [fast]: big }), direction, true), big)
+    }
+  })
+
+  it('reports a lifted stop as going live (stops are part of liveness)', () => {
+    const stop = { enabled: true, capacity: 0n, rate: 0n } as const
+    const rateLimits = (outbound: RateLimitConfig): MultiTokenPoolRecordChange => ({
+      kind: 'setInline',
+      type: 'rateLimit',
+      record: {
+        tokenAddress: T1,
+        remoteChainSelector: C1,
+        rateLimits: {
+          outbound,
+          inbound: on(true),
+          fastFinalityOutbound: on(false),
+          fastFinalityInbound: on(false),
+        },
+      },
+    })
+    const stoppedState = applyMultiTokenPoolRecordChanges(empty(), [
+      ...inlineLane(T1),
+      rateLimits(stop),
+    ])
+    const lifted = applyMultiTokenPoolRecordChanges(stoppedState, [rateLimits(on(true))])
+    const key = { tokenAddress: T1, remoteChainSelector: C1 }
+    const [before] = resolveMultiTokenPoolLanes(stoppedState, [key])
+    const [after] = resolveMultiTokenPoolLanes(lifted, [key])
+    const { goingLive } = multiTokenPoolLaneTransitions([{ before: before!, after: after! }])
+    assert.deepEqual(goingLive, [{ ...key, directions: ['outbound'] }])
+  })
+
   it('tells a loosening rate limit write from one that only tightens or stops (bucket writes judge only loosened lanes)', () => {
     const limits = (o: Partial<MultiTokenPoolRateLimits> = {}): MultiTokenPoolRateLimits => ({
       outbound: on(true),
@@ -402,13 +467,17 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     assert.equal(loosensRateLimits(limits(), limits({ inbound: more })), true)
     assert.equal(loosensRateLimits(limits(), limits({ outbound: on(false) })), true)
     assert.equal(loosensRateLimits(null, limits()), true)
-    assert.equal(loosensRateLimits(limits(), null), false)
+    // a lane left with no limit is judged (RECORD_MISSING), and two nulls change nothing
+    assert.equal(loosensRateLimits(limits(), null), true)
+    assert.equal(loosensRateLimits(null, null), false)
     // the scope is read from the calldata's function
     assert.equal(laneJudgingOf('pauseTokens'), 'none')
     assert.equal(laneJudgingOf('unpauseTokens'), 'all')
     assert.equal(laneJudgingOf('applyRateLimitPolicyBucketUpdates'), 'loosened')
     assert.equal(laneJudgingOf('applyInlineRateLimitBucketUpdates'), 'loosened')
-    assert.equal(laneJudgingOf('applyInlineRateLimitConfigUpdates'), 'all')
+    assert.equal(laneJudgingOf('applyInlineRateLimitConfigUpdates'), 'loosened')
+    assert.equal(laneJudgingOf('applyRateLimitPolicyConfigUpdates'), 'loosened')
+    assert.equal(laneJudgingOf('applyInlineFeeConfigUpdates'), 'all')
   })
 
   it('waives a missing remote pool while the lane is stopped outbound, as a token pause does', () => {
@@ -467,7 +536,7 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
       ).errors,
       ['NO_REMOTE_POOL'],
     )
-    assert.equal(stopsOutbound(null), false)
+    assert.equal(isLaneStopped(null, 'outbound'), false)
   })
 
   it('refuses a lane whose remote registry names no pool, long or legacy (EVM-2 fund loss)', () => {

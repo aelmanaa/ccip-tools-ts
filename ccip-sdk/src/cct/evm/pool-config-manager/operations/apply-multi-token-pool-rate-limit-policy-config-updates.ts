@@ -31,7 +31,8 @@ export type ApplyMultiTokenPoolRateLimitPolicyConfigUpdatesParams = PoolConfigMa
  * chain (or, for the default record, on every chain without its own record).
  * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
  *   (a missing record or policy, a policy in use or with records left), `sender` lacks the gate, or a
- *   lane guard refuses; `context.recordType` is `'rateLimit'`
+ *   lane guard refuses a lane the write loosens (one it only tightens or stops is never refused);
+ *   `context.recordType` is `'rateLimit'`
  */
 export class ApplyMultiTokenPoolRateLimitPolicyConfigUpdates extends PolicyRecordWriteOperation<
   RateLimitPolicyRecord,

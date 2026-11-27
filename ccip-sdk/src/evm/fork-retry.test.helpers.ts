@@ -10,12 +10,13 @@ import { EVMChain } from './index.ts'
 
 /**
  * Upstream trouble seen through a fork: SDK transient errors, 429s, the empty
- * revert an anvil fork reports when its upstream rate-limits it, and the
- * `Fork Error: Transport(...)` it reports when its upstream RPC drops a connection.
+ * revert an anvil fork reports when its upstream rate-limits it, the
+ * `Fork Error: Transport(...)` it reports when its upstream RPC drops a connection, and the
+ * `-32603 failed to get storage … timed out` of a lazy state fetch that timed out upstream.
  */
 export const isTransientForkError = (err: unknown): boolean =>
   shouldRetry(err) ||
-  /\b429\b|missing revert data|fork error|connection reset|econnreset|socket hang up/i.test(
+  /\b429\b|missing revert data|fork error|connection reset|econnreset|socket hang up|failed to get storage|operation timed out/i.test(
     (err as Error | null)?.message ?? '',
   )
 

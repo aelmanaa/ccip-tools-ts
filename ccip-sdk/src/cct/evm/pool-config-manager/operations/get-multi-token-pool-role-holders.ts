@@ -15,6 +15,7 @@ import {
   getMultiTokenPoolInterface,
   poolConfigManagerContract,
   poolConfigManagerRoleId,
+  readPoolConfigManagerRolesHeld,
 } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
 import {
@@ -106,11 +107,7 @@ export class GetMultiTokenPoolRoleHolders extends EVMQuery<
     await Promise.all(
       [...candidates].flatMap(([role, accounts]) =>
         [...accounts].map(async (account) => {
-          if (
-            await pcm.hasRole(poolConfigManagerRoleId(role), account, {
-              blockTag: scanned.toBlock,
-            })
-          )
+          if ((await readPoolConfigManagerRolesHeld(pcm, account, [role], scanned.toBlock)).length)
             holders[role].push(account)
         }),
       ),

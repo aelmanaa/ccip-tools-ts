@@ -5,14 +5,13 @@
  * @packageDocumentation
  */
 
-import { dataLength, getAddress, hexlify, isError } from 'ethers'
+import { dataLength, getAddress } from 'ethers'
 
 import type { Chain, ChainGetter } from '../../../chain.ts'
 import {
   CCIPContractNotRouterError,
   CCIPTokenPoolChainConfigNotFoundError,
 } from '../../../errors/index.ts'
-import { getErrorData } from '../../../evm/errors.ts'
 import { EVMChain } from '../../../evm/index.ts'
 import { decodeLaneConnection, decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
@@ -24,14 +23,13 @@ import { readAllAuthorizedCallers } from '../advanced-pool-hooks/contracts.ts'
 import {
   type MultiTokenPoolVersion,
   ANY_FINALITY_CONFIG,
-  multiTokenPoolContract,
   poolConfigManagerContract,
+  readProviderPoolData,
   reportsMultiTokenPool,
   resolveMultiTokenPool,
   uidProviderContract,
 } from '../multi-token-pool/contracts.ts'
 import { isMissingFunction, isNotCcipContract, readContractTypeOrNull } from '../query.ts'
-import { decodeError } from '../simulate.ts'
 import { toAbiLaneKey } from './contracts.ts'
 import {
   type MultiTokenPoolGuardFactRequests,
@@ -42,7 +40,11 @@ import {
   guardPoolKey,
 } from './guards.ts'
 import type { ProjectedMultiTokenPoolLane } from './projection.ts'
-import { readPoolsServingPoolConfigManager, readRegistryPool } from './serving-pools.ts'
+import {
+  readPoolConfigManagerAddress,
+  readPoolsServingPoolConfigManager,
+  readRegistryPool,
+} from './serving-pools.ts'
 
 /** Longest an attestation may be valid for. @internal */
 export const MAX_ATTESTATION_SECONDS = 24n * 60n * 60n
@@ -233,31 +235,19 @@ async function readProviderData({
       const key = guardLaneKey(lane)
       // the data a send adds; a provider that refuses the token reverts every send, which the eth_call
       // of the write does not show: a finding, while transport errors propagate
-      const data = await uidProviderContract(chain, provider)
-        .getAdditionalPoolData(
-          lane.tokenAddress,
-          lane.remoteChainSelector,
-          ANY_FINALITY_CONFIG,
-          '0x',
-          {
-            blockTag,
-          },
-        )
-        .catch((err: unknown) => {
-          // a revert, or no such function (an EOA, another contract): every send reverts
-          if (!isMissingFunction(err)) throw err
-          out.refused.set(
-            key,
-            // the provider's own custom errors are not in its typed ABI: decode against every known one
-            isError(err, 'CALL_EXCEPTION')
-              ? (decodeError(getErrorData(err) ?? '0x').errorName ?? err.shortMessage)
-              : 'it has no getAdditionalPoolData',
-          )
-          return undefined
-        })
-      if (data === undefined) return
-      out.lengths.set(key, dataLength(data))
-      out.bytes.set(key, hexlify(data))
+      const read = await readProviderPoolData(
+        chain,
+        provider,
+        lane.tokenAddress,
+        lane.remoteChainSelector,
+        blockTag,
+      )
+      if ('refused' in read) {
+        out.refused.set(key, read.refused)
+        return
+      }
+      out.lengths.set(key, dataLength(read.data))
+      out.bytes.set(key, read.data)
     }),
   )
   return out
@@ -515,15 +505,10 @@ export async function readRemoteMultiTokenPoolSide(
       remoteSideUnread: `the SDK cannot read remote pool ${remotePool}: ${resolved.message}`,
     }
   const { version } = resolved
-  const pcmRaw = await multiTokenPoolContract(remote, remotePool, version)
-    .getPoolConfigManager()
-    .catch((err: unknown) => {
-      if (isMissingFunction(err)) return undefined
-      throw err
-    })
-  if (pcmRaw === undefined)
+  const pcmAddress = await readPoolConfigManagerAddress(remote, remotePool, version)
+  if (pcmAddress === undefined)
     return { remoteSideUnread: `remote pool ${remotePool} reports no PoolConfigManager` }
-  const pcm = poolConfigManagerContract(remote, getAddress(resultToObject(pcmRaw)), version)
+  const pcm = poolConfigManagerContract(remote, pcmAddress, version)
   const [[config], [connection]] = await Promise.all([
     pcm.getTokenConfigBatch([remoteToken]),
     pcm.getLaneConnectionBatch([
@@ -534,22 +519,18 @@ export async function readRemoteMultiTokenPoolSide(
     decodeLaneConnection(resultToObject(connection!), String).poolDataFormat === 'legacy'
   const provider = decodeTokenProfileFields(resultToObject(config!)).additionalPoolDataProvider
   if (!provider) return { remoteSendsData: '0x', remoteSendsLegacy }
-  const contract = uidProviderContract(remote, provider)
   const [remoteAcceptsOutbound, adds] = await Promise.all([
-    isDataValid(contract, remoteToken, localSelector, sends),
-    contract
-      .getAdditionalPoolData(remoteToken, localSelector, ANY_FINALITY_CONFIG, '0x')
-      .then(hexlify, (err: unknown) => {
-        if (!isMissingFunction(err)) throw err
-        return undefined
-      }),
+    isDataValid(uidProviderContract(remote, provider), remoteToken, localSelector, sends),
+    readProviderPoolData(remote, provider, remoteToken, localSelector),
   ])
   return {
     remoteAcceptsOutbound,
     remoteSendsLegacy,
-    ...(adds === undefined
-      ? { remoteProviderRefused: 'the remote provider refuses to produce data for its token' }
-      : { remoteSendsData: remoteSendsLegacy ? '0x' : adds }),
+    ...('refused' in adds
+      ? {
+          remoteProviderRefused: `the remote provider refuses to produce data for its token (${adds.refused})`,
+        }
+      : { remoteSendsData: remoteSendsLegacy ? '0x' : adds.data }),
   }
 }
 

@@ -5,12 +5,11 @@
  * @packageDocumentation
  */
 
-import { getAddress, hexlify } from 'ethers'
+import { getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { encodeAddressToAny } from '../../../../utils.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { parseRemoteAddress } from '../../../remote-address.ts'
+import { encodeRemoteAddress, parseRemoteAddress } from '../../../remote-address.ts'
 import type { MultiTokenPoolLaneKey } from '../contracts.ts'
 import {
   applyMultiTokenPoolRecordChanges,
@@ -65,7 +64,7 @@ export class ApplyMultiTokenPoolInlineConnectionConfigUpdates extends InlineReco
     return {
       localToken: record.tokenAddress,
       remoteChainSelector: record.remoteChainSelector,
-      remoteToken: hexlify(encodeAddressToAny(record.remoteToken)),
+      remoteToken: encodeRemoteAddress(record.remoteToken),
     }
   }
 

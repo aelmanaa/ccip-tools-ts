@@ -7,7 +7,11 @@ import { CCIPExecTxRevertedError, CCIPWalletInvalidError } from '../../../../err
 import type { EVMChain } from '../../../../evm/index.ts'
 import { ChainFamily, networkInfo } from '../../../../networks.ts'
 import { parseTypeAndVersion } from '../../../../utils.ts'
-import { CCTOperationUnsupportedError, CCTParamsInvalidError } from '../../../errors.ts'
+import {
+  CCTContractTypeInvalidError,
+  CCTOperationUnsupportedError,
+  CCTParamsInvalidError,
+} from '../../../errors.ts'
 import {
   type TokenPoolFamily,
   type TokenPoolType,
@@ -265,6 +269,22 @@ describe('ApplyTokenTransferFeeConfigUpdates (cct/evm)', () => {
         () => op.execute(stubChain(), { ...params, wallet: {} }),
         CCIPWalletInvalidError,
       )
+    })
+  })
+
+  it('names the multi-token pool op when the pool is a multi-token pool', async () => {
+    const chain = stubChain()
+    Object.assign(chain, {
+      typeAndVersion: () =>
+        Promise.resolve(parseTypeAndVersion('BurnMintMultiTokenPool 2.1.0-dev')),
+    })
+    await assert.rejects(generate(chain), (e: unknown) => {
+      assert.ok(e instanceof CCTContractTypeInvalidError)
+      assert.match(
+        String(e.context.reason),
+        /applyMultiTokenPoolInlineFeeConfigUpdates and applyMultiTokenPoolInlineDestOverheadConfigUpdates/,
+      )
+      return true
     })
   })
 })

@@ -816,9 +816,10 @@ async function crossCheckWithSimulateV1(
  * Which lanes the lane rules judge for a PCM function (the write is always projected, simulated and
  * sealed, and the scope is read from the calldata, so a snapshot re-check judges as the build did):
  * - a pause, the emergency action: `'none'`, and no remote fact is read;
- * - a rate limit bucket write: `'loosened'`, only the lanes whose rate limits it loosens (a stop
- *   lifted, a bucket disabled, more capacity or rate), so a write that only tightens or stops a lane
- *   is never refused by a lane rule and an operator can always clamp a broken lane;
+ * - a rate limit write (inline or policy records, or single buckets; a lane stop and its lift too):
+ *   `'loosened'`, only the lanes whose rate limits it loosens (a stop lifted, a bucket disabled, more
+ *   capacity or rate, a lane left with no limit), so a write that only tightens or stops a lane is
+ *   never refused by a lane rule and an operator can always clamp a broken lane;
  * - any other write: `'all'`, every lane it changes.
  * @internal
  */
@@ -830,6 +831,8 @@ const LANE_JUDGING: Readonly<Record<string, 'loosened' | 'none'>> = {
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolGlobally')]: 'none',
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolTokens')]: 'none',
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolChains')]: 'none',
+  [multiTokenPoolFunctionOf('applyMultiTokenPoolInlineRateLimitConfigUpdates')]: 'loosened',
+  [multiTokenPoolFunctionOf('applyMultiTokenPoolRateLimitPolicyConfigUpdates')]: 'loosened',
   [multiTokenPoolFunctionOf('applyMultiTokenPoolInlineRateLimitBucketUpdates')]: 'loosened',
   [multiTokenPoolFunctionOf('applyMultiTokenPoolRateLimitPolicyBucketUpdates')]: 'loosened',
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { Interface, ZeroHash, getAddress, zeroPadValue } from 'ethers'
+import { Interface, ZeroHash, getAddress, id, zeroPadValue } from 'ethers'
 
 import '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
@@ -70,18 +70,41 @@ describe('GetMultiTokenPoolProvider (cct/evm multi-token-pool-providers)', () =>
     )
   })
 
-  it('propagates a UID read failure that is not TokenNotFromFactory', async () => {
+  it('propagates a UID read failure that is not TokenNotFromFactory, for a token with a uid()', async () => {
     const state = providerStack('FactoryTokenWithUIDPoolDataProvider')
     state.views.getTokenFactory = () => [OTHER]
     state.views.getAdditionalPoolData = () => {
       throw new Error('a bare revert, with no data')
     }
+    // the token answers uid() (IHasUID, not an MTTP ABI), so the bare revert is not "no UID"
+    const { chain } = stackChain(state)
+    const call = chain.provider.call.bind(chain.provider)
+    const uid = id('uid()').slice(0, 10)
+    chain.provider.call = async (tx) =>
+      typeof tx.to === 'string' &&
+      getAddress(tx.to) === getAddress(TOKEN) &&
+      String(tx.data).startsWith(uid)
+        ? '0x' + '11'.repeat(32)
+        : call(tx)
     await assert.rejects(
-      new GetMultiTokenPoolProvider().query(stackChain(state).chain, {
+      new GetMultiTokenPoolProvider().query(chain, {
         provider: PROVIDER,
         tokenAddress: TOKEN,
       }),
       (e: unknown) => (e as { code?: string }).code === 'CALL_EXCEPTION',
     )
+  })
+
+  it('reads a token with no uid() as having no UID (the provider reverts with no data)', async () => {
+    const state = providerStack('FactoryTokenWithUIDPoolDataProvider')
+    state.views.getTokenFactory = () => [OTHER]
+    state.views.getAdditionalPoolData = () => {
+      throw new Error('a bare revert, with no data')
+    }
+    const r = await new GetMultiTokenPoolProvider().query(stackChain(state).chain, {
+      provider: PROVIDER,
+      tokenAddress: TOKEN,
+    })
+    assert.equal(r.additionalPoolData, null)
   })
 })

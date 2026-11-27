@@ -5,12 +5,9 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
-
 import type { EVMChain } from '../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
-import { CCTParamsInvalidError } from '../../errors.ts'
 import type {
   MultiTokenPoolExpectedSnapshot,
   MultiTokenPoolLaneFinding,
@@ -21,12 +18,10 @@ import type { TransactionResult } from '../../operation.ts'
 import {
   type MultiTokenPoolVersion,
   type PoolConfigManagerRole,
-  poolConfigManagerContract,
-  poolConfigManagerRoleId,
+  assertPoolConfigManagerRole,
 } from '../multi-token-pool/contracts.ts'
 import { type EVMExecuteParams, EVMOperation } from '../operation.ts'
 import { submit } from '../submit.ts'
-import { validateAddress } from '../validate.ts'
 import {
   type MultiTokenPoolLaneDirections,
   type MultiTokenPoolLaneKey,
@@ -158,7 +153,7 @@ export abstract class PoolConfigManagerWriteOperation<
   protected override prepare(params: P): Parsed {
     validatePoolConfigManagerTarget(this.name, params)
     validateMultiTokenPoolGuardOptions(this.name, '', params)
-    if (params.sender !== undefined) validateAddress(this.name, 'sender', params.sender)
+    // `sender` is validated by `generate`, before any RPC
     return params as Parsed
   }
 
@@ -169,7 +164,16 @@ export abstract class PoolConfigManagerWriteOperation<
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
     const blockTag = await chain.provider.getBlockNumber()
     if (params.sender !== undefined)
-      await this.#preflightGate(chain, address, version, params, params.sender, blockTag)
+      await assertPoolConfigManagerRole(
+        this.name,
+        chain,
+        address,
+        version,
+        params.sender,
+        this.gate(params),
+        blockTag,
+        this.errorContext(params),
+      )
     // the stored records, read once: the op checks and encodes from them, the guard judges on them
     const read = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
     const { data, expected } = await this.encode(chain, params, {
@@ -194,28 +198,12 @@ export abstract class PoolConfigManagerWriteOperation<
       ...(expected && { expected }),
       ...(context && { errorContext: context }),
       ...(this.makesLive(params) && { makesLive: true }),
-      ...(params.expectedSnapshot && { expectedSnapshot: params.expectedSnapshot }),
-      ...(params.getChain && { getChain: params.getChain }),
-      ...(params.remoteAttestations && { remoteAttestations: params.remoteAttestations }),
-      ...(params.allowDroppingDefaultCCVs !== undefined && {
-        allowDroppingDefaultCCVs: params.allowDroppingDefaultCCVs,
-      }),
-      ...(params.maxTransferFeeBps !== undefined && {
-        maxTransferFeeBps: params.maxTransferFeeBps,
-      }),
-      ...(params.minDestGasOverhead !== undefined && {
-        minDestGasOverhead: params.minDestGasOverhead,
-      }),
-      ...(params.confirmClosing && { confirmClosing: params.confirmClosing }),
-      ...(params.confirmOpening && { confirmOpening: params.confirmOpening }),
-      ...(params.confirmDropped && { confirmDropped: params.confirmDropped }),
-      ...(params.migrationWindowChains && { migrationWindowChains: params.migrationWindowChains }),
+      ...writeGuardsOf(params),
     })
     return {
       family: ChainFamily.EVM,
-      transactions: [
-        { to: address, data, ...(params.sender !== undefined && { from: params.sender }) },
-      ],
+      // `generate` sets `from` to the sender
+      transactions: [{ to: address, data }],
       projectionVerified: result.projectionVerified,
       simulatedFrom: result.simulatedFrom,
       affectedLanes: result.affectedLanes,
@@ -223,31 +211,6 @@ export abstract class PoolConfigManagerWriteOperation<
       warnings: result.warnings,
       snapshot: result.snapshot,
     }
-  }
-
-  /** One `hasRole` per accepted role, at the build block; refused when the sender holds none. */
-  async #preflightGate(
-    chain: EVMChain,
-    address: string,
-    version: MultiTokenPoolVersion,
-    params: Parsed,
-    sender: string,
-    blockTag: number,
-  ): Promise<void> {
-    const roles = this.gate(params)
-    const pcm = poolConfigManagerContract(chain, address, version)
-    const held = await Promise.all(
-      roles.map((role) =>
-        pcm.hasRole(poolConfigManagerRoleId(role), getAddress(sender), { blockTag }),
-      ),
-    )
-    if (!held.some(Boolean))
-      throw new CCTParamsInvalidError(
-        this.name,
-        'sender',
-        `${sender} holds none of ${roles.join(', ')} on PoolConfigManager ${address}, which this write needs: send it from a holder, or grant one of the roles first`,
-        { context: { ...this.errorContext(params), roles } },
-      )
   }
 
   /**
@@ -266,14 +229,32 @@ export abstract class PoolConfigManagerWriteOperation<
       expectedSnapshot: params.expectedSnapshot ?? first.snapshot,
     })
     const { response } = await submit(chain, params.wallet, unsigned, this.name)
-    return {
-      hash: response.hash,
-      projectionVerified: unsigned.projectionVerified,
-      simulatedFrom: unsigned.simulatedFrom,
-      affectedLanes: unsigned.affectedLanes,
-      goingLive: unsigned.goingLive,
-      warnings: unsigned.warnings,
-      snapshot: unsigned.snapshot,
-    }
+    const { family: _, transactions: __, ...impact } = unsigned
+    return { hash: response.hash, ...impact }
   }
+}
+
+/**
+ * Every write guard option, so the base forwards them as one object: a new option is a type error
+ * here until it is listed, never a silently dropped field.
+ */
+const WRITE_GUARD_KEYS: Record<keyof MultiTokenPoolWriteGuards, true> = {
+  getChain: true,
+  remoteAttestations: true,
+  expectedSnapshot: true,
+  allowDroppingDefaultCCVs: true,
+  maxTransferFeeBps: true,
+  minDestGasOverhead: true,
+  confirmClosing: true,
+  confirmOpening: true,
+  confirmDropped: true,
+  migrationWindowChains: true,
+}
+
+/** The guard options a write's params carry (unset ones left out). */
+function writeGuardsOf(params: MultiTokenPoolWriteGuards): MultiTokenPoolWriteGuards {
+  const out: Record<string, unknown> = {}
+  for (const key of Object.keys(WRITE_GUARD_KEYS) as (keyof MultiTokenPoolWriteGuards)[])
+    if (params[key] !== undefined) out[key] = params[key]
+  return out as MultiTokenPoolWriteGuards
 }

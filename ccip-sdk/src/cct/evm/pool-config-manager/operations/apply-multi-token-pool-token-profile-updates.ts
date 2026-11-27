@@ -90,6 +90,9 @@ export type MultiTokenPoolTokenProfileUpdate = {
   >
 >
 
+/** The flavors whose profile names a lock-or-burn address: the burn sink, or the lockbox. */
+const FLAVORS_WITH_ADDRESS: readonly LockOrBurnFlavor[] = ['burn-to-address', 'lock']
+
 /** Parameters of `applyMultiTokenPoolTokenProfileUpdates`. Removals run first, as on chain. */
 export type ApplyMultiTokenPoolTokenProfileUpdatesParams = PoolConfigManagerWriteParams &
   MultiTokenPoolWriteGuards & {
@@ -481,13 +484,12 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
 
   /** The store's flavor and address rules, refused before the eth_call names them. */
   #checkProfile({ param, next }: ProfileChange): void {
-    const needsAddress =
-      next.lockOrBurnFlavor === 'lock' || next.lockOrBurnFlavor === 'burn-to-address'
+    const needsAddress = FLAVORS_WITH_ADDRESS.includes(next.lockOrBurnFlavor)
     if (!needsAddress && next.lockOrBurnAddress)
       throw new CCTParamsInvalidError(
         this.name,
         `${param}.lockOrBurnAddress`,
-        `must be null for '${next.lockOrBurnFlavor}': only 'burn-to-address' and 'lock' use one (InvalidLockOrBurnAddress)`,
+        `must be null for '${next.lockOrBurnFlavor}': only ${FLAVORS_WITH_ADDRESS.map((f) => `'${f}'`).join(' and ')} use one (InvalidLockOrBurnAddress)`,
       )
     if (next.lockOrBurnFlavor === 'lock' && !next.lockOrBurnAddress)
       throw new CCTParamsInvalidError(

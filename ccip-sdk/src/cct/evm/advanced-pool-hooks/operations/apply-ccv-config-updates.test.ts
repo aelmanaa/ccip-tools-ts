@@ -6,6 +6,7 @@ import { Interface, ZeroAddress, makeError } from 'ethers'
 import { CCIPExecTxRevertedError, CCIPWalletInvalidError } from '../../../../errors/index.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { ChainFamily, networkInfo } from '../../../../networks.ts'
+import { parseTypeAndVersion } from '../../../../utils.ts'
 import { CCTContractTypeInvalidError, CCTParamsInvalidError } from '../../../errors.ts'
 import ADVANCED_POOL_HOOKS_V2_0_0_ABI from '../../artifacts/abi/V2_0_0/advanced-pool-hooks.ts'
 import {
@@ -170,5 +171,21 @@ describe('ApplyCCVConfigUpdates (cct/evm advanced-pool-hooks)', () => {
         CCIPWalletInvalidError,
       )
     })
+  })
+
+  it('names the multi-token pool op when the target pool is a multi-token pool', async () => {
+    const chain = stubChain()
+    Object.assign(chain, {
+      typeAndVersion: () =>
+        Promise.resolve(parseTypeAndVersion('BurnMintMultiTokenPool 2.1.0-dev')),
+    })
+    await assert.rejects(
+      generate(chain, { advancedPoolHooks: undefined, poolAddress: '0x' + '0b'.repeat(20) }),
+      (e: unknown) => {
+        assert.ok(e instanceof CCTContractTypeInvalidError)
+        assert.match(String(e.context.reason), /applyMultiTokenPoolInlineSecurityConfigUpdates/)
+        return true
+      },
+    )
   })
 })

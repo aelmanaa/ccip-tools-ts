@@ -15,7 +15,7 @@
  * @packageDocumentation
  */
 
-import { getAddress, hexlify } from 'ethers'
+import { getAddress } from 'ethers'
 
 import type {
   ChainGetter,
@@ -27,10 +27,11 @@ import type {
 } from '../chain.ts'
 import type { FinalityRequested } from '../extra-args.ts'
 import type { ChainFamily } from '../networks.ts'
-import { encodeAddressToAny, jsonParse } from '../utils.ts'
+import { jsonParse } from '../utils.ts'
 import { canonicalHash, canonicalJson } from './canonical.ts'
 import { type CCTStateChange, CCTParamsInvalidError } from './errors.ts'
 import type { RateLimitConfig } from './rate-limit.ts'
+import { encodeRemoteAddress } from './remote-address.ts'
 
 /** A transfer direction: core {@link TransferDirection}, the one direction type of the SDK. */
 export type MultiTokenPoolDirection = TransferDirection
@@ -44,7 +45,9 @@ export type MultiTokenPoolDirection = TransferDirection
  *   never mints. A canonical Solana pool on interface 1 counts as "does not read long data":
  *   it ignores the data now and strands it after a later move to interface 2.
  */
-export type PoolDataFormat = 'legacy' | 'long'
+export type PoolDataFormat = (typeof POOL_DATA_FORMATS)[number]
+/** Every {@link PoolDataFormat}, for validation. @internal */
+export const POOL_DATA_FORMATS = ['legacy', 'long'] as const
 
 /** A reference to a shared policy: an EVM policy name, or a Solana policy id. */
 export type MultiTokenPoolPolicyRef =
@@ -554,19 +557,35 @@ export function parseMultiTokenPoolSnapshot(json: string): MultiTokenPoolSnapsho
       cause: error instanceof Error ? error : undefined,
     })
   }
-  if (!isSnapshotShape(parsed))
+  return verifyMultiTokenPoolSnapshot(OPERATION, 'json', parsed)
+}
+
+/**
+ * Checks that a value is a snapshot an op built, untouched: its shape, and its `hash` over the
+ * other fields. The one check {@link parseMultiTokenPoolSnapshot} and every op that reads values back
+ * out of a snapshot (a lift's `restore`) share.
+ * @throws {@link CCTParamsInvalidError} at `param` if it is not a snapshot, or at `<param>.hash` if
+ *   it was edited or truncated
+ * @internal
+ */
+export function verifyMultiTokenPoolSnapshot(
+  operation: string,
+  param: string,
+  value: unknown,
+): MultiTokenPoolSnapshot {
+  if (!isSnapshotShape(value))
     throw new CCTParamsInvalidError(
-      OPERATION,
-      'json',
+      operation,
+      param,
       'is not a snapshot: needs bigint observedAt, object expected, and string operation, guardInputsHash, calldataHash and hash',
     )
-  if (snapshotHash(parsed) !== parsed.hash)
+  if (snapshotHash(value) !== value.hash)
     throw new CCTParamsInvalidError(
-      OPERATION,
-      'json.hash',
+      operation,
+      `${param}.hash`,
       'does not match the snapshot fields: the snapshot was edited or truncated',
     )
-  return parsed
+  return value
 }
 
 const OPERATION = 'parseMultiTokenPoolSnapshot'
@@ -833,7 +852,7 @@ export function longPoolDataBytes(extra: number): number {
  * @internal
  */
 export function abiWord(address: string): string {
-  return hexlify(encodeAddressToAny(getAddress(address)))
+  return encodeRemoteAddress(getAddress(address))
 }
 
 /**
@@ -872,4 +891,47 @@ export type MultiTokenPoolInlineRemotePoolDrop = {
    * `trustPolicyRemotePools` (its dropped policy pools are listed in `remotePools` too).
    */
   flags?: (typeof DROPPABLE_REMOTE_POOL_FLAGS)[number][]
+}
+
+/** The fast-finality bucket of each direction. */
+const FAST_FINALITY_BUCKETS = {
+  outbound: 'fastFinalityOutbound',
+  inbound: 'fastFinalityInbound',
+} as const satisfies Record<TransferDirection, keyof MultiTokenPoolRateLimits>
+
+/**
+ * The bucket a transfer of one direction and finality consumes, as the store resolves it
+ * (chainlink-ccip c950d9bc `SecurityPolicyStore._consumeRateLimit`): a fast-finality transfer uses
+ * the fast-finality bucket when it is enabled, else the direction's default bucket. A disabled
+ * default bucket is no limit.
+ * @internal
+ */
+export function effectiveRateLimit(
+  rateLimits: MultiTokenPoolRateLimits,
+  direction: TransferDirection,
+  fastFinality: boolean,
+): RateLimitConfig {
+  const fast = rateLimits[FAST_FINALITY_BUCKETS[direction]]
+  return fastFinality && fast.enabled ? fast : rateLimits[direction]
+}
+
+/**
+ * Whether a lane's rate limits hold every transfer of a direction (`'both'`: of each direction):
+ * the bucket each finality consumes is a stop. The one rule the lane view (`stopped`), the guard's
+ * waiver, `goingLive` and the lane stop ops share. A lane with no rate limits is not stopped.
+ * @internal
+ */
+export function isLaneStopped(
+  rateLimits: MultiTokenPoolRateLimits | null | undefined,
+  direction: TransferDirection | 'both',
+): boolean {
+  if (!rateLimits) return false
+  const directions: TransferDirection[] =
+    direction === 'both' ? ['outbound', 'inbound'] : [direction]
+  return directions.every((d) =>
+    [false, true].every((fastFinality) => {
+      const b = effectiveRateLimit(rateLimits, d, fastFinality)
+      return isStop({ isEnabled: b.enabled, capacity: b.capacity ?? 0n, rate: b.rate ?? 0n })
+    }),
+  )
 }
