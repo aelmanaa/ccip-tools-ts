@@ -18,9 +18,9 @@ import {
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
-import { isNotCcipContract } from '../../query.ts'
+import { readContractTypeOrNull } from '../../query.ts'
 import { assertUnique, validateAddress, validateArray } from '../../validate.ts'
-import { type PolicyName, encodePolicyName } from '../contracts.ts'
+import { type PolicyName, assertProviderHasCode, encodePolicyName } from '../contracts.ts'
 import { policyKey } from '../projection.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -110,17 +110,16 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
         )
       const provider = u.remoteTokenAddressProvider
       if (provider === null) continue
-      if ((await chain.provider.getCode(provider, blockTag)) === '0x')
-        throw new CCTParamsInvalidError(
-          this.name,
-          `${at}.remoteTokenAddressProvider`,
-          `${provider} has no code, so the PoolConfigManager refuses it (ProviderHasNoCode): deploy the provider first, or pass null to clear it`,
-          { context },
-        )
-      const [type] = await chain.typeAndVersion(provider).catch((err: unknown) => {
-        if (isNotCcipContract(err)) return ['']
-        throw err
-      })
+      await assertProviderHasCode(
+        this.name,
+        chain,
+        `${at}.remoteTokenAddressProvider`,
+        provider,
+        blockTag,
+        'deploy the provider first, or pass null to clear it',
+        context,
+      )
+      const type = await readContractTypeOrNull(chain, provider)
       // the local token's own address is a remote token only where addresses are EVM's
       const nonEvm = state.policies.connection
         .filter((r) => policyKey(r.policyName, 'policyName') === word)

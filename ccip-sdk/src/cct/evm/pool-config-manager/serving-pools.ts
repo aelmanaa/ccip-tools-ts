@@ -16,7 +16,7 @@ import {
   multiTokenPoolContract,
   reportsMultiTokenPool,
 } from '../multi-token-pool/contracts.ts'
-import { isMissingFunction, isNotCcipContract } from '../query.ts'
+import { isMissingFunction, readContractTypeOrNull } from '../query.ts'
 import { readTokenAdminRegistryConfig } from '../token-admin-registry/contracts.ts'
 import { readInBatches } from './contracts.ts'
 
@@ -53,14 +53,8 @@ export async function poolConfigManagerOf(
   version: MultiTokenPoolVersion,
   blockTag: number | undefined,
 ): Promise<string | undefined> {
-  const type = await chain.typeAndVersion(pool).then(
-    ([t]) => t,
-    (err: unknown) => {
-      if (isNotCcipContract(err)) return undefined
-      throw err
-    },
-  )
-  if (type === undefined || !reportsMultiTokenPool(type)) return undefined
+  const type = await readContractTypeOrNull(chain, pool)
+  if (type === null || !reportsMultiTokenPool(type)) return undefined
   // any multi-token pool version answers `getPoolConfigManager`; a pool of an unknown version that
   // calls this PCM still serves it, so it is counted rather than refused
   return multiTokenPoolContract(chain, pool, version)

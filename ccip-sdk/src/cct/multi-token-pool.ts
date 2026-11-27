@@ -1,8 +1,8 @@
 /**
  * Family-neutral multi-token pool (MTTP) types shared by the EVM and Solana CCT surfaces.
  *
- * It holds types, two runtime constant tuples (`MULTI_TOKEN_POOL_LANE_CHECKS`,
- * `MULTI_TOKEN_POOL_STEP_SIGNER_KINDS`), the two snapshot (de)serializers, and small lane helpers
+ * It holds types, three runtime constant tuples (`MULTI_TOKEN_POOL_LANE_CHECKS`,
+ * `MULTI_TOKEN_POOL_STEP_SIGNER_KINDS`, `DROPPABLE_REMOTE_POOL_FLAGS`), the two snapshot (de)serializers, and small lane helpers
  * both families' lane checks use (`abiWord`, `isStop`, internal). Both
  * `@chainlink/ccip-sdk/cct/evm` and `@chainlink/ccip-sdk/cct/solana` re-export the types with
  * `export type` and the runtime values as values. The module has no side effects and imports no
@@ -839,4 +839,34 @@ export function abiWord(address: string): string {
  */
 export function isStop(bucket: { isEnabled: boolean; capacity: bigint; rate: bigint }): boolean {
   return bucket.isEnabled && bucket.capacity === 0n && bucket.rate === 0n
+}
+
+/** One token lane: a local token (each family's spelling) and a remote chain. EVM's PCM `LaneKey`. */
+export type MultiTokenPoolLaneKey = {
+  /** Local token. */
+  tokenAddress: string
+  /** CCIP selector of the remote chain. */
+  remoteChainSelector: bigint
+}
+
+/** Flags a write may turn off on a lane's trusted pools, confirmed in `confirmDropped`. */
+export const DROPPABLE_REMOTE_POOL_FLAGS = [
+  'trustPolicyRemotePools',
+  'allowLegacyPoolData',
+] as const
+
+/**
+ * What a write drops from a lane's trusted remote pools, confirmed by repeating it in
+ * `confirmDropped` (A21, A22). Both families' guards use it; `flags` applies to EVM inline records.
+ */
+export type MultiTokenPoolInlineRemotePoolDrop = {
+  /** The lane. */
+  lane: MultiTokenPoolLaneKey
+  /** Remote pools the lane no longer trusts after the write. */
+  remotePools?: string[]
+  /**
+   * Flags the write turns off: `allowLegacyPoolData` on any pool the lane keeps;
+   * `trustPolicyRemotePools` (its dropped policy pools are listed in `remotePools` too).
+   */
+  flags?: (typeof DROPPABLE_REMOTE_POOL_FLAGS)[number][]
 }

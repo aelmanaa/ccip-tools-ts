@@ -25,7 +25,7 @@ import {
   isSupportedMultiTokenPoolType,
   multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
-import { isNotCcipContract } from '../../query.ts'
+import { readContractTypeOrNull } from '../../query.ts'
 import { validateAllowedFinality } from '../../token-pool/operations/set-allowed-finality-config.ts'
 import {
   validateAddress,
@@ -35,7 +35,7 @@ import {
   validateOneOf,
   validateUint8,
 } from '../../validate.ts'
-import type { MultiTokenPoolTokenProfileFields } from '../contracts.ts'
+import { type MultiTokenPoolTokenProfileFields, assertProviderHasCode } from '../contracts.ts'
 import {
   type MultiTokenPoolRecordState,
   multiTokenPoolSupportedChains,
@@ -612,16 +612,15 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
     )
     for (const { param, next } of set) {
       const provider = next.additionalPoolDataProvider!
-      if ((await chain.provider.getCode(provider, blockTag)) === '0x')
-        throw new CCTParamsInvalidError(
-          this.name,
-          `${param}.additionalPoolDataProvider`,
-          `${provider} has no code: the store refuses it (ProviderHasNoCode)`,
-        )
-      const [type] = await chain.typeAndVersion(provider).catch((err: unknown) => {
-        if (isNotCcipContract(err)) return ['']
-        throw err
-      })
+      await assertProviderHasCode(
+        this.name,
+        chain,
+        `${param}.additionalPoolDataProvider`,
+        provider,
+        blockTag,
+        'deploy the provider first, or pass null to clear it',
+      )
+      const type = await readContractTypeOrNull(chain, provider)
       if (type !== UID_PROVIDER_TYPE) continue
       const entry = serving.entries.get(next.tokenAddress)
       const diverged = serving.diverged.find((d) => d.token === next.tokenAddress)

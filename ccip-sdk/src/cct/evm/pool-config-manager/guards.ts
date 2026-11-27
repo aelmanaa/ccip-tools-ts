@@ -14,6 +14,7 @@ import type { LaneRecordType, RateLimiterState, TransferDirection } from '../../
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { canonicalJson } from '../../canonical.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
+import { droppedRemotePools } from '../../multi-token-pool-drops.ts'
 import {
   type MultiTokenPoolLaneFinding,
   type MultiTokenPoolRateLimits,
@@ -815,27 +816,17 @@ export function multiTokenPoolLaneTransitions(
 export function multiTokenPoolDroppedPools(
   lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
 ): { lane: MultiTokenPoolLaneKey; remotePools: string[]; flags: 'allowLegacyPoolData'[] }[] {
-  return lanes
-    .filter(
-      ({ before, after }) => before.connection.hasConnection && after.connection.hasConnection,
-    )
-    .map(({ before, after }) => {
-      const kept = new Map(
-        after.connection.remotePools.map((p) => [p.address, p.allowLegacyPoolData]),
+  return droppedRemotePools(
+    lanes
+      .filter(
+        ({ before, after }) => before.connection.hasConnection && after.connection.hasConnection,
       )
-      const remotePools = before.connection.remotePools
-        .filter((p) => !kept.has(p.address))
-        .map((p) => p.address)
-      const legacyOff = before.connection.remotePools.some(
-        (p) => p.allowLegacyPoolData && kept.get(p.address) === false,
-      )
-      return {
+      .map(({ before, after }) => ({
         lane: { tokenAddress: after.tokenAddress, remoteChainSelector: after.remoteChainSelector },
-        remotePools,
-        flags: legacyOff ? (['allowLegacyPoolData'] as const).slice() : [],
-      }
-    })
-    .filter((d) => d.remotePools.length || d.flags.length)
+        before: before.connection.remotePools,
+        after: after.connection.remotePools,
+      })),
+  )
 }
 
 /** The record types the PCM's post-write `_checkLane` requires (each store's `checkLaneRecords`). */

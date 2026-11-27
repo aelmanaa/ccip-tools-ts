@@ -356,6 +356,7 @@ export function assertUnique<T>(
   values: readonly T[],
   keyOf: (value: T, i: number) => string,
   noun: string,
+  context?: Record<string, unknown>,
 ): void {
   const seen = new Map<string, number>()
   values.forEach((v, i) => {
@@ -366,6 +367,7 @@ export function assertUnique<T>(
         operation,
         `${param}[${i}]`,
         `repeats ${param}[${first}]: give each ${noun} once`,
+        context && { context },
       )
     seen.set(key, i)
   })

@@ -6506,9 +6506,7 @@ export type * from './multi-token-pool-hooks/operations/index.ts'
 export type * from './multi-token-pool-providers/operations/index.ts'
 export type * from './pool-config-manager/records.ts'
 export type {
-  MultiTokenPoolInlineRemotePoolDrop,
   MultiTokenPoolLaneDirections,
-  MultiTokenPoolLaneKey,
   PolicyName,
   PoolConfigManagerTarget,
 } from './pool-config-manager/contracts.ts'

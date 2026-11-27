@@ -19,7 +19,7 @@ import {
   GetPoolConfigManagerState,
 } from '../../pool-config-manager/operations/get-pool-config-manager-state.ts'
 import { readPoolsServingPoolConfigManager } from '../../pool-config-manager/serving-pools.ts'
-import { EVMQuery, isNotCcipContract } from '../../query.ts'
+import { EVMQuery, readContractTypeOrNull } from '../../query.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
 import { type PolicyStoreType, POOL_CONFIG_MANAGER_TYPE } from '../contracts.ts'
 import {
@@ -137,14 +137,8 @@ export class GetMultiTokenPoolStack extends EVMQuery<
           })
         for (const caller of store.authorizedCallers) {
           if (caller === pcm.poolConfigManager) continue
-          const type = await chain.typeAndVersion(caller).then(
-            ([t]) => t,
-            (err: unknown) => {
-              // no (parseable) typeAndVersion: not a CCIP contract; transport errors propagate
-              if (isNotCcipContract(err)) return undefined
-              throw err
-            },
-          )
+          // no (parseable) typeAndVersion: not a CCIP contract; transport errors propagate
+          const type = (await readContractTypeOrNull(chain, caller)) ?? undefined
           findings.push(
             type === POOL_CONFIG_MANAGER_TYPE
               ? {

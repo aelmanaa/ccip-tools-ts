@@ -29,6 +29,10 @@ import {
 import { resultToObject } from '../../../evm/types.ts'
 import type { FinalityAllowed } from '../../../extra-args.ts'
 import { CCTDataDecodeError, CCTParamsInvalidError } from '../../errors.ts'
+import type {
+  MultiTokenPoolInlineRemotePoolDrop,
+  MultiTokenPoolLaneKey,
+} from '../../multi-token-pool.ts'
 import {
   type LockOrBurnFlavor,
   type MultiTokenPoolVersion,
@@ -298,6 +302,31 @@ export type PolicyName = string
 const PRINTABLE = /^[\x20-\x7e]+$/
 
 /**
+ * Validates a policy record key (`{ policyName, remoteChainSelector }`) at `at`, before any RPC, and
+ * returns its canonical key (`<policy word>:<chain>`, as the projection's `recordKey`).
+ * @throws {@link CCTParamsInvalidError} if the name is invalid, the selector is not a uint64, or it
+ *   is `0` for a type with no default record (`ZeroChainSelectorNotAllowed`)
+ * @internal
+ */
+export function validatePolicyRecordKey(
+  operation: string,
+  at: string,
+  key: unknown,
+  { allowDefault = true }: { allowDefault?: boolean } = {},
+): string {
+  const { policyName, remoteChainSelector } = (key ?? {}) as Record<string, unknown>
+  const word = encodePolicyName(operation, `${at}.policyName`, policyName)
+  validateUint64(operation, `${at}.remoteChainSelector`, remoteChainSelector)
+  if (!allowDefault && remoteChainSelector === 0n)
+    throw new CCTParamsInvalidError(
+      operation,
+      `${at}.remoteChainSelector`,
+      'is 0: this record type has no default record; give a remote chain (ZeroChainSelectorNotAllowed)',
+    )
+  return `${word.toLowerCase()}:${String(remoteChainSelector)}`
+}
+
+/**
  * Encodes a {@link PolicyName} to its `bytes32`.
  * @throws {@link CCTParamsInvalidError} if the name is empty, longer than 31 bytes, not printable
  * ASCII, or the zero `bytes32` (which means "no policy")
@@ -350,38 +379,16 @@ export function policyNameOf(word: string): PolicyName {
   return decodePolicyName(word) ?? word
 }
 
-/** One token lane: a local token and a remote chain. The PCM's `LaneKey`. */
-export type MultiTokenPoolLaneKey = {
-  /** Local token. */
-  tokenAddress: string
-  /** CCIP selector of the remote chain. */
-  remoteChainSelector: bigint
-}
-
 /** A lane key plus the directions that apply to it (`goingLive`, `confirmOpening`). */
 export type MultiTokenPoolLaneDirections = MultiTokenPoolLaneKey & {
   /** The directions. */
   directions: TransferDirection[]
 }
 
-/** Flags a write may turn off on a lane's trusted pools, confirmed in `confirmDropped`. */
-export const DROPPABLE_REMOTE_POOL_FLAGS = [
-  'trustPolicyRemotePools',
-  'allowLegacyPoolData',
-] as const
-
-/** What a write drops from a lane's trusted remote pools, confirmed by repeating it. */
-export type MultiTokenPoolInlineRemotePoolDrop = {
-  /** The lane. */
-  lane: MultiTokenPoolLaneKey
-  /** Remote pools the lane no longer trusts after the write. */
-  remotePools?: string[]
-  /**
-   * Flags the write turns off: `allowLegacyPoolData` on any pool the lane keeps;
-   * `trustPolicyRemotePools` (its dropped policy pools are listed in `remotePools` too).
-   */
-  flags?: (typeof DROPPABLE_REMOTE_POOL_FLAGS)[number][]
-}
+// the family-neutral lane key and drop confirmation (both families' guards); re-exported so
+// importers keep their path
+export type { MultiTokenPoolInlineRemotePoolDrop, MultiTokenPoolLaneKey }
+export { DROPPABLE_REMOTE_POOL_FLAGS } from '../../multi-token-pool.ts'
 
 /** Lanes or tokens per PCM batch view call (every batch view chunks by it). */
 export const LANE_BATCH_SIZE = 100
@@ -563,4 +570,27 @@ export function decodeTokenProfile(
       source,
     ),
   }
+}
+
+/**
+ * Refuses a provider address with no code at `blockTag`, as the stores do (`ProviderHasNoCode`).
+ * @throws {@link CCTParamsInvalidError} at `param` if the address has no code
+ * @internal
+ */
+export async function assertProviderHasCode(
+  operation: string,
+  chain: EVMChain,
+  param: string,
+  provider: string,
+  blockTag: number,
+  fix: string,
+  context?: Record<string, unknown>,
+): Promise<void> {
+  if ((await chain.provider.getCode(provider, blockTag)) !== '0x') return
+  throw new CCTParamsInvalidError(
+    operation,
+    param,
+    `${provider} has no code, so the store refuses it (ProviderHasNoCode): ${fix}`,
+    context && { context },
+  )
 }

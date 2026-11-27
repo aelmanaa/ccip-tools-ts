@@ -343,7 +343,6 @@ const DISABLED_FEE: TokenTransferFeeConfig = {
 /** A policy name's canonical key (its `bytes32`, lowercase). @internal */
 export const policyKey = (name: PolicyName, param: string) =>
   encodePolicyName(OPERATION, param, name).toLowerCase()
-/** A lane's canonical key (`checksummed token:chain`). @internal */
 /** A lane's key: `<checksummed token>:<chain>`. @internal */
 export const laneKey = (token: string, chain: bigint) => `${getAddress(token)}:${chain}`
 /** A policy record's key: `<policy word>:<chain>`. @internal */
