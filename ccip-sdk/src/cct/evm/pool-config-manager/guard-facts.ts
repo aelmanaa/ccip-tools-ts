@@ -470,9 +470,10 @@ async function isDataValid(
  * What a remote multi-token pool sends toward this chain and accepts from it: its lane's format, and
  * its token's provider's verdict on the data this lane sends and the data it adds. No provider
  * accepts anything and adds nothing. A remote the SDK cannot resolve (another variant, an unknown
- * version) leaves it unread.
+ * version) leaves it unread. Shared with the Solana lane check (UID pairing toward an EVM MTTP).
+ * @internal
  */
-async function readRemoteMultiTokenPoolSide(
+export async function readRemoteMultiTokenPoolSide(
   remote: EVMChain,
   remotePool: string,
   remoteToken: string,

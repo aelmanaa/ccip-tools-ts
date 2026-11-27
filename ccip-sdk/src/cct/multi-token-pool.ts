@@ -435,8 +435,8 @@ export type MultiTokenPoolTransferQuote = {
   /** Amount the receiver gets: `amount - feeDeducted`. */
   netAmount: bigint
   /**
-   * Whether a fee record resolves. Always `true` in a returned quote: a lane without one makes the
-   * quote throw, since a send would revert.
+   * Whether a fee record resolves: `true` on EVM; on Solana `false` for a legacy lane without a fee
+   * record (the send falls back to the FeeQuoter); a long lane without one throws.
    */
   hasFeeRecord: boolean
 }
@@ -799,4 +799,20 @@ export type MultiTokenPoolExecutedStep = MultiTokenPoolPlanStep<string> & {
   contractAddress?: string
   /** Accounts the step created, by name (e.g. `poolGroupAddress`, `poolGroupId`, `lookupTableAddress`). */
   created?: Record<string, string>
+}
+
+/** Default `maxTransferFeeBps` of the post-state guards (the token fee cap, both tiers). @internal */
+export const DEFAULT_MAX_TRANSFER_FEE_BPS = 1_000
+/** Default `minDestGasOverhead` of the post-state guards (destination gas). @internal */
+export const DEFAULT_MIN_DEST_GAS_OVERHEAD = 200_000
+/** Gas a resolved hook adds to the default minimum destination gas. @internal */
+export const HOOK_DEST_GAS_OVERHEAD = 100_000
+/** Long pool data without additional data: decimals, source token and two offsets/lengths. @internal */
+export const LONG_POOL_DATA_BYTES = 192
+/** Legacy pool data: the decimals word. @internal */
+export const LEGACY_POOL_DATA_BYTES = 32
+
+/** Bytes of long pool data with `extra` bytes of additional data (ABI-padded to 32). @internal */
+export function longPoolDataBytes(extra: number): number {
+  return LONG_POOL_DATA_BYTES + Math.ceil(extra / 32) * 32
 }

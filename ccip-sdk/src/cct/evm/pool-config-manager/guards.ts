@@ -18,6 +18,11 @@ import {
   type MultiTokenPoolLaneFinding,
   type MultiTokenPoolRemoteAttestation,
   type MultiTokenPoolRemoteFact,
+  DEFAULT_MAX_TRANSFER_FEE_BPS,
+  DEFAULT_MIN_DEST_GAS_OVERHEAD,
+  HOOK_DEST_GAS_OVERHEAD,
+  LEGACY_POOL_DATA_BYTES,
+  longPoolDataBytes,
   sortFindings,
 } from '../../multi-token-pool.ts'
 import { parseUniqueRemoteAddresses } from '../../remote-address.ts'
@@ -46,16 +51,16 @@ import {
   resolveMultiTokenPoolLanes,
 } from './projection.ts'
 
-/** Default {@link MultiTokenPoolGuardOptions.maxTransferFeeBps} (the token fee cap). @internal */
-export const DEFAULT_MAX_TRANSFER_FEE_BPS = 1_000
-/** Default {@link MultiTokenPoolGuardOptions.minDestGasOverhead} (destination gas). @internal */
-export const DEFAULT_MIN_DEST_GAS_OVERHEAD = 200_000
-/** Gas a resolved hook adds to the default minimum destination gas. @internal */
-export const HOOK_DEST_GAS_OVERHEAD = 100_000
-/** Long pool data without additional data: decimals, source token and two offsets/lengths. @internal */
-export const LONG_POOL_DATA_BYTES = 192
-/** Legacy pool data: the decimals word. @internal */
-export const LEGACY_POOL_DATA_BYTES = 32
+// the guard defaults and pool-data sizes are family-neutral: they live in the shared module, re-exported
+// here so EVM importers keep their path
+export {
+  DEFAULT_MAX_TRANSFER_FEE_BPS,
+  DEFAULT_MIN_DEST_GAS_OVERHEAD,
+  HOOK_DEST_GAS_OVERHEAD,
+  LEGACY_POOL_DATA_BYTES,
+  LONG_POOL_DATA_BYTES,
+  longPoolDataBytes,
+} from '../../multi-token-pool.ts'
 
 /**
  * The guard thresholds and confirmations of a lane-affecting write (never switches that skip a rule);
@@ -268,11 +273,6 @@ export function requiredMultiTokenPoolGuardFacts(
       remoteChainSelector,
     })),
   }
-}
-
-/** Bytes of long pool data with `extra` bytes of additional data (ABI-padded to 32). @internal */
-export function longPoolDataBytes(extra: number): number {
-  return LONG_POOL_DATA_BYTES + Math.ceil(extra / 32) * 32
 }
 
 /** A rule's failure to read a fact: the framework throws it as `CCTParamsInvalidError`. @internal */
