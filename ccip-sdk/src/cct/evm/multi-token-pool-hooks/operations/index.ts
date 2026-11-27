@@ -15,3 +15,7 @@ export {
   SetMultiTokenPoolHooksBlocklist,
   SetMultiTokenPoolHooksPolicyEngine,
 } from './hooks-config-writes.ts'
+export {
+  type DeployMultiTokenPoolHooksParams,
+  DeployMultiTokenPoolHooks,
+} from './deploy-multi-token-pool-hooks.ts'

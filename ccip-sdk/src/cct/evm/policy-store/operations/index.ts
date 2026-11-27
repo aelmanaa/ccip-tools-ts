@@ -7,3 +7,4 @@ export {
   type UpdatePolicyStoreAuthorizedCallersParams,
   UpdatePolicyStoreAuthorizedCallers,
 } from './update-policy-store-authorized-callers.ts'
+export { type DeployPolicyStoreParams, DeployPolicyStore } from './deploy-policy-store.ts'

@@ -232,3 +232,7 @@ export {
   type WithdrawMultiTokenPoolFeeTokensResult,
   WithdrawMultiTokenPoolFeeTokens,
 } from './withdraw-multi-token-pool-fee-tokens.ts'
+export {
+  type DeployPoolConfigManagerParams,
+  DeployPoolConfigManager,
+} from './deploy-pool-config-manager.ts'

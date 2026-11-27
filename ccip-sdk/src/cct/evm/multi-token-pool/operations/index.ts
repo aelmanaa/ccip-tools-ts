@@ -28,3 +28,4 @@ export {
   TransferMultiTokenPoolOwnership,
   TransferPolicyStoreOwnership,
 } from './ownership-writes.ts'
+export { type DeployMultiTokenPoolParams, DeployMultiTokenPool } from './deploy-multi-token-pool.ts'

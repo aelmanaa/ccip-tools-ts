@@ -397,8 +397,11 @@ export function validateCCVList(operation: string, param: string, value: unknown
   })
 }
 
-/** Validates one caller list: an array of distinct, non-zero addresses; returns it checksummed. */
-function validateCallers(operation: string, param: string, callers: unknown): string[] {
+/**
+ * Validates one caller list: an array of distinct, non-zero addresses; returns it checksummed.
+ * @internal
+ */
+export function validateCallers(operation: string, param: string, callers: unknown): string[] {
   validateArray(operation, param, callers)
   const normalized = callers.map((caller, i) => {
     validateNonZeroAddress(operation, `${param}[${i}]`, caller)
