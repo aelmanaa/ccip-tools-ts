@@ -29,9 +29,16 @@ import { deriveTokenPoolChainConfigV2Pda } from '../../../solana/token-pool.ts'
 import { MAX_COMPUTE_UNIT_LIMIT } from '../../../solana/utils.ts'
 import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
-import type { MultiTokenPoolInlineRemotePoolDrop } from '../../evm/pool-config-manager/contracts.ts'
-import type { MultiTokenPoolLaneFinding, MultiTokenPoolSnapshot } from '../../multi-token-pool.ts'
-import { parseUniqueRemoteAddresses } from '../../remote-address.ts'
+import {
+  assertDropsConfirmed,
+  droppedRemotePools,
+  sealConfirmDropped,
+} from '../../multi-token-pool-drops.ts'
+import type {
+  MultiTokenPoolInlineRemotePoolDrop,
+  MultiTokenPoolLaneFinding,
+  MultiTokenPoolSnapshot,
+} from '../../multi-token-pool.ts'
 import { deriveTokenPoolChainConfigPda } from '../programs/token-pool.ts'
 import { parsePublicKey } from '../validate.ts'
 import { poolGroupPdas } from './accounts.ts'
@@ -384,17 +391,7 @@ export async function judgePoolGroupWrite(
     const after1 = v1 ?? nothing
     if ((after1.outbound && !before0.outbound) || (after1.inbound && !before0.inbound))
       goingLive.push(key)
-    const kept = new Map(after1.pools.map((p) => [p.address, p]))
-    const lost = before0.pools.filter((p) => !kept.has(p.address)).map((p) => p.address)
-    const legacyLost = before0.pools.some(
-      (p) => p.allowLegacyPoolData && kept.get(p.address)?.allowLegacyPoolData === false,
-    )
-    if (lost.length || legacyLost)
-      dropped.push({
-        lane: key,
-        ...(lost.length && { remotePools: lost }),
-        ...(legacyLost && { flags: ['allowLegacyPoolData'] }),
-      })
+    dropped.push(...droppedRemotePools([{ lane: key, before: before0.pools, after: after1.pools }]))
     const fails = v1?.failsClosed
     if (fails && fails.code !== before0.failsClosed?.code) {
       failingClosed.push({ ...key, reason: fails.reason })
@@ -424,8 +421,6 @@ export async function judgePoolGroupWrite(
     }
   })
 
-  // TODO(M6): the drop confirmation, its sealing and the drop computation move to the family-neutral
-  // guard module (mttp/tools/m6-s3a-dropped-pools.diff); call it from here once it lands
   assertDropsConfirmed(operation, dropped, input.confirmDropped ?? [])
   if (goingLive.length) {
     const message = `the write makes ${goingLive.length} lane(s) live (${goingLive.map(laneKey).join(', ')}), which this op does not check`
@@ -460,59 +455,6 @@ export async function judgePoolGroupWrite(
 }
 
 /**
- * A21: refuses a write that drops trusted remote pools (or `allowLegacyPoolData` on a kept one) on
- * a lane, unless `confirmDropped` lists the drop for that lane. Addresses compare canonically.
- * @throws {@link CCTParamsInvalidError} (param `confirmDropped`, `context.dropped`) if any drop is
- *   unconfirmed
- * @internal
- */
-export function assertDropsConfirmed(
-  operation: string,
-  dropped: readonly MultiTokenPoolInlineRemotePoolDrop[],
-  confirmDropped: readonly MultiTokenPoolInlineRemotePoolDrop[],
-): void {
-  if (!dropped.length) return
-  const confirmed = new Map(confirmDropped.map((d) => [laneKey(d.lane), d]))
-  const unconfirmed = dropped
-    .map((d) => {
-      const ok = confirmed.get(laneKey(d.lane))
-      const okPools = new Set(
-        ok?.remotePools
-          ? parseUniqueRemoteAddresses(
-              operation,
-              'confirmDropped',
-              ok.remotePools,
-              d.lane.remoteChainSelector,
-            )
-          : [],
-      )
-      return {
-        lane: d.lane,
-        remotePools: (d.remotePools ?? []).filter((p) => !okPools.has(p)),
-        flags: (d.flags ?? []).filter((f) => !ok?.flags?.includes(f)),
-      }
-    })
-    .filter((d) => d.remotePools.length || d.flags.length)
-  if (unconfirmed.length)
-    throw new CCTParamsInvalidError(
-      operation,
-      'confirmDropped',
-      `the write drops trusted remote pools, so in-flight inbound messages from them would revert: ${unconfirmed
-        .map(
-          (d) =>
-            `${laneKey(d.lane)} drops ${[
-              ...(d.remotePools.length ? [`pools ${d.remotePools.join(', ')}`] : []),
-              ...(d.flags.length ? [`flags ${d.flags.join(', ')}`] : []),
-            ].join(' and ')}`,
-        )
-        .join(
-          '; ',
-        )}. To proceed, add confirmDropped: context.dropped (same shape), or keep them trusted`,
-      { context: { dropped: unconfirmed } },
-    )
-}
-
-/**
  * The guard options in a stable shape (defaults dropped, lanes and pools sorted, mints canonical),
  * sealed into the snapshot so a re-check judges with the same confirmations.
  * @throws {@link CCTParamsInvalidError} if `confirmDropped` is malformed
@@ -525,30 +467,10 @@ export function poolGroupGuardOptionsOf(
   if (o.confirmDropped === undefined) return {}
   if (!Array.isArray(o.confirmDropped))
     throw new CCTParamsInvalidError(operation, 'confirmDropped', 'must be an array')
-  if (!o.confirmDropped.length) return {}
-  return {
-    confirmDropped: o.confirmDropped
-      .map(({ lane, remotePools, flags }, i) => {
-        const tokenAddress = parsePublicKey(
-          operation,
-          `confirmDropped[${i}].lane.tokenAddress`,
-          Reflect.get(Object(lane), 'tokenAddress'),
-        ).toBase58()
-        return {
-          lane: { tokenAddress, remoteChainSelector: lane.remoteChainSelector },
-          ...(remotePools?.length && {
-            remotePools: parseUniqueRemoteAddresses(
-              operation,
-              `confirmDropped[${i}].remotePools`,
-              remotePools,
-              lane.remoteChainSelector,
-            ).sort(),
-          }),
-          ...(flags?.length && { flags: [...new Set(flags)].sort() }),
-        }
-      })
-      .sort((a, b) => laneKey(a.lane).localeCompare(laneKey(b.lane))),
-  }
+  const confirmDropped = sealConfirmDropped(operation, o.confirmDropped, (t, param) =>
+    parsePublicKey(operation, param, t).toBase58(),
+  )
+  return confirmDropped ? { confirmDropped } : {}
 }
 
 /**

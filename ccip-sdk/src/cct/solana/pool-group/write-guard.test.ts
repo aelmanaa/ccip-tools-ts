@@ -6,12 +6,9 @@ import { Keypair } from '@solana/web3.js'
 import '../../../index.ts'
 import { networkInfo } from '../../../networks.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
+import { assertDropsConfirmed } from '../../multi-token-pool-drops.ts'
 import { laneFailsClosedFinding } from './lane.ts'
-import {
-  assertDropsConfirmed,
-  poolGroupGuardOptionsOf,
-  sealPoolGroupSnapshot,
-} from './write-guard.ts'
+import { poolGroupGuardOptionsOf, sealPoolGroupSnapshot } from './write-guard.ts'
 
 const SEPOLIA = networkInfo('ethereum-testnet-sepolia').chainSelector
 const MINT = Keypair.generate().publicKey.toBase58()

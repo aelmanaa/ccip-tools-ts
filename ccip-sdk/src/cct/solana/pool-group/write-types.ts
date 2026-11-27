@@ -9,9 +9,9 @@ import type { AddressLookupTableAccount, TransactionInstruction } from '@solana/
 
 import type { TokenTransferFeeConfig } from '../../../chain.ts'
 import type { UnsignedSolanaTx } from '../../../solana/types.ts'
-import type { MultiTokenPoolInlineRemotePoolDrop } from '../../evm/pool-config-manager/contracts.ts'
 import type {
   MultiTokenPoolExpectedSnapshot,
+  MultiTokenPoolInlineRemotePoolDrop,
   MultiTokenPoolLaneFinding,
   MultiTokenPoolSnapshot,
 } from '../../multi-token-pool.ts'
