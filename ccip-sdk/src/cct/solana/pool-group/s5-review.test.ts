@@ -239,6 +239,14 @@ describe('S5 review M3: a lift that re-opens admission', () => {
       getProgramAccounts: () => Promise.reject(new Error('must not list')),
     })
     const r = recordOf({ laneMode: 'allMembers', drivenLanesPaused: true })
+    const off = recordOf({ laneMode: 'off', groupPaused: true })
+    // n1: a record in 'off' admits nobody, so its lift lists no member either
+    assert.deepEqual(
+      await reopenedAdmissions('setPoolGroupPause', chain, { program: PROGRAM, group: GROUP }, [
+        { selector: SEPOLIA, ...off, after: { ...off.record, groupPaused: false } },
+      ]),
+      [],
+    )
     assert.deepEqual(
       await reopenedAdmissions('setPoolGroupPause', chain, { program: PROGRAM, group: GROUP }, [
         { selector: SEPOLIA, ...r, after: { ...r.record, groupPaused: true } },

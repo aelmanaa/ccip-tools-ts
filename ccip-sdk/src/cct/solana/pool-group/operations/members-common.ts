@@ -25,6 +25,7 @@ import { deriveTokenPoolChainConfigPda } from '../../programs/token-pool.ts'
 import {
   type GroupChainPolicyAccount,
   type PoolGroupMemberAccount,
+  GROUP_CHAIN_POLICY_FIXED_LEN,
   poolGroupChainAdmits,
   poolGroupPdas,
 } from '../accounts.ts'
@@ -229,7 +230,14 @@ export async function reopenedAdmissions(
     >
   }[],
 ): Promise<PoolGroupLaneKey[]> {
-  const reopened = records.filter((r) => !chainRunsDriven(r.record) && chainRunsDriven(r.after))
+  // a record in 'off', or a subset with no bit set, admits nobody: no member listing for it (n1)
+  const admitsSome = (r: (typeof records)[number]) =>
+    'allMembers' in r.record.laneMode ||
+    ('subset' in r.record.laneMode &&
+      r.data.subarray(GROUP_CHAIN_POLICY_FIXED_LEN).some((b) => b !== 0))
+  const reopened = records.filter(
+    (r) => admitsSome(r) && !chainRunsDriven(r.record) && chainRunsDriven(r.after),
+  )
   if (!reopened.length) return []
   const members = await listPoolGroupMembers(operation, chain, ref.program, ref.group, {
     param: 'acknowledgeLiveAdmission',
