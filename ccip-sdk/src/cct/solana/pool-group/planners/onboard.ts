@@ -54,7 +54,7 @@ import {
   stepId,
   toPlannerTx,
 } from './context.ts'
-import { stableChunks, unpauseDecision } from './engine.ts'
+import { mergeBlocks, stableChunks, unpauseDecision } from './engine.ts'
 import {
   type LaneCheckInputs,
   type PlanState,
@@ -77,7 +77,6 @@ import {
   sectionHolds,
   securityCopiedFindings,
 } from './flow-common.ts'
-import { mergeBlocks } from './run.ts'
 import type {
   GenerateOnboardMultiTokenPoolTokensParams,
   PoolGroupOnboardingCreate,
@@ -231,6 +230,13 @@ export function parseOnboarding(params: GenerateOnboardMultiTokenPoolTokensParam
         NAME,
         `${at}.solana.poolType`,
         "only 'burn-mint' pools join a pool group",
+      )
+    // the pools are in one chain's address format: one chain per token here (S6 review m5)
+    if (laneKind === 'linked' && s.remotePoolAddresses && remotes.length > 1)
+      throw new CCTParamsInvalidError(
+        NAME,
+        `${at}.solana.remotePoolAddresses`,
+        'are one chain\'s pools, in its address format: onboard a linked token with remotePoolAddresses one remote chain at a time',
       )
     const remotePoolAddresses =
       laneKind === 'linked' && s.remotePoolAddresses

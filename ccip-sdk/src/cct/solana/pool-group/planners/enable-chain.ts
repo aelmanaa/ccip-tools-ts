@@ -46,7 +46,7 @@ import {
   stepId,
   toPlannerTx,
 } from './context.ts'
-import { stableChunks, unpauseDecision } from './engine.ts'
+import { mergeBlocks, stableChunks, unpauseDecision } from './engine.ts'
 import {
   type LaneCheckInputs,
   type PlanState,
@@ -71,7 +71,6 @@ import {
   securityCopiedFindings,
 } from './flow-common.ts'
 import { MEMBERS_PER_STEP, chainPausedAsSet, sectionStep } from './onboard.ts'
-import { mergeBlocks } from './run.ts'
 import type {
   GenerateEnableMultiTokenPoolChainParams,
   PoolGroupChainEnablementStepName,

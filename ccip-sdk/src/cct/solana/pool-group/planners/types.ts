@@ -36,7 +36,9 @@ import type {
  * plan moves out of `'off'` (`solana.create` chains with a `laneMode`). On a chain that is already
  * live, a token joins without listing it, then `admitPausedLanes` lists it, creates the lane and
  * pauses it in one owner-signed transaction (no one can create the lane unpaused in between), and
- * `unpausePoolGroupLanes` lifts that lane pause after the lane check.
+ * `unpausePoolGroupLanes` lifts that lane pause after the lane check. The `token*` transactions
+ * are not pool-group transactions: `toPoolGroupSquadsBatch` refuses them, so a Squads vault proposes
+ * each as its own vault transaction (the batched counts hold for mints already registered).
  */
 export const POOL_GROUP_ONBOARDING_STEPS = [
   'createPoolGroup',
@@ -283,7 +285,7 @@ export type SolanaMultiTokenPoolOnboardingToken = {
     allowlist?: string[]
     /** A lookup table for the pool (see `onboardToken`). */
     poolLookupTableAddress?: string
-    /** Linked lanes: the lane's own remote pools. */
+    /** Linked lanes: the lane's own remote pools, in the format of the token's one remote chain. */
     remotePoolAddresses?: string[]
   }
   /** Not on Solana. */

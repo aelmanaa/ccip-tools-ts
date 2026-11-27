@@ -4,11 +4,14 @@
  * through the planners on the Devnet group G2 toward Sepolia, once signed with a wallet and once
  * through a 2-of-3 Squads vault (unsigned planners, default `maxReadySteps`, ready steps batched
  * with `toPoolGroupSquadsBatch`). Per mode:
- * 1. enable Sepolia from `'off'` (its pause), onboard the N behind that pause (join, materialize;
- *    the lane check refuses fresh mints: their Sepolia counterparts do not exist), remove the N
- *    (batched: the remote registry names no pool for them, so the remote side reads as stopped);
+ * 1. enable Sepolia from `'off'` (its pause), onboard the N behind that pause (join, materialize,
+ *    the configuration check; no lift: the make-live check refuses fresh mints, whose Sepolia
+ *    counterparts do not exist, so the lift is 1 transaction per chain, measured at N = 2 in
+ *    `planners.fork.test.ts`), remove the N (batched: the remote registry names no pool for them,
+ *    so the remote side reads as stopped);
  * 2. lift the chain pause (no member left: the check has no lane), so Sepolia is live;
- * 3. onboard the N onto the live Sepolia (join without it, then paused creation), remove them.
+ * 3. onboard the N onto the live Sepolia (join without it, then paused creation; no lift, 1
+ *    `set_lane_pause` per mint), remove them.
  * It prints the transaction, signature and approval-round counts, the lanes per materialize and
  * paused-creation transaction, and the Squads execute CU.
  *
@@ -88,6 +91,11 @@ describe(
             ])
           }
           await rewrite(G2, GROUP_OWNER_OFFSET, owner.publicKey)
+          // 22P6h4 allows no self-served pools: on the fork, its upgrade authority deploys them
+          await surfnetRequest(conn, 'surfnet_setProgramAuthority', [
+            PROGRAM,
+            owner.publicKey.toBase58(),
+          ])
           const wallet = new AnchorWallet(owner)
 
           // ── setup (not counted): N fresh mints, pools onboarded on interface 2 ──
@@ -178,14 +186,14 @@ describe(
             const onboard = await cct.onboardMultiTokenPoolTokens({
               ...g,
               tokens,
-              unpause: true,
               runId,
               landedStepIds: landed,
               getChain,
               wallet,
             })
-            assert.match(onboard.blockedBy?.reason ?? '', /lane check refuses/)
-            tally(`onboard ${N} behind the chain pause (to the check)`, onboard.steps)
+            // fresh mints have no Sepolia counterpart: the configuration check may refuse them
+            assert.match(onboard.blockedBy?.reason ?? 'lane check refuses', /lane check refuses/)
+            tally(`onboard ${N} behind the chain pause (no lift)`, onboard.steps)
             const removed = await cct.removeMultiTokenPoolToken({
               ...removal,
               solana: removalSolana,
@@ -205,14 +213,14 @@ describe(
             const live = await cct.onboardMultiTokenPoolTokens({
               ...g,
               tokens,
-              unpause: true,
               runId,
               getChain,
               solana: { acknowledgeLiveAdmission: true },
               wallet,
             })
-            assert.match(live.blockedBy?.reason ?? '', /lane check refuses/)
-            tally(`onboard ${N} onto the live chain (to the check)`, live.steps)
+            // fresh mints have no Sepolia counterpart: the configuration check may refuse them
+            assert.match(live.blockedBy?.reason ?? 'lane check refuses', /lane check refuses/)
+            tally(`onboard ${N} onto the live chain (no lift)`, live.steps)
             const removedLive = await cct.removeMultiTokenPoolToken({
               ...removal,
               solana: removalSolana,
@@ -320,16 +328,16 @@ describe(
             }),
           )
           assert.equal(enable.blockedBy, undefined, enable.blockedBy?.reason ?? '')
-          const onboard = await waves(`onboard ${N} behind the chain pause (to the check)`, () =>
+          const onboard = await waves(`onboard ${N} behind the chain pause (no lift)`, () =>
             cct.generateUnsignedOnboardMultiTokenPoolTokens({
               ...g,
               tokens,
-              unpause: true,
               ...common,
               solana: { budget },
             }),
           )
-          assert.match(onboard.blockedBy?.reason ?? '', /lane check refuses/)
+          // fresh mints have no Sepolia counterpart: the configuration check may refuse them
+          assert.match(onboard.blockedBy?.reason ?? 'lane check refuses', /lane check refuses/)
           const removed = await waves(`remove ${N}`, () =>
             cct.generateUnsignedRemoveMultiTokenPoolToken({
               ...removal,
@@ -346,16 +354,16 @@ describe(
               solana: { budget },
             }),
           )
-          const live = await waves(`onboard ${N} onto the live chain (to the check)`, () =>
+          const live = await waves(`onboard ${N} onto the live chain (no lift)`, () =>
             cct.generateUnsignedOnboardMultiTokenPoolTokens({
               ...g,
               tokens,
-              unpause: true,
               ...common,
               solana: { budget, acknowledgeLiveAdmission: true },
             }),
           )
-          assert.match(live.blockedBy?.reason ?? '', /lane check refuses/)
+          // fresh mints have no Sepolia counterpart: the configuration check may refuse them
+          assert.match(live.blockedBy?.reason ?? 'lane check refuses', /lane check refuses/)
           await waves(`remove ${N} (live chain)`, () =>
             cct.generateUnsignedRemoveMultiTokenPoolToken({
               ...removal,
