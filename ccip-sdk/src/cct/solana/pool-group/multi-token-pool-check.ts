@@ -17,11 +17,7 @@ import { type PublicKey, ComputeBudgetProgram } from '@solana/web3.js'
 import { getAddress, isAddress, zeroPadValue } from 'ethers'
 
 import type { Chain, LaneRecordType, RateLimiterState } from '../../../chain.ts'
-import {
-  CCIPContractNotRouterError,
-  CCIPError,
-  CCIPTokenPoolChainConfigNotFoundError,
-} from '../../../errors/index.ts'
+import { CCIPError, CCIPTokenPoolChainConfigNotFoundError } from '../../../errors/index.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { buildMessageForDest } from '../../../requests.ts'
@@ -174,10 +170,16 @@ export async function readEvmRemote(
   localSelector: bigint,
   reads?: EvmRemoteReads,
 ): Promise<SolanaLaneRemoteSide> {
-  const [{ EVMChain }, { reportsMultiTokenPool }, { isNotCcipContract }] = await Promise.all([
+  const [
+    { EVMChain },
+    { reportsMultiTokenPool },
+    { readContractTypeOrNull },
+    { locateRemoteRegistry },
+  ] = await Promise.all([
     import('../../../evm/index.ts'),
     import('../../evm/multi-token-pool/contracts.ts'),
     import('../../evm/query.ts'),
+    import('../../evm/pool-config-manager/guard-facts.ts'),
   ])
   if (!(remote instanceof EVMChain))
     return {
@@ -189,45 +191,23 @@ export async function readEvmRemote(
   const trusted = lane.remotePools.map((p) => p.address)
   const servingPool = read.pool.address.toBase58()
   const legacyPools = lane.remotePools.filter((p) => p.allowLegacyPoolData).map((p) => p.address)
-  const legacyTypes = await Promise.all(
-    legacyPools.map((p) =>
-      remote.typeAndVersion(p).then(
-        ([type]) => type,
-        (err: unknown) => {
-          // a pool that reports no (or an unparseable) typeAndVersion is not a multi-token pool
-          if (isNotCcipContract(err)) return ''
-          throw err
-        },
-      ),
-    ),
-  )
-  const legacyFromMultiTokenPools = legacyPools.filter((_, i) =>
-    reportsMultiTokenPool(legacyTypes[i]!),
-  )
+  // a pool that reports no (or an unparseable) typeAndVersion is not a multi-token pool
+  const legacyTypes = await Promise.all(legacyPools.map((p) => readContractTypeOrNull(remote, p)))
+  const legacyFromMultiTokenPools = legacyPools.filter((_, i) => {
+    const type = legacyTypes[i]
+    return type != null && reportsMultiTokenPool(type)
+  })
   // the remote registry is found from the first trusted pool, as the EVM guard finds it; an address
   // that does not answer as a CCIP pool leaves the remote side unlocated: fail closed, with the fix
-  const registry = await remote.getTokenAdminRegistryFor(trusted[0]!).catch((err: unknown) => {
-    if (isNotCcipContract(err) || err instanceof CCIPContractNotRouterError) return undefined
-    throw err
-  })
-  if (registry === undefined)
-    return {
-      status: 'missing',
-      reason: `the lane's first trusted remote pool ${trusted[0]} does not answer as a CCIP pool on the remote chain, so the remote registry cannot be found from it: trust the remote token's pool`,
-    }
+  const registry = await locateRemoteRegistry(remote, trusted[0]!)
+  if (typeof registry !== 'string') return registry
   const evm = reads ?? (await loadEvmRemoteReads())
   const registryPool = await evm.readRegistryPool(remote, registry, remoteToken)
   if (registryPool === null)
     return { status: 'known', registryPool, readsLongData: false, legacyFromMultiTokenPools }
   // a registry pool that does not answer as a CCIP contract is a custom pool: unread, a finding
-  const type = await remote.typeAndVersion(registryPool).then(
-    ([t]) => t,
-    (err: unknown) => {
-      if (isNotCcipContract(err)) return undefined
-      throw err
-    },
-  )
-  if (type === undefined)
+  const type = await readContractTypeOrNull(remote, registryPool)
+  if (type === null)
     return {
       status: 'unknown',
       reason: `the remote registry's pool ${registryPool} does not report a CCIP typeAndVersion, so what it reads and sends cannot be judged`,
