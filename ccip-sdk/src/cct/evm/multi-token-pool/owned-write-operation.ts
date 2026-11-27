@@ -75,6 +75,14 @@ export type MultiTokenPoolOwnedWriteContext = {
   facts: Record<string, unknown>
 }
 
+/** A resolved owned target: its reported type and version. @internal */
+export type MultiTokenPoolOwnedTarget = {
+  /** The reported contract type. */
+  type: MultiTokenPoolContractType
+  /** Its version (hooks gate on type only: the vendored `2.1.0-dev`). */
+  version: MultiTokenPoolVersion
+}
+
 /** The impact fields an owned write's own guard reports (lanes, findings, follow-ups, snapshot). @internal */
 export type MultiTokenPoolOwnedWriteImpact = Omit<
   MultiTokenPoolWriteImpact,
@@ -315,7 +323,7 @@ export abstract class MultiTokenPoolOwnedWriteOperation<
   protected async resolveTarget(
     chain: EVMChain,
     address: string,
-  ): Promise<{ type: MultiTokenPoolContractType; version: MultiTokenPoolVersion }> {
+  ): Promise<MultiTokenPoolOwnedTarget> {
     const types = this.targetTypes()
     if (this.kind !== 'hooks') return resolveMultiTokenPoolContract(chain, address, types)
     const type = await assertMultiTokenPoolAuxContract(

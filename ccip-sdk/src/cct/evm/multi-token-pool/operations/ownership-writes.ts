@@ -141,6 +141,7 @@ export class TransferMultiTokenPoolOwnership extends TransferOwnedTargetOwnershi
   'pool',
   TransferMultiTokenPoolOwnershipParams
 > {
+  /** The op name. */
   readonly name = 'transferMultiTokenPoolOwnership'
   protected readonly kind = 'pool'
 }
@@ -149,6 +150,7 @@ export class AcceptMultiTokenPoolOwnership extends AcceptOwnedTargetOwnership<
   'pool',
   AcceptMultiTokenPoolOwnershipParams
 > {
+  /** The op name. */
   readonly name = 'acceptMultiTokenPoolOwnership'
   protected readonly kind = 'pool'
 }
@@ -157,6 +159,7 @@ export class TransferPolicyStoreOwnership extends TransferOwnedTargetOwnership<
   'policyStore',
   TransferPolicyStoreOwnershipParams
 > {
+  /** The op name. */
   readonly name = 'transferPolicyStoreOwnership'
   protected readonly kind = 'policyStore'
 }
@@ -165,6 +168,7 @@ export class AcceptPolicyStoreOwnership extends AcceptOwnedTargetOwnership<
   'policyStore',
   AcceptPolicyStoreOwnershipParams
 > {
+  /** The op name. */
   readonly name = 'acceptPolicyStoreOwnership'
   protected readonly kind = 'policyStore'
 }
@@ -173,6 +177,7 @@ export class TransferMultiTokenPoolHooksOwnership extends TransferOwnedTargetOwn
   'hooks',
   TransferMultiTokenPoolHooksOwnershipParams
 > {
+  /** The op name. */
   readonly name = 'transferMultiTokenPoolHooksOwnership'
   protected readonly kind = 'hooks'
 }
@@ -181,6 +186,7 @@ export class AcceptMultiTokenPoolHooksOwnership extends AcceptOwnedTargetOwnersh
   'hooks',
   AcceptMultiTokenPoolHooksOwnershipParams
 > {
+  /** The op name. */
   readonly name = 'acceptMultiTokenPoolHooksOwnership'
   protected readonly kind = 'hooks'
 }

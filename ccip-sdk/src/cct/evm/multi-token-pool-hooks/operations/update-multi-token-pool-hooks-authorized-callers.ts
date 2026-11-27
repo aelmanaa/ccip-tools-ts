@@ -169,7 +169,10 @@ export class UpdateMultiTokenPoolHooksAuthorizedCallers extends MultiTokenPoolOw
   }
 
   /** The confirmed lanes, and the PCMs the build enumerated (no calldata carries either). */
-  protected override confirmations({ confirmClosing, poolConfigManagers }: Parsed) {
+  protected override confirmations({
+    confirmClosing,
+    poolConfigManagers,
+  }: Parsed): Record<string, unknown> {
     return {
       ...(confirmClosing.length && {
         closing: confirmClosing.map((l) => laneKey(l.tokenAddress, l.remoteChainSelector)).sort(),

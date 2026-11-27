@@ -71,9 +71,17 @@ import {
   WithdrawFromLockbox,
 } from './lockbox/operations/index.ts'
 import {
+  type ApplyMultiTokenPoolHooksAllowlistUpdatesParams,
   type GetMultiTokenPoolHooksStateParams,
   type GetMultiTokenPoolHooksStateResult,
+  type SetMultiTokenPoolHooksBlocklistParams,
+  type SetMultiTokenPoolHooksPolicyEngineParams,
+  type UpdateMultiTokenPoolHooksAuthorizedCallersParams,
+  ApplyMultiTokenPoolHooksAllowlistUpdates,
   GetMultiTokenPoolHooksState,
+  SetMultiTokenPoolHooksBlocklist,
+  SetMultiTokenPoolHooksPolicyEngine,
+  UpdateMultiTokenPoolHooksAuthorizedCallers,
 } from './multi-token-pool-hooks/operations/index.ts'
 import {
   type GetMultiTokenPoolProviderParams,
@@ -81,19 +89,41 @@ import {
   GetMultiTokenPoolProvider,
 } from './multi-token-pool-providers/operations/index.ts'
 import {
+  type AcceptMultiTokenPoolHooksOwnershipParams,
+  type AcceptMultiTokenPoolOwnershipParams,
+  type AcceptPolicyStoreOwnershipParams,
   type GetMultiTokenPoolStackResult,
   type GetMultiTokenPoolStateResult,
   type MultiTokenPoolReadParams,
+  type SetMultiTokenPoolRouterParams,
+  type SetPoolConfigManagerParams,
+  type TransferMultiTokenPoolHooksOwnershipParams,
+  type TransferMultiTokenPoolOwnershipParams,
+  type TransferPolicyStoreOwnershipParams,
+  AcceptMultiTokenPoolHooksOwnership,
+  AcceptMultiTokenPoolOwnership,
+  AcceptPolicyStoreOwnership,
   GetMultiTokenPoolStack,
   GetMultiTokenPoolState,
   GetMultiTokenPoolTransferQuote,
   IsMultiTokenPool,
+  SetMultiTokenPoolRouter,
+  SetPoolConfigManager,
+  TransferMultiTokenPoolHooksOwnership,
+  TransferMultiTokenPoolOwnership,
+  TransferPolicyStoreOwnership,
 } from './multi-token-pool/operations/index.ts'
+import type {
+  MultiTokenPoolUnsealedTransactionResult,
+  MultiTokenPoolUnsealedUnsignedTx,
+} from './multi-token-pool/write-operation.ts'
 import type { DeployResult, EVMExecuteParams } from './operation.ts'
 import {
   type GetPolicyStoreStateParams,
   type GetPolicyStoreStateResult,
+  type UpdatePolicyStoreAuthorizedCallersParams,
   GetPolicyStoreState,
+  UpdatePolicyStoreAuthorizedCallers,
 } from './policy-store/operations/index.ts'
 import type { PoolConfigManagerTarget } from './pool-config-manager/contracts.ts'
 import {
@@ -616,6 +646,21 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   readonly #changeMultiTokenPoolDefaultAdminDelay = new ChangeMultiTokenPoolDefaultAdminDelay()
   readonly #rollbackMultiTokenPoolDefaultAdminDelay = new RollbackMultiTokenPoolDefaultAdminDelay()
   readonly #withdrawMultiTokenPoolFeeTokens = new WithdrawMultiTokenPoolFeeTokens()
+  readonly #setMultiTokenPoolRouter = new SetMultiTokenPoolRouter()
+  readonly #setPoolConfigManager = new SetPoolConfigManager()
+  readonly #transferMultiTokenPoolOwnership = new TransferMultiTokenPoolOwnership()
+  readonly #acceptMultiTokenPoolOwnership = new AcceptMultiTokenPoolOwnership()
+  readonly #updatePolicyStoreAuthorizedCallers = new UpdatePolicyStoreAuthorizedCallers()
+  readonly #transferPolicyStoreOwnership = new TransferPolicyStoreOwnership()
+  readonly #acceptPolicyStoreOwnership = new AcceptPolicyStoreOwnership()
+  readonly #updateMultiTokenPoolHooksAuthorizedCallers =
+    new UpdateMultiTokenPoolHooksAuthorizedCallers()
+  readonly #applyMultiTokenPoolHooksAllowlistUpdates =
+    new ApplyMultiTokenPoolHooksAllowlistUpdates()
+  readonly #setMultiTokenPoolHooksPolicyEngine = new SetMultiTokenPoolHooksPolicyEngine()
+  readonly #setMultiTokenPoolHooksBlocklist = new SetMultiTokenPoolHooksBlocklist()
+  readonly #transferMultiTokenPoolHooksOwnership = new TransferMultiTokenPoolHooksOwnership()
+  readonly #acceptMultiTokenPoolHooksOwnership = new AcceptMultiTokenPoolHooksOwnership()
   readonly #getMultiTokenPoolHooksState = new GetMultiTokenPoolHooksState()
   readonly #getMultiTokenPoolProvider = new GetMultiTokenPoolProvider()
   readonly #getMultiTokenPoolPolicyNames = new GetMultiTokenPoolPolicyNames()
@@ -722,18 +767,18 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `setPool` tx (for multisig / offline signing).
-   * A zero/empty `poolAddress` delists the token from the registry.
+   * Builds an unsigned `setPool` tx (for multisig / offline signing). A zero/empty `poolAddress`
+   * delists the token from the registry.
    *
-   * @remarks Unchanged for any pool that does not report a multi-token pool. For a multi-token pool,
-   * each lane its PoolConfigManager has for the token runs the lane check: `checkLanes: 'fund-loss'`
-   * (default) refuses only findings that lose funds and returns the rest in `warnings`; `'all'`
-   * refuses every error finding. A long-data lane not paused outbound needs `getChain` (its remote
-   * format decides whether a send mints); a legacy one builds without it. `requireOutboundPause`
-   * also requires the token served by the pool and paused outbound.
-   * @throws {@link CCTParamsInvalidError} if any param is invalid; for a multi-token pool, if a lane
-   * the switch makes live has a refused finding, or `requireOutboundPause` is set and the token is
-   * not served or not paused
+   * @remarks Unchanged for any pool that does not report a multi-token pool. For a multi-token
+   * pool, each lane its PoolConfigManager has for the token runs the lane check: `checkLanes:
+   * 'fund-loss'` (default) refuses only findings that lose funds and returns the rest in
+   * `warnings`; `'all'` refuses every error finding. A long-data lane not paused outbound needs
+   * `getChain` (its remote format decides whether a send mints); a legacy one builds without it.
+   * `requireOutboundPause` also requires the token served by the pool and paused outbound.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid; for a multi-token pool, if a
+   * lane the switch makes live has a refused finding, or `requireOutboundPause` is set and the
+   * token is not served or not paused
    * @example
    * ```typescript
    * // build only — sign later (multisig / offline). `sender` must be the token's current admin.
@@ -750,8 +795,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Registers a pool, signing + submitting with `opts.wallet` (the token admin).
-   * A zero/empty `poolAddress` delists the token from the registry.
+   * Registers a pool, signing + submitting with `opts.wallet` (the token admin). A zero/empty
+   * `poolAddress` delists the token from the registry.
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
    * @throws {@link CCTParamsInvalidError} if any param is invalid
@@ -7819,13 +7864,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
    * has moved
    * @example
@@ -7850,9 +7896,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `grantRole` with `opts.wallet`, which grants a PoolConfigManager role. `sender` defaults to the
-   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
-   * before sending. Use {@link generateUnsignedGrantMultiTokenPoolRole} for multisig or offline signing.
+   * Signs and submits `grantRole` with `opts.wallet`, which grants a PoolConfigManager role.
+   * `sender` defaults to the wallet and, when supplied, must equal it, so the gate always runs; the
+   * state is re-read right before sending. Use {@link generateUnsignedGrantMultiTokenPoolRole} for
+   * multisig or offline signing.
    *
    * @remarks
    * `DEFAULT_ADMIN_ROLE` moves only by the two-step admin transfer. As main's token role ops,
@@ -7860,20 +7907,22 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
-   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
-   * before checking the hash)
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not
+   * resubmit before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -7902,13 +7951,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
    * has moved
    * @example
@@ -7933,29 +7983,32 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `revokeRole` with `opts.wallet`, which revokes a PoolConfigManager role. `sender` defaults to the
-   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
-   * before sending. Use {@link generateUnsignedRevokeMultiTokenPoolRole} for multisig or offline signing.
+   * Signs and submits `revokeRole` with `opts.wallet`, which revokes a PoolConfigManager role.
+   * `sender` defaults to the wallet and, when supplied, must equal it, so the gate always runs; the
+   * state is re-read right before sending. Use {@link generateUnsignedRevokeMultiTokenPoolRole} for
+   * multisig or offline signing.
    *
    * @remarks
    * Revoking a role the account does not hold is refused (it changes nothing).
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
-   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
-   * before checking the hash)
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not
+   * resubmit before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -7981,13 +8034,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: the role's holder.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
    * has moved
    * @example
@@ -8012,9 +8066,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `renounceRole` with `opts.wallet`, which drops one of `sender`'s own roles. `sender` defaults to the
-   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
-   * before sending. Use {@link generateUnsignedRenounceMultiTokenPoolRole} for multisig or offline signing.
+   * Signs and submits `renounceRole` with `opts.wallet`, which drops one of `sender`'s own roles.
+   * `sender` defaults to the wallet and, when supplied, must equal it, so the gate always runs; the
+   * state is re-read right before sending. Use {@link generateUnsignedRenounceMultiTokenPoolRole}
+   * for multisig or offline signing.
    *
    * @remarks
    * `sender` is required: OpenZeppelin checks `callerConfirmation == msg.sender`. For the default
@@ -8022,20 +8077,22 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: the role's holder.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
-   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
-   * before checking the hash)
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not
+   * resubmit before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -8057,27 +8114,29 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * Builds an unsigned `renounceRole` transaction, which gives up the default admin for good.
    *
    * @remarks
-   * Refused unless `confirmPermanentFreeze` is `true`, `sender` is the default admin, and a renounce
-   * is scheduled ({@link generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer} with `ZeroAddress`)
-   * and its delay passed. Role management and admin-only actions then freeze forever: the current
-   * holders of each role keep it. A `PAUSER_ROLE` holder with no `UNPAUSER_ROLE` holder (the next
-   * pause would be permanent), or holders that cannot be read in full, need `confirmPermanentPauses`.
-   * A cancel invalidates a prepared renounce only until someone schedules another: the old calldata
-   * is valid again once the new one matures, so re-check a held proposal with
-   * {@link checkMultiTokenPoolSnapshot} (it reports `admin.pending` as moved) before signing.
+   * Refused unless `confirmPermanentFreeze` is `true`, `sender` is the default admin, and a
+   * renounce is scheduled ({@link generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer} with
+   * `ZeroAddress`) and its delay passed. Role management and admin-only actions then freeze
+   * forever: the current holders of each role keep it. A `PAUSER_ROLE` holder with no
+   * `UNPAUSER_ROLE` holder (the next pause would be permanent), or holders that cannot be read in
+   * full, need `confirmPermanentPauses`. A cancel invalidates a prepared renounce only until
+   * someone schedules another: the old calldata is valid again once the new one matures, so
+   * re-check a held proposal with {@link checkMultiTokenPoolSnapshot} (it reports `admin.pending`
+   * as moved) before signing.
    *
    * `sender` is required (OpenZeppelin checks `callerConfirmation == msg.sender`): the gate is
    * pre-flighted and the write simulated from it.
    *
    * Gate: the default admin, after a scheduled renounce matured.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
    * has moved
    * @example
@@ -8102,36 +8161,40 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `renounceRole` with `opts.wallet`, which gives up the default admin for good. `sender` defaults to the
-   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
-   * before sending. Use {@link generateUnsignedRenounceMultiTokenPoolDefaultAdmin} for multisig or offline signing.
+   * Signs and submits `renounceRole` with `opts.wallet`, which gives up the default admin for good.
+   * `sender` defaults to the wallet and, when supplied, must equal it, so the gate always runs; the
+   * state is re-read right before sending. Use {@link
+   * generateUnsignedRenounceMultiTokenPoolDefaultAdmin} for multisig or offline signing.
    *
    * @remarks
-   * Refused unless `confirmPermanentFreeze` is `true`, `sender` is the default admin, and a renounce
-   * is scheduled ({@link generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer} with `ZeroAddress`)
-   * and its delay passed. Role management and admin-only actions then freeze forever: the current
-   * holders of each role keep it. A `PAUSER_ROLE` holder with no `UNPAUSER_ROLE` holder (the next
-   * pause would be permanent), or holders that cannot be read in full, need `confirmPermanentPauses`.
-   * A cancel invalidates a prepared renounce only until someone schedules another: the old calldata
-   * is valid again once the new one matures, so re-check a held proposal with
-   * {@link checkMultiTokenPoolSnapshot} (it reports `admin.pending` as moved) before signing.
+   * Refused unless `confirmPermanentFreeze` is `true`, `sender` is the default admin, and a
+   * renounce is scheduled ({@link generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer} with
+   * `ZeroAddress`) and its delay passed. Role management and admin-only actions then freeze
+   * forever: the current holders of each role keep it. A `PAUSER_ROLE` holder with no
+   * `UNPAUSER_ROLE` holder (the next pause would be permanent), or holders that cannot be read in
+   * full, need `confirmPermanentPauses`. A cancel invalidates a prepared renounce only until
+   * someone schedules another: the old calldata is valid again once the new one matures, so
+   * re-check a held proposal with {@link checkMultiTokenPoolSnapshot} (it reports `admin.pending`
+   * as moved) before signing.
    *
    * Gate: the default admin, after a scheduled renounce matured.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
-   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
-   * before checking the hash)
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not
+   * resubmit before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -8150,7 +8213,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `beginDefaultAdminTransfer` transaction, which schedules a default admin transfer.
+   * Builds an unsigned `beginDefaultAdminTransfer` transaction, which schedules a default admin
+   * transfer.
    *
    * @remarks
    * `ZeroAddress` schedules a renounce. The pending admin accepts once the delay
@@ -8162,13 +8226,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
    * has moved
    * @example
@@ -8193,9 +8258,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `beginDefaultAdminTransfer` with `opts.wallet`, which schedules a default admin transfer. `sender` defaults to the
-   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
-   * before sending. Use {@link generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer} for multisig or offline signing.
+   * Signs and submits `beginDefaultAdminTransfer` with `opts.wallet`, which schedules a default
+   * admin transfer. `sender` defaults to the wallet and, when supplied, must equal it, so the gate
+   * always runs; the state is re-read right before sending. Use {@link
+   * generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer} for multisig or offline signing.
    *
    * @remarks
    * `ZeroAddress` schedules a renounce. The pending admin accepts once the delay
@@ -8203,20 +8269,22 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
-   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
-   * before checking the hash)
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not
+   * resubmit before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -8234,7 +8302,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `acceptDefaultAdminTransfer` transaction, which accepts a default admin transfer.
+   * Builds an unsigned `acceptDefaultAdminTransfer` transaction, which accepts a default admin
+   * transfer.
    *
    * @remarks
    * As main's token op: refused when no transfer is pending, when it is a renounce (completed with
@@ -8248,13 +8317,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: the pending admin, after the delay.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
    * has moved
    * @example
@@ -8278,9 +8348,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `acceptDefaultAdminTransfer` with `opts.wallet`, which accepts a default admin transfer. `sender` defaults to the
-   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
-   * before sending. Use {@link generateUnsignedAcceptMultiTokenPoolDefaultAdminTransfer} for multisig or offline signing.
+   * Signs and submits `acceptDefaultAdminTransfer` with `opts.wallet`, which accepts a default
+   * admin transfer. `sender` defaults to the wallet and, when supplied, must equal it, so the gate
+   * always runs; the state is re-read right before sending. Use {@link
+   * generateUnsignedAcceptMultiTokenPoolDefaultAdminTransfer} for multisig or offline signing.
    *
    * @remarks
    * As main's token op: refused when no transfer is pending, when it is a renounce (completed with
@@ -8290,20 +8361,22 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: the pending admin, after the delay.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
-   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
-   * before checking the hash)
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not
+   * resubmit before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -8320,7 +8393,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `cancelDefaultAdminTransfer` transaction, which cancels a scheduled default admin transfer (or renounce).
+   * Builds an unsigned `cancelDefaultAdminTransfer` transaction, which cancels a scheduled default
+   * admin transfer (or renounce).
    *
    * @remarks
    * Refused when none is scheduled.
@@ -8331,13 +8405,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
    * has moved
    * @example
@@ -8361,29 +8436,32 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `cancelDefaultAdminTransfer` with `opts.wallet`, which cancels a scheduled default admin transfer (or renounce). `sender` defaults to the
-   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
-   * before sending. Use {@link generateUnsignedCancelMultiTokenPoolDefaultAdminTransfer} for multisig or offline signing.
+   * Signs and submits `cancelDefaultAdminTransfer` with `opts.wallet`, which cancels a scheduled
+   * default admin transfer (or renounce). `sender` defaults to the wallet and, when supplied, must
+   * equal it, so the gate always runs; the state is re-read right before sending. Use {@link
+   * generateUnsignedCancelMultiTokenPoolDefaultAdminTransfer} for multisig or offline signing.
    *
    * @remarks
    * Refused when none is scheduled.
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
-   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
-   * before checking the hash)
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not
+   * resubmit before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -8400,7 +8478,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `changeDefaultAdminDelay` transaction, which schedules a default admin delay change.
+   * Builds an unsigned `changeDefaultAdminDelay` transaction, which schedules a default admin delay
+   * change.
    *
    * @remarks
    * The delay governs the admin transfer only, not `grantRole`. A longer delay applies after
@@ -8412,13 +8491,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
    * has moved
    * @example
@@ -8443,9 +8523,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `changeDefaultAdminDelay` with `opts.wallet`, which schedules a default admin delay change. `sender` defaults to the
-   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
-   * before sending. Use {@link generateUnsignedChangeMultiTokenPoolDefaultAdminDelay} for multisig or offline signing.
+   * Signs and submits `changeDefaultAdminDelay` with `opts.wallet`, which schedules a default admin
+   * delay change. `sender` defaults to the wallet and, when supplied, must equal it, so the gate
+   * always runs; the state is re-read right before sending. Use {@link
+   * generateUnsignedChangeMultiTokenPoolDefaultAdminDelay} for multisig or offline signing.
    *
    * @remarks
    * The delay governs the admin transfer only, not `grantRole`. A longer delay applies after
@@ -8453,20 +8534,22 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
-   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
-   * before checking the hash)
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not
+   * resubmit before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -8484,7 +8567,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `rollbackDefaultAdminDelay` transaction, which rolls back a scheduled default admin delay change.
+   * Builds an unsigned `rollbackDefaultAdminDelay` transaction, which rolls back a scheduled
+   * default admin delay change.
    *
    * @remarks
    * Refused when none is scheduled.
@@ -8495,13 +8579,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
    * has moved
    * @example
@@ -8525,29 +8610,32 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `rollbackDefaultAdminDelay` with `opts.wallet`, which rolls back a scheduled default admin delay change. `sender` defaults to the
-   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
-   * before sending. Use {@link generateUnsignedRollbackMultiTokenPoolDefaultAdminDelay} for multisig or offline signing.
+   * Signs and submits `rollbackDefaultAdminDelay` with `opts.wallet`, which rolls back a scheduled
+   * default admin delay change. `sender` defaults to the wallet and, when supplied, must equal it,
+   * so the gate always runs; the state is re-read right before sending. Use {@link
+   * generateUnsignedRollbackMultiTokenPoolDefaultAdminDelay} for multisig or offline signing.
    *
    * @remarks
    * Refused when none is scheduled.
    *
    * Gate: `DEFAULT_ADMIN_ROLE`.
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
-   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
-   * before checking the hash)
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not
+   * resubmit before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -8564,7 +8652,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `withdrawFeeTokens` transaction, which withdraws a multi-token pool's whole balance of each fee token through its PoolConfigManager.
+   * Builds an unsigned `withdrawFeeTokens` transaction, which withdraws a multi-token pool's whole
+   * balance of each fee token through its PoolConfigManager.
    *
    * @remarks
    * Names the pool; `poolConfigManager` may be given and must be the pool's. The signed call
@@ -8577,13 +8666,14 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `FEE_COLLECTOR_ROLE` (not `DEFAULT_ADMIN_ROLE`).
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
    * has moved
    * @example
@@ -8608,9 +8698,11 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `withdrawFeeTokens` with `opts.wallet`, which withdraws a multi-token pool's whole balance of each fee token through its PoolConfigManager. `sender` defaults to the
-   * wallet and, when supplied, must equal it, so the gate always runs; the state is re-read right
-   * before sending. Use {@link generateUnsignedWithdrawMultiTokenPoolFeeTokens} for multisig or offline signing.
+   * Signs and submits `withdrawFeeTokens` with `opts.wallet`, which withdraws a multi-token pool's
+   * whole balance of each fee token through its PoolConfigManager. `sender` defaults to the wallet
+   * and, when supplied, must equal it, so the gate always runs; the state is re-read right before
+   * sending. Use {@link generateUnsignedWithdrawMultiTokenPoolFeeTokens} for multisig or offline
+   * signing.
    *
    * @remarks
    * Names the pool; `poolConfigManager` may be given and must be the pool's. The signed call
@@ -8619,20 +8711,22 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *
    * Gate: `FEE_COLLECTOR_ROLE` (not `DEFAULT_ADMIN_ROLE`).
    *
-   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
-   * state refuses it (`reason` names the fix), `sender` lacks the gate, or the write reverts when
-   * simulated from `sender`; `context.param` names the field
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the
+   * PoolConfigManager's state refuses it (`reason` names the fix), `sender` lacks the gate, or the
+   * write reverts when simulated from `sender`; `context.param` names the field
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
-   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK
+   * bug)
    * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
    * the build and the send
    * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
    * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
-   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
-   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
-   * before checking the hash)
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not
+   * resubmit before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
@@ -8647,6 +8741,736 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
     opts: EVMExecuteParams<WithdrawMultiTokenPoolFeeTokensParams>,
   ): Promise<WithdrawMultiTokenPoolFeeTokensResult> {
     return this.#withdrawMultiTokenPoolFeeTokens.execute(this.chain, opts)
+  }
+
+  // ── Pool, store and hook writes ──
+  /**
+   * Builds an unsigned `setRouter` transaction: points the pool at a new Router.
+   * @remarks Refused unless the new Router lists every OffRamp the old one lists for the pool's
+   * configured chains (pending messages must still execute). A new OnRamp makes that chain's lanes
+   * live (`_onlyOnRamp`), so the live-making lane check runs on them (no attestations). Takes
+   * effect at once (F8). Signer: the pool owner. `sender` is optional here (multisig and offline
+   * signing); when given, the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pool owner), or a guard refuses the state after the write; `reason`
+   * names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a `BurnMintMultiTokenPool`
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedSetMultiTokenPoolRouter({
+   *   poolAddress: '0xMultiTokenPool...', router: '0xNewRouter...',
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedSetMultiTokenPoolRouter(
+    opts: SetMultiTokenPoolRouterParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#setMultiTokenPoolRouter.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `setRouter` with `opts.wallet`: points the pool at a new Router.
+   * @remarks Refused unless the new Router lists every OffRamp the old one lists for the pool's
+   * configured chains (pending messages must still execute). A new OnRamp makes that chain's lanes
+   * live (`_onlyOnRamp`), so the live-making lane check runs on them (no attestations). Takes
+   * effect at once (F8). `sender` defaults to the wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pool owner), or a guard refuses the state after the write; `reason`
+   * names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a `BurnMintMultiTokenPool`
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.setMultiTokenPoolRouter({
+   *   poolAddress: '0xMultiTokenPool...', router: '0xNewRouter...',
+   *   wallet,
+   * })
+   * ```
+   */
+  setMultiTokenPoolRouter(
+    opts: EVMExecuteParams<SetMultiTokenPoolRouterParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#setMultiTokenPoolRouter.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `setPoolConfigManager` transaction: points the pool at another PCM.
+   * @remarks The new PCM's TAR must equal the old one's, and it must use the same stores unless the
+   * pool serves no token with lanes; the post-state guards run on every lane the new PCM resolves
+   * (a new PCM over other stores means another configuration and no pauses). The old PCM keeps
+   * write access to its stores until removed (F4): `followUps` lists each store still authorizing
+   * it, unless another pool still uses the old PCM. Prefer `replacePoolConfigManager`. Signer: the
+   * pool owner. `sender` is optional here (multisig and offline signing); when given, the gate is
+   * pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pool owner), or a guard refuses the state after the write; `reason`
+   * names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a `BurnMintMultiTokenPool`
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedSetPoolConfigManager({
+   *   poolAddress: '0xMultiTokenPool...', poolConfigManager: '0xNewPcm...',
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedSetPoolConfigManager(
+    opts: SetPoolConfigManagerParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#setPoolConfigManager.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `setPoolConfigManager` with `opts.wallet`: points the pool at another PCM.
+   * @remarks The new PCM's TAR must equal the old one's, and it must use the same stores unless the
+   * pool serves no token with lanes; the post-state guards run on every lane the new PCM resolves
+   * (a new PCM over other stores means another configuration and no pauses). The old PCM keeps
+   * write access to its stores until removed (F4): `followUps` lists each store still authorizing
+   * it, unless another pool still uses the old PCM. Prefer `replacePoolConfigManager`. `sender`
+   * defaults to the wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pool owner), or a guard refuses the state after the write; `reason`
+   * names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a `BurnMintMultiTokenPool`
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.setPoolConfigManager({
+   *   poolAddress: '0xMultiTokenPool...', poolConfigManager: '0xNewPcm...',
+   *   wallet,
+   * })
+   * ```
+   */
+  setPoolConfigManager(
+    opts: EVMExecuteParams<SetPoolConfigManagerParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#setPoolConfigManager.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `transferOwnership` transaction: proposes a new pool owner (Ownable2Step).
+   * @remarks The single-token `transferPoolOwnership` refuses a multi-token pool and names this op.
+   * Signer: the pool owner. `sender` is optional here (multisig and offline signing); when given,
+   * the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pool owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a `BurnMintMultiTokenPool`
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedTransferMultiTokenPoolOwnership({
+   *   poolAddress: '0xMultiTokenPool...', newOwner: '0xSafe...',
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedTransferMultiTokenPoolOwnership(
+    opts: TransferMultiTokenPoolOwnershipParams,
+  ): Promise<MultiTokenPoolUnsealedUnsignedTx> {
+    return this.#transferMultiTokenPoolOwnership.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `transferOwnership` with `opts.wallet`: proposes a new pool owner
+   * (Ownable2Step).
+   * @remarks The single-token `transferPoolOwnership` refuses a multi-token pool and names this op.
+   * `sender` defaults to the wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pool owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a `BurnMintMultiTokenPool`
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.transferMultiTokenPoolOwnership({
+   *   poolAddress: '0xMultiTokenPool...', newOwner: '0xSafe...',
+   *   wallet,
+   * })
+   * ```
+   */
+  transferMultiTokenPoolOwnership(
+    opts: EVMExecuteParams<TransferMultiTokenPoolOwnershipParams>,
+  ): Promise<MultiTokenPoolUnsealedTransactionResult> {
+    return this.#transferMultiTokenPoolOwnership.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `acceptOwnership` transaction: accepts pool ownership.
+   * @remarks Refused unless `sender` is the pending owner. Signer: the pending owner. `sender` is
+   * optional here (multisig and offline signing); when given, the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pending owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a `BurnMintMultiTokenPool`
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedAcceptMultiTokenPoolOwnership({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedAcceptMultiTokenPoolOwnership(
+    opts: AcceptMultiTokenPoolOwnershipParams,
+  ): Promise<MultiTokenPoolUnsealedUnsignedTx> {
+    return this.#acceptMultiTokenPoolOwnership.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `acceptOwnership` with `opts.wallet`: accepts pool ownership.
+   * @remarks Refused unless `sender` is the pending owner. `sender` defaults to the wallet, so the
+   * gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pending owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a `BurnMintMultiTokenPool`
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.acceptMultiTokenPoolOwnership({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   wallet,
+   * })
+   * ```
+   */
+  acceptMultiTokenPoolOwnership(
+    opts: EVMExecuteParams<AcceptMultiTokenPoolOwnershipParams>,
+  ): Promise<MultiTokenPoolUnsealedTransactionResult> {
+    return this.#acceptMultiTokenPoolOwnership.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyAuthorizedCallerUpdates` transaction: adds or removes a store's
+   * authorized callers.
+   * @remarks An authorized caller writes the store with no PCM role and can consume buckets (F5):
+   * adding anything but a PCM over this store is refused. Removing a PCM that a pool still names
+   * (found through `TAR.getPool` of registered tokens) stops that pool's transfers and fails
+   * in-flight inbound messages, so it needs `confirmRemovingServingCallers`. Signer: the store
+   * owner. `sender` is optional here (multisig and offline signing); when given, the gate is
+   * pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the store owner), or a guard refuses the state after the write; `reason`
+   * names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a policy store
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedUpdatePolicyStoreAuthorizedCallers({
+   *   policyStore: '0xStore...', addedCallers: ['0xPoolConfigManager...'],
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedUpdatePolicyStoreAuthorizedCallers(
+    opts: UpdatePolicyStoreAuthorizedCallersParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#updatePolicyStoreAuthorizedCallers.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyAuthorizedCallerUpdates` with `opts.wallet`: adds or removes a store's
+   * authorized callers.
+   * @remarks An authorized caller writes the store with no PCM role and can consume buckets (F5):
+   * adding anything but a PCM over this store is refused. Removing a PCM that a pool still names
+   * (found through `TAR.getPool` of registered tokens) stops that pool's transfers and fails
+   * in-flight inbound messages, so it needs `confirmRemovingServingCallers`. `sender` defaults to
+   * the wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the store owner), or a guard refuses the state after the write; `reason`
+   * names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a policy store
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.updatePolicyStoreAuthorizedCallers({
+   *   policyStore: '0xStore...', addedCallers: ['0xPoolConfigManager...'],
+   *   wallet,
+   * })
+   * ```
+   */
+  updatePolicyStoreAuthorizedCallers(
+    opts: EVMExecuteParams<UpdatePolicyStoreAuthorizedCallersParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#updatePolicyStoreAuthorizedCallers.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `transferOwnership` transaction: proposes a new store owner.
+   * @remarks Signer: the store owner. `sender` is optional here (multisig and offline signing);
+   * when given, the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the store owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a policy store
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedTransferPolicyStoreOwnership({
+   *   policyStore: '0xStore...', newOwner: '0xSafe...',
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedTransferPolicyStoreOwnership(
+    opts: TransferPolicyStoreOwnershipParams,
+  ): Promise<MultiTokenPoolUnsealedUnsignedTx> {
+    return this.#transferPolicyStoreOwnership.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `transferOwnership` with `opts.wallet`: proposes a new store owner.
+   * @remarks `sender` defaults to the wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the store owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a policy store
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.transferPolicyStoreOwnership({
+   *   policyStore: '0xStore...', newOwner: '0xSafe...',
+   *   wallet,
+   * })
+   * ```
+   */
+  transferPolicyStoreOwnership(
+    opts: EVMExecuteParams<TransferPolicyStoreOwnershipParams>,
+  ): Promise<MultiTokenPoolUnsealedTransactionResult> {
+    return this.#transferPolicyStoreOwnership.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `acceptOwnership` transaction: accepts store ownership.
+   * @remarks Signer: the pending owner. `sender` is optional here (multisig and offline signing);
+   * when given, the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pending owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a policy store
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedAcceptPolicyStoreOwnership({
+   *   policyStore: '0xStore...',
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedAcceptPolicyStoreOwnership(
+    opts: AcceptPolicyStoreOwnershipParams,
+  ): Promise<MultiTokenPoolUnsealedUnsignedTx> {
+    return this.#acceptPolicyStoreOwnership.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `acceptOwnership` with `opts.wallet`: accepts store ownership.
+   * @remarks `sender` defaults to the wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pending owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a policy store
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.acceptPolicyStoreOwnership({
+   *   policyStore: '0xStore...',
+   *   wallet,
+   * })
+   * ```
+   */
+  acceptPolicyStoreOwnership(
+    opts: EVMExecuteParams<AcceptPolicyStoreOwnershipParams>,
+  ): Promise<MultiTokenPoolUnsealedTransactionResult> {
+    return this.#acceptPolicyStoreOwnership.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyAuthorizedCallerUpdates` transaction: adds or removes the pools
+   * allowed to call the hooks.
+   * @remarks Removing a pool is refused while any lane of the given `poolConfigManagers` resolves
+   * its hook to this contract and is served by that pool, unless the lanes are listed in
+   * `confirmClosing`: `preflightCheck`/`postflightCheck` would revert and in-flight inbound
+   * messages fail. Signer: the hooks owner. `sender` is optional here (multisig and offline
+   * signing); when given, the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the hooks owner), or a guard refuses the state after the write; `reason`
+   * names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a multi-token pool hook
+   * contract
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedUpdateMultiTokenPoolHooksAuthorizedCallers({
+   *   hooks: '0xHooks...', addedCallers: ['0xMultiTokenPool...'],
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedUpdateMultiTokenPoolHooksAuthorizedCallers(
+    opts: UpdateMultiTokenPoolHooksAuthorizedCallersParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#updateMultiTokenPoolHooksAuthorizedCallers.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyAuthorizedCallerUpdates` with `opts.wallet`: adds or removes the pools
+   * allowed to call the hooks.
+   * @remarks Removing a pool is refused while any lane of the given `poolConfigManagers` resolves
+   * its hook to this contract and is served by that pool, unless the lanes are listed in
+   * `confirmClosing`: `preflightCheck`/`postflightCheck` would revert and in-flight inbound
+   * messages fail. `sender` defaults to the wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the hooks owner), or a guard refuses the state after the write; `reason`
+   * names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a multi-token pool hook
+   * contract
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.updateMultiTokenPoolHooksAuthorizedCallers({
+   *   hooks: '0xHooks...', addedCallers: ['0xMultiTokenPool...'],
+   *   wallet,
+   * })
+   * ```
+   */
+  updateMultiTokenPoolHooksAuthorizedCallers(
+    opts: EVMExecuteParams<UpdateMultiTokenPoolHooksAuthorizedCallersParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#updateMultiTokenPoolHooksAuthorizedCallers.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyAllowListUpdates` transaction: adds or removes allowlisted senders.
+   * @remarks Contract function `applyAllowListUpdates`; the SDK spells `Allowlist` as in
+   * `applyAllowlistUpdates`. Refused on hooks built with an empty allowlist
+   * (`AllowListNotEnabled`). Shared by every token on the hooks. Signer: the hooks owner. `sender`
+   * is optional here (multisig and offline signing); when given, the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the hooks owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a multi-token pool hook
+   * contract
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolHooksAllowlistUpdates({
+   *   hooks: '0xHooks...', adds: ['0xSender...'],
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolHooksAllowlistUpdates(
+    opts: ApplyMultiTokenPoolHooksAllowlistUpdatesParams,
+  ): Promise<MultiTokenPoolUnsealedUnsignedTx> {
+    return this.#applyMultiTokenPoolHooksAllowlistUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyAllowListUpdates` with `opts.wallet`: adds or removes allowlisted
+   * senders.
+   * @remarks Contract function `applyAllowListUpdates`; the SDK spells `Allowlist` as in
+   * `applyAllowlistUpdates`. Refused on hooks built with an empty allowlist
+   * (`AllowListNotEnabled`). Shared by every token on the hooks. `sender` defaults to the wallet,
+   * so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the hooks owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a multi-token pool hook
+   * contract
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.applyMultiTokenPoolHooksAllowlistUpdates({
+   *   hooks: '0xHooks...', adds: ['0xSender...'],
+   *   wallet,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolHooksAllowlistUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolHooksAllowlistUpdatesParams>,
+  ): Promise<MultiTokenPoolUnsealedTransactionResult> {
+    return this.#applyMultiTokenPoolHooksAllowlistUpdates.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `setPolicyEngine` transaction: attaches or detaches a policy engine.
+   * @remarks `allowFailedDetach` uses `setPolicyEngineAllowFailedDetach`. Signer: the hooks owner.
+   * `sender` is optional here (multisig and offline signing); when given, the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the hooks owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a multi-token pool hook
+   * contract
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedSetMultiTokenPoolHooksPolicyEngine({
+   *   hooks: '0xHooks...', newPolicyEngine: '0xEngine...',
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedSetMultiTokenPoolHooksPolicyEngine(
+    opts: SetMultiTokenPoolHooksPolicyEngineParams,
+  ): Promise<MultiTokenPoolUnsealedUnsignedTx> {
+    return this.#setMultiTokenPoolHooksPolicyEngine.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `setPolicyEngine` with `opts.wallet`: attaches or detaches a policy engine.
+   * @remarks `allowFailedDetach` uses `setPolicyEngineAllowFailedDetach`. `sender` defaults to the
+   * wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the hooks owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a multi-token pool hook
+   * contract
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.setMultiTokenPoolHooksPolicyEngine({
+   *   hooks: '0xHooks...', newPolicyEngine: '0xEngine...',
+   *   wallet,
+   * })
+   * ```
+   */
+  setMultiTokenPoolHooksPolicyEngine(
+    opts: EVMExecuteParams<SetMultiTokenPoolHooksPolicyEngineParams>,
+  ): Promise<MultiTokenPoolUnsealedTransactionResult> {
+    return this.#setMultiTokenPoolHooksPolicyEngine.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `setBlocklist` transaction: sets or clears the external blocklist.
+   * @remarks `ZeroAddress` turns it off; any other value must have code. Signer: the hooks owner.
+   * `sender` is optional here (multisig and offline signing); when given, the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the hooks owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a
+   * `MultiTokenPoolHooksExternalBlocklist`
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedSetMultiTokenPoolHooksBlocklist({
+   *   hooks: '0xHooks...', blocklist: '0xBlocklist...',
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedSetMultiTokenPoolHooksBlocklist(
+    opts: SetMultiTokenPoolHooksBlocklistParams,
+  ): Promise<MultiTokenPoolUnsealedUnsignedTx> {
+    return this.#setMultiTokenPoolHooksBlocklist.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `setBlocklist` with `opts.wallet`: sets or clears the external blocklist.
+   * @remarks `ZeroAddress` turns it off; any other value must have code. `sender` defaults to the
+   * wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the hooks owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a
+   * `MultiTokenPoolHooksExternalBlocklist`
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.setMultiTokenPoolHooksBlocklist({
+   *   hooks: '0xHooks...', blocklist: '0xBlocklist...',
+   *   wallet,
+   * })
+   * ```
+   */
+  setMultiTokenPoolHooksBlocklist(
+    opts: EVMExecuteParams<SetMultiTokenPoolHooksBlocklistParams>,
+  ): Promise<MultiTokenPoolUnsealedTransactionResult> {
+    return this.#setMultiTokenPoolHooksBlocklist.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `transferOwnership` transaction: proposes a new hooks owner.
+   * @remarks Signer: the hooks owner. `sender` is optional here (multisig and offline signing);
+   * when given, the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the hooks owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a multi-token pool hook
+   * contract
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedTransferMultiTokenPoolHooksOwnership({
+   *   hooks: '0xHooks...', newOwner: '0xSafe...',
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedTransferMultiTokenPoolHooksOwnership(
+    opts: TransferMultiTokenPoolHooksOwnershipParams,
+  ): Promise<MultiTokenPoolUnsealedUnsignedTx> {
+    return this.#transferMultiTokenPoolHooksOwnership.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `transferOwnership` with `opts.wallet`: proposes a new hooks owner.
+   * @remarks `sender` defaults to the wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the hooks owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a multi-token pool hook
+   * contract
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.transferMultiTokenPoolHooksOwnership({
+   *   hooks: '0xHooks...', newOwner: '0xSafe...',
+   *   wallet,
+   * })
+   * ```
+   */
+  transferMultiTokenPoolHooksOwnership(
+    opts: EVMExecuteParams<TransferMultiTokenPoolHooksOwnershipParams>,
+  ): Promise<MultiTokenPoolUnsealedTransactionResult> {
+    return this.#transferMultiTokenPoolHooksOwnership.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `acceptOwnership` transaction: accepts hooks ownership.
+   * @remarks Signer: the pending owner. `sender` is optional here (multisig and offline signing);
+   * when given, the gate is pre-flighted.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pending owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a multi-token pool hook
+   * contract
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedAcceptMultiTokenPoolHooksOwnership({
+   *   hooks: '0xHooks...',
+   *   sender: '0xSigner...',
+   * })
+   * ```
+   */
+  generateUnsignedAcceptMultiTokenPoolHooksOwnership(
+    opts: AcceptMultiTokenPoolHooksOwnershipParams,
+  ): Promise<MultiTokenPoolUnsealedUnsignedTx> {
+    return this.#acceptMultiTokenPoolHooksOwnership.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `acceptOwnership` with `opts.wallet`: accepts hooks ownership.
+   * @remarks `sender` defaults to the wallet, so the gate always runs.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
+   * and lacks the gate (the pending owner); `reason` names the fix
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a multi-token pool hook
+   * contract
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports a version not in
+   * `MultiTokenPoolVersion`
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to another chain
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without
+   * effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain (decoded through the PCM, store,
+   * `PolicyConfig`, OZ and hook errors; `context.operation` set)
+   * @example
+   * ```typescript
+   * const { hash } = await cct.acceptMultiTokenPoolHooksOwnership({
+   *   hooks: '0xHooks...',
+   *   wallet,
+   * })
+   * ```
+   */
+  acceptMultiTokenPoolHooksOwnership(
+    opts: EVMExecuteParams<AcceptMultiTokenPoolHooksOwnershipParams>,
+  ): Promise<MultiTokenPoolUnsealedTransactionResult> {
+    return this.#acceptMultiTokenPoolHooksOwnership.execute(this.chain, opts)
   }
 
   /**
@@ -9276,6 +10100,13 @@ export type {
   MultiTokenPoolWriteGuards,
   PoolConfigManagerWriteParams,
 } from './pool-config-manager/write-operation.ts'
+// the shapes every multi-token pool write shares, whatever its target
+export type {
+  MultiTokenPoolFollowUp,
+  MultiTokenPoolUnsealedTransactionResult,
+  MultiTokenPoolUnsealedUnsignedTx,
+  MultiTokenPoolWriteImpact,
+} from './multi-token-pool/write-operation.ts'
 export type * from './policy-store/operations/index.ts'
 export type * from './multi-token-pool-hooks/operations/index.ts'
 export type * from './multi-token-pool-providers/operations/index.ts'

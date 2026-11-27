@@ -160,7 +160,9 @@ export class UpdatePolicyStoreAuthorizedCallers extends MultiTokenPoolOwnedWrite
     }
   }
 
-  protected override confirmations({ confirmRemovingServingCallers }: Parsed) {
+  protected override confirmations({
+    confirmRemovingServingCallers,
+  }: Parsed): Record<string, unknown> {
     return confirmRemovingServingCallers.length
       ? { removingServingCallers: [...confirmRemovingServingCallers].sort() }
       : {}
