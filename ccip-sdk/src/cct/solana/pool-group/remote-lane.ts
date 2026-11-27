@@ -4,7 +4,7 @@
  * of that pool's lane back toward the EVM chain, and what that lane trusts and allows.
  *
  * Loaded lazily by the EVM guard, only for a Solana remote, so `cct/evm` takes no static Solana
- * import. Reads accounts only, plus the Router's `type_version` on a cluster with no known Router.
+ * import. Reads accounts, and the Router's `type_version` through `getTokenAdminRegistryFor`.
  *
  * @packageDocumentation
  */
@@ -17,6 +17,7 @@ import type { Chain, RateLimiterState } from '../../../chain.ts'
 import {
   CCIPDataFormatUnsupportedError,
   CCIPError,
+  CCIPSolanaOffRampEventsNotFoundError,
   CCIPTokenNotConfiguredError,
 } from '../../../errors/index.ts'
 import type { SolanaChain } from '../../../solana/index.ts'
@@ -26,6 +27,7 @@ import {
   decodeTokenPoolStateConfig,
 } from '../../../solana/token-pool.ts'
 import { isSimulationFailure } from '../../../solana/utils.ts'
+import { toLeArray } from '../../../utils.ts'
 // TODO(track merge): import MultiTokenPoolRemoteFact from '../../multi-token-pool.ts' (moved on the
 // EVM stack at 9e0bfb9d; guards.ts re-exports it)
 import type { MultiTokenPoolRemoteFact } from '../../evm/pool-config-manager/guards.ts'
@@ -46,7 +48,6 @@ import {
   tryDecode,
   unknown,
 } from './lane.ts'
-import { KNOWN_SOLANA_ROUTERS } from './routers.ts'
 
 /** What the EVM guard asks about one EVM → Solana lane. @internal */
 export type SolanaRemoteLaneQuery = {
@@ -56,12 +57,6 @@ export type SolanaRemoteLaneQuery = {
   mint: string
   /** The pool `State` PDAs the EVM lane trusts (base58); the first one names the Router. */
   trustedPools: readonly string[]
-  /**
-   * The CCIP Router of the Solana chain: the trusted pool's Router must be this one. It overrides
-   * the cluster's known Routers ({@link KNOWN_SOLANA_ROUTERS}); on a cluster with none and without
-   * it, the trusted pool's Router must report a `Router` `type_version` (not verified).
-   */
-  router?: string
   /** Also read the lane back's outbound bucket (for the lane check). */
   readRateLimits?: boolean
 }
@@ -70,7 +65,15 @@ export type SolanaRemoteLaneQuery = {
 export type SolanaRemoteLanePool = {
   /** Checksummed `0x` EVM address. */
   address: string
-  /** The stored bytes as `0x` hex: the program compares these, byte for byte. */
+  /**
+   * The stored bytes as `0x` hex: the program compares these, byte for byte, with the source pool
+   * the OffRamp passes. The Solana OffRamp trims that source pool to the source chain's
+   * `legacy_address_length` before the pool sees it (`normalized_address`,
+   * `ccip-offramp/src/instructions/execute/token_transfer.rs:301`; EVM sources use 20,
+   * `admin/source_chain.rs:268`), and does not trim the token. So for an EVM remote the lane holds
+   * the token as 32 bytes, padded, and each pool at {@link SolanaRemoteLaneFacts}'
+   * `sourcePoolAddressLength`, native (20).
+   */
   raw: string
   /** The lane's own list, or its CONNECTION policy record's. */
   source: 'own' | 'policy'
@@ -128,12 +131,8 @@ export type SolanaRemoteLaneBack = {
 export type SolanaRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   /** The pool `State` the Router's registry names for the mint, or `null` when it names none. */
   registryPool: string | null
-  /**
-   * `true` when the trusted pool's Router matched the caller's `router` or the cluster's known
-   * Router. With the `type_version` fallback it is `false`: any program can answer that it is a
-   * Router.
-   */
-  routerVerified: boolean
+  /** The Router whose registry was read (the trusted pool's), for information. */
+  router: string
   /** The program owning `registryPool`. */
   poolProgram?: string
   /** The registry's pool interface for the mint: 1 (CCIP 1.6-compatible) or 2. */
@@ -161,6 +160,14 @@ export type SolanaRemoteLaneFacts = MultiTokenPoolRemoteFact<{
   readsLongData: boolean
   /** The lane back, when the registry pool has a `ChainConfig` toward the EVM chain. */
   back?: SolanaRemoteLaneBack
+  /**
+   * The `legacy_address_length` of the EVM chain in the Solana OffRamp's source-chain config: the
+   * length the OffRamp trims a source pool address to before the pool compares it with
+   * `remotePools[].raw`. Read from the 2.x OffRamps the Router allows for the EVM chain
+   * (`getOffRampsForRouter`), when the lane back exists; `null` when none has the field or they
+   * disagree. Do not assume 20 when it is `null`.
+   */
+  sourcePoolAddressLength?: number | null
 }>
 
 /** What one trusted Solana pool is, for the EVM side. @internal */
@@ -198,38 +205,79 @@ function poolState(
 }
 
 /** Errors that mean "this account is not a working Router", rather than a transport failure. */
-const notRouter = (err: unknown) =>
-  isSimulationFailure(err) || (err instanceof CCIPError && !err.isTransient)
 
 /**
- * Checks the trusted pool's Router against the given one, else the cluster's known Routers
- * ({@link KNOWN_SOLANA_ROUTERS}); on a cluster with none, it must report a Router `type_version`.
- * @returns Whether the Router was verified (matched a given or known one), or why it is refused.
+ * The registry the trusted pool's Router keeps, with the SDK's `getTokenAdminRegistryFor`
+ * semantics (a Router `type_version`, an OffRamp followed to its Router): an account that is not a
+ * Router is `'unknown'`, transport errors propagate.
  */
-async function checkRouter(
-  solana: SolanaChain,
-  router: PublicKey,
-  given: string | undefined,
-): Promise<boolean | Unread> {
-  const expected =
-    given !== undefined ? [given] : KNOWN_SOLANA_ROUTERS.get(solana.network.chainSelector)
-  if (expected)
-    return (
-      expected.includes(router.toBase58()) ||
-      unknown(
-        `the trusted pool's Router ${router.toBase58()} is not the CCIP Router (${expected.join(', ')})`,
-      )
-    )
+async function registryOf(solana: SolanaChain, router: PublicKey): Promise<PublicKey | Unread> {
   try {
-    const [type] = await solana.typeAndVersion(router.toBase58())
-    if (!type.includes('Router'))
-      return unknown(`the trusted pool's Router ${router.toBase58()} reports ${type}, not a Router`)
+    return new PublicKey(await solana.getTokenAdminRegistryFor(router.toBase58()))
   } catch (err) {
-    if (notRouter(err))
+    if (notTransient(err))
       return unknown(`the trusted pool's Router ${router.toBase58()} is not a CCIP Router`)
     throw err
   }
-  return false
+}
+
+const notTransient = (err: unknown) =>
+  isSimulationFailure(err) || (err instanceof CCIPError && !err.isTransient)
+
+/**
+ * `legacy_address_length` of a 2.x OffRamp's `SourceChain` account: after the discriminator,
+ * version, bump and selector, `config` holds `is_enabled`, `on_ramps` (64 + 4 bytes each),
+ * `default_ccvs`, `lane_mandated_ccvs`, then the length. `undefined` when the account ends before
+ * it (an OffRamp that predates the field) or is truncated.
+ */
+function decodeLegacyAddressLength(data: Buffer): number | undefined {
+  let at = 8 + 1 + 1 + 8 + 1
+  const vec = (item: number) => {
+    if (at + 4 > data.length) return false
+    at += 4 + data.readUInt32LE(at) * item
+    return at <= data.length
+  }
+  if (!vec(68) || !vec(32) || !vec(32) || at >= data.length) return undefined
+  return data[at]
+}
+
+/**
+ * The `legacy_address_length` the Router's 2.x OffRamps configure for `source` (the existing
+ * `getOffRampsForRouter` discovery, then each OffRamp's `source_chain_state`).
+ */
+async function readSourcePoolAddressLength(
+  solana: SolanaChain,
+  router: PublicKey,
+  source: bigint,
+): Promise<number | null> {
+  let offRamps
+  try {
+    offRamps = await solana.getOffRampsForRouter(router.toBase58(), source)
+  } catch (err) {
+    if (err instanceof CCIPSolanaOffRampEventsNotFoundError) return null
+    throw err
+  }
+  const lengths = new Set<number>()
+  for (const offRamp of offRamps) {
+    let version
+    try {
+      ;[, version] = await solana.typeAndVersion(offRamp)
+    } catch (err) {
+      if (notTransient(err)) continue
+      throw err
+    }
+    if (!version.startsWith('2.')) continue
+    const program = new PublicKey(offRamp)
+    const [pda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('source_chain_state'), toLeArray(source, 8)],
+      program,
+    )
+    const account = await solana.connection.getAccountInfo(pda)
+    if (!account?.owner.equals(program)) continue
+    const length = decodeLegacyAddressLength(account.data)
+    if (length !== undefined) lengths.add(length)
+  }
+  return lengths.size === 1 ? [...lengths][0]! : null
 }
 
 /** The registry entry of `mint`: its pool and interface, with transport errors propagating. */
@@ -338,15 +386,16 @@ async function readFromTrusted(
   mint: PublicKey,
   trusted: PoolState,
 ): Promise<SolanaRemoteLaneFacts> {
-  const routerVerified = await checkRouter(solana, trusted.state.router, query.router)
-  if (isUnread(routerVerified)) return routerVerified
-  const registry = await readRegistry(solana, trusted.state.router, mint)
+  const routerAddress = await registryOf(solana, trusted.state.router)
+  if (isUnread(routerAddress)) return routerAddress
+  const router = routerAddress.toBase58()
+  const registry = await readRegistry(solana, routerAddress, mint)
   if (isUnread(registry)) return registry
   if (!registry.registryPool)
     return {
       status: 'known',
       registryPool: null,
-      routerVerified,
+      router,
       laneKind: 'none',
       readsLongData: false,
       ...(registry.interfaceVersion !== undefined && {
@@ -374,10 +423,14 @@ async function readFromTrusted(
     !!query.readRateLimits,
   )
   if (isUnread(lane)) return lane
+  const sourcePoolAddressLength = lane.back
+    ? await readSourcePoolAddressLength(solana, routerAddress, query.remoteChainSelector)
+    : undefined
   return {
     status: 'known',
+    ...(sourcePoolAddressLength !== undefined && { sourcePoolAddressLength }),
     registryPool: registryPool.toBase58(),
-    routerVerified,
+    router,
     poolProgram: pool.program.toBase58(),
     interfaceVersion: registry.interfaceVersion,
     ...lane,
@@ -405,7 +458,7 @@ async function readTrusted(solana: SolanaChain, value: string): Promise<PoolStat
  * @param query - The lane, from the EVM side.
  * @returns The facts; `'missing'` when the lane trusts no pool or the trusted pool does not exist,
  *   `'unknown'` when an account cannot be read as the program writes it, the trusted pool is not a
- *   pool `State` at its PDA, its Router is not the CCIP Router, or `remote` is not a Solana chain.
+ *   pool `State` at its PDA, its Router is not a CCIP Router, or `remote` is not a Solana chain.
  *   A registry that names no pool is `'known'` with `registryPool: null`.
  * @throws the RPC's errors, unchanged (transport failures are never read as a fact)
  * @internal
@@ -432,8 +485,7 @@ export async function readSolanaRemoteLaneFacts(
  *
  * @param remote - The Solana chain, from the guard's `getChain`.
  * @param params - `remoteChainSelector`: the EVM (local) chain selector, the Solana lane's remote
- *   chain; `poolAddress`: the trusted pool `State` PDA (base58); `router`: as in
- *   {@link SolanaRemoteLaneQuery}.
+ *   chain; `poolAddress`: the trusted pool `State` PDA (base58).
  * @returns `isMultiTokenPool` (see {@link SolanaRemotePoolFacts}); `'missing'` when the pool does
  *   not exist, `'unknown'` when it cannot be read as the program writes it.
  * @throws the RPC's errors, unchanged
@@ -441,7 +493,7 @@ export async function readSolanaRemoteLaneFacts(
  */
 export async function readSolanaRemotePoolFacts(
   remote: Chain,
-  params: { remoteChainSelector: bigint; poolAddress: string; router?: string },
+  params: { remoteChainSelector: bigint; poolAddress: string },
 ): Promise<SolanaRemotePoolFacts> {
   const solana = await solanaChainOf(remote)
   if (isUnread(solana)) return solana

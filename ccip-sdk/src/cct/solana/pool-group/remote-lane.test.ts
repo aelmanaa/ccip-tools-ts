@@ -14,7 +14,10 @@ import { getAddress } from 'ethers'
 
 // Register every chain family the way SDK consumers do via the package root
 import '../../../index.ts'
-import { CCIPTypeVersionInvalidError } from '../../../errors/index.ts'
+import {
+  CCIPSolanaOffRampEventsNotFoundError,
+  CCIPTypeVersionInvalidError,
+} from '../../../errors/index.ts'
 import { EVMChain } from '../../../evm/index.ts'
 import { networkInfo } from '../../../networks.ts'
 import { SolanaChain } from '../../../solana/index.ts'
@@ -29,7 +32,6 @@ import {
   poolGroupsCoder,
 } from './accounts.ts'
 import { readSolanaRemoteLaneFacts, readSolanaRemotePoolFacts } from './remote-lane.ts'
-import { KNOWN_SOLANA_ROUTERS } from './routers.ts'
 
 const SEPOLIA = networkInfo('ethereum-testnet-sepolia').chainSelector
 const PROGRAM = Keypair.generate().publicKey
@@ -46,6 +48,11 @@ const EVM_POOL = '0x2222222222222222222222222222222222222222'
 const POLICY_POOL = '0x3333333333333333333333333333333333333333'
 const NOW = 1_800_000_000n
 const LUT_PROGRAM = AddressLookupTableProgram.programId
+const OFFRAMP = Keypair.generate().publicKey
+const SOURCE_CHAIN = PublicKey.findProgramAddressSync(
+  [Buffer.from('source_chain_state'), Buffer.from(new BigUint64Array([SEPOLIA]).buffer)],
+  OFFRAMP,
+)[0]
 
 const hex = (h: string) => Buffer.from(h.slice(2), 'hex')
 const pad32 = (h: string) => Buffer.concat([Buffer.alloc(12), hex(h)])
@@ -93,6 +100,24 @@ function lutData(addresses: PublicKey[], deactivated = false): Buffer {
   meta.writeUInt32LE(1, 0)
   meta.writeBigUInt64LE(deactivated ? 5n : 0xffff_ffff_ffff_ffffn, 4)
   return Buffer.concat([meta, ...addresses.map((a) => a.toBuffer())])
+}
+
+/** A 2.x OffRamp `SourceChain`: one on-ramp, one default CCV, then `legacy_address_length`. */
+function sourceChainData(legacyAddressLength?: number): Buffer {
+  const vec = (n: number) => {
+    const b = Buffer.alloc(4)
+    b.writeUInt32LE(n)
+    return b
+  }
+  return Buffer.concat([
+    Buffer.alloc(8 + 1 + 1 + 8 + 1),
+    vec(1),
+    Buffer.alloc(68),
+    vec(1),
+    Buffer.alloc(32),
+    vec(0),
+    legacyAddressLength === undefined ? Buffer.alloc(0) : Buffer.from([legacyAddressLength]),
+  ])
 }
 
 function clockData(now = NOW): Buffer {
@@ -220,7 +245,12 @@ type TypeAndVersion = () => Promise<[string, string, string]>
 
 function chainWith(
   accounts: Accounts,
-  opts: { failOn?: PublicKey; typeAndVersion?: TypeAndVersion; network?: string } = {},
+  opts: {
+    failOn?: PublicKey
+    typeAndVersion?: TypeAndVersion
+    network?: string
+    offRamps?: () => Promise<string[]>
+  } = {},
 ): SolanaChain {
   const get = (key: PublicKey) => {
     if (opts.failOn?.equals(key)) throw new Error('fetch failed: 503')
@@ -236,7 +266,10 @@ function chainWith(
     apiClient: null,
   })
   const routerType: TypeAndVersion = async () => ['CCIPRouter', '2.0.0', 'ccip-router 2.0.0']
-  Object.assign(chain, { typeAndVersion: opts.typeAndVersion ?? routerType })
+  Object.assign(chain, {
+    typeAndVersion: opts.typeAndVersion ?? routerType,
+    getOffRampsForRouter: opts.offRamps ?? (async () => [OFFRAMP.toBase58()]),
+  })
   return chain
 }
 
@@ -255,6 +288,7 @@ function lane(opts: { iface?: number; cc?: Buffer; v2?: Buffer | null; extra?: E
   put(TAR, registryData(opts.iface ?? 2), ROUTER)
   put(LUT, lutData([LUT, TAR, PROGRAM, STATE]), LUT_PROGRAM)
   put(SYSVAR_CLOCK_PUBKEY, clockData(), SystemProgram.programId)
+  put(SOURCE_CHAIN, sourceChainData(20), OFFRAMP)
   if (opts.cc) put(CC_ADDR, opts.cc)
   if (opts.v2) put(V2_ADDR, opts.v2)
   for (const [k, d, owner] of opts.extra ?? []) put(k, d, owner)
@@ -269,12 +303,9 @@ const query = (extra: { readRateLimits?: boolean } = {}) => ({
   remoteChainSelector: SEPOLIA,
   mint: MINT.toBase58(),
   trustedPools: [STATE.toBase58()],
-  router: ROUTER.toBase58(),
   ...extra,
 })
-type Query =
-  | ReturnType<typeof query>
-  | (Omit<ReturnType<typeof query>, 'router'> & { router?: string })
+type Query = ReturnType<typeof query>
 
 async function known(accounts: Accounts, q: Query = query()) {
   const facts = await readSolanaRemoteLaneFacts(chainWith(accounts), q)
@@ -284,7 +315,7 @@ async function known(accounts: Accounts, q: Query = query()) {
 async function unknownReason(
   accounts: Accounts,
   q: Query = query(),
-  chainOpts: { typeAndVersion?: TypeAndVersion; network?: string } = {},
+  chainOpts: Parameters<typeof chainWith>[1] = {},
 ) {
   const facts = await readSolanaRemoteLaneFacts(chainWith(accounts, chainOpts), q)
   assert.equal(facts.status, 'unknown')
@@ -308,7 +339,6 @@ describe('readSolanaRemoteLaneFacts', () => {
     assert.equal(facts.uid, null)
     assert.equal(facts.readsLongData, false)
     assert.equal(facts.registryPool, STATE.toBase58())
-    assert.equal(facts.routerVerified, true)
     assert.equal(facts.interfaceVersion, 2)
     assert.ok(facts.back)
     // stored 32-byte padded, returned checksummed at 20 bytes and raw at 32
@@ -321,6 +351,56 @@ describe('readSolanaRemoteLaneFacts', () => {
     ])
     assert.equal(facts.back.outboundRateLimiterState, null) // disabled stored bucket
     assert.equal(facts.back.failsClosed, undefined)
+    assert.equal(facts.sourcePoolAddressLength, 20)
+  })
+
+  it("reads the OffRamp's legacy_address_length for the EVM chain, or null", async () => {
+    const base = () => lane({ cc: chainConfigData(), v2: null })
+    const length = async (accounts: Accounts, opts: Parameters<typeof chainWith>[1] = {}) => {
+      const facts = await readSolanaRemoteLaneFacts(chainWith(accounts, opts), query())
+      if (facts.status !== 'known') return assert.fail(facts.reason)
+      return facts.sourcePoolAddressLength
+    }
+    assert.equal(await length(base()), 20)
+    assert.equal(await length(set(base(), SOURCE_CHAIN, sourceChainData(32), OFFRAMP)), 32)
+    // an OffRamp that predates the field, or another owner
+    assert.equal(await length(set(base(), SOURCE_CHAIN, sourceChainData(), OFFRAMP)), null)
+    assert.equal(await length(set(base(), SOURCE_CHAIN, sourceChainData(20), PROGRAM)), null)
+    // no OffRamp for the chain, or only a 1.6 one
+    const none = async () => {
+      throw new CCIPSolanaOffRampEventsNotFoundError(ROUTER.toBase58())
+    }
+    assert.equal(await length(base(), { offRamps: none }), null)
+    const v16: TypeAndVersion = async () => ['CCIPOfframp', '1.6.0', 'ccip-offramp 1.6.0']
+    // the Router check reads the same type_version: answer Router for it, 1.6 for the OffRamp
+    const mixed: TypeAndVersion = async (...args: unknown[]) =>
+      args[0] === OFFRAMP.toBase58() ? v16() : ['CCIPRouter', '2.0.0', 'ccip-router 2.0.0']
+    assert.equal(await length(base(), { typeAndVersion: mixed }), null)
+    // two 2.x OffRamps that disagree
+    const other = Keypair.generate().publicKey
+    const otherChain = PublicKey.findProgramAddressSync(
+      [Buffer.from('source_chain_state'), Buffer.from(new BigUint64Array([SEPOLIA]).buffer)],
+      other,
+    )[0]
+    const two = async () => [OFFRAMP.toBase58(), other.toBase58()]
+    assert.equal(
+      await length(set(base(), otherChain, sourceChainData(32), other), { offRamps: two }),
+      null,
+    )
+    // no lane back: not read
+    assert.equal(await length(lane()), undefined)
+    // transport errors propagate
+    await assert.rejects(
+      readSolanaRemoteLaneFacts(chainWith(base(), { failOn: SOURCE_CHAIN }), query()),
+      /503/,
+    )
+    const down = async () => {
+      throw new Error('fetch failed: 503')
+    }
+    await assert.rejects(
+      readSolanaRemoteLaneFacts(chainWith(base(), { offRamps: down }), query()),
+      /503/,
+    )
   })
 
   it('keeps the stored byte encodings: a 20-byte token and a padded pool', async () => {
@@ -588,82 +668,39 @@ describe('readSolanaRemoteLaneFacts', () => {
     )
   })
 
-  it('M1: refuses a forged trusted pool State or Router', async () => {
+  it('M1: refuses a trusted pool State outside its PDA, or a Router that is not one', async () => {
     // a State outside its PDA (another program owns it)
     const outside = set(lane({ cc: chainConfigData() }), STATE, stateData(), OTHER_PROGRAM)
     assert.match(await unknownReason(outside), /not the pool State PDA/)
-    // a lookalike program's State at its own PDA, naming a test Router
+    // a lookalike program's State at its own PDA: its Router goes through getTokenAdminRegistryFor
     const fakeRouter = Keypair.generate().publicKey
     const fakeState = deriveTokenPoolConfigPda(OTHER_PROGRAM, MINT)
     const forged = lane({ extra: [[fakeState, stateData(MINT, fakeRouter), OTHER_PROGRAM]] })
     const q = { ...query(), trustedPools: [fakeState.toBase58()] }
-    // the caller's `router` overrides the table
-    assert.match(await unknownReason(forged, q), /is not the CCIP Router/)
-    // without it, the cluster's known Router (Devnet's is in the table)
-    const { router: _, ...noRouter } = q
-    assert.match(await unknownReason(forged, noRouter), /is not the CCIP Router \(Ccip842/)
-    // an unset (default) router fails the same way
-    const unset = lane({ extra: [[fakeState, stateData(MINT, PublicKey.default), OTHER_PROGRAM]] })
-    await unknownReason(unset, q)
-    await unknownReason(unset, noRouter)
-  })
-
-  it("verifies the Router against the cluster's table, the caller's override, or not at all", async () => {
-    const ccip = new PublicKey(
-      KNOWN_SOLANA_ROUTERS.get(networkInfo('solana-devnet').chainSelector)![0]!,
-    )
-    const viaTable = new Map([[STATE.toBase58(), { data: stateData(MINT, ccip), owner: PROGRAM }]])
-    const { router: _, ...noRouter } = query()
-    const matched = await known(viaTable, noRouter)
-    assert.equal(matched.routerVerified, true)
-    assert.equal(matched.registryPool, null) // the registry has no entry for the mint
-    // the override: ROUTER is in no table, yet given, it verifies
-    assert.equal((await known(lane({ cc: chainConfigData() }))).routerVerified, true)
-    // a cluster with no known Router: the type_version fallback, never verified
-    const testnet = { network: 'solana-testnet' }
-    const fallback = await readSolanaRemoteLaneFacts(
-      chainWith(lane({ cc: chainConfigData() }), testnet),
-      noRouter,
-    )
-    assert.equal(fallback.status === 'known' && fallback.routerVerified, false)
-    const fakeState = deriveTokenPoolConfigPda(OTHER_PROGRAM, MINT)
-    const forged = lane({
-      extra: [[fakeState, stateData(MINT, Keypair.generate().publicKey), OTHER_PROGRAM]],
-    })
-    const forgedQuery = { ...noRouter, trustedPools: [fakeState.toBase58()] }
     const typed =
       (type: string): TypeAndVersion =>
       async () => [type, '2.0.0', `${type} 2.0.0`]
-    // a forged Router that claims to be one passes the fallback, unverified
-    const claimed = await readSolanaRemoteLaneFacts(
-      chainWith(forged, { ...testnet, typeAndVersion: typed('CCIPRouter') }),
-      forgedQuery,
-    )
-    assert.equal(claimed.status === 'known' && claimed.routerVerified, false)
     assert.match(
-      await unknownReason(forged, forgedQuery, {
-        ...testnet,
-        typeAndVersion: typed('burnmintTokenPool'),
-      }),
-      /not a Router/,
+      await unknownReason(forged, q, { typeAndVersion: typed('burnmintTokenPool') }),
+      /is not a CCIP Router/,
     )
     const invalid: TypeAndVersion = async () => {
       throw new CCIPTypeVersionInvalidError('garbage')
     }
     assert.match(
-      await unknownReason(forged, forgedQuery, { ...testnet, typeAndVersion: invalid }),
+      await unknownReason(forged, q, { typeAndVersion: invalid }),
       /is not a CCIP Router/,
     )
     const down: TypeAndVersion = async () => {
       throw new Error('fetch failed: 503')
     }
     await assert.rejects(
-      readSolanaRemoteLaneFacts(
-        chainWith(forged, { ...testnet, typeAndVersion: down }),
-        forgedQuery,
-      ),
+      readSolanaRemoteLaneFacts(chainWith(forged, { typeAndVersion: down }), q),
       /503/,
     )
+    // a Router answer: read, with the Router reported for information
+    const facts = await known(lane({ cc: chainConfigData() }))
+    assert.equal(facts.router, ROUTER.toBase58())
   })
 
   it('reads the registry pool when it differs from the trusted pool, and checks it', async () => {
@@ -691,7 +728,7 @@ describe('readSolanaRemoteLaneFacts', () => {
     assert.deepEqual(await known(set(lane(), TAR, registryData(2, null), ROUTER)), {
       status: 'known',
       registryPool: null,
-      routerVerified: true,
+      router: ROUTER.toBase58(),
       laneKind: 'none',
       readsLongData: false,
       interfaceVersion: 2,
@@ -760,7 +797,6 @@ describe('readSolanaRemoteLaneFacts', () => {
     const pool = {
       remoteChainSelector: SEPOLIA,
       poolAddress: STATE.toBase58(),
-      router: ROUTER.toBase58(),
     }
     for (const failOn of [STATE, TAR, LUT, CC_ADDR, GCP]) {
       const chain = () => chainWith(linked(), { failOn })
@@ -781,7 +817,6 @@ describe('readSolanaRemotePoolFacts', () => {
   const params = {
     remoteChainSelector: SEPOLIA,
     poolAddress: STATE.toBase58(),
-    router: ROUTER.toBase58(),
   }
   const pool = (accounts: Accounts) => readSolanaRemotePoolFacts(chainWith(accounts), params)
 
