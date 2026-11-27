@@ -18,6 +18,7 @@ import {
   serializeMultiTokenPoolSnapshot,
 } from '../../../multi-token-pool.ts'
 import { latestBlock } from '../../mined-block.ts'
+import { UpdateMultiTokenPoolHooksAuthorizedCallers } from '../../multi-token-pool-hooks/operations/update-multi-token-pool-hooks-authorized-callers.ts'
 import {
   type MultiTokenPoolOperationTarget,
   MULTI_TOKEN_POOL_OPERATIONS,
@@ -124,10 +125,12 @@ export const OWNED_SEALED_OPS: ReadonlyMap<
   string,
   { recheck: MultiTokenPoolOwnedWriteOperation<never, never>['recheck'] }
 > = new Map(
-  [new UpdatePolicyStoreAuthorizedCallers()].map((op) => [
-    op.name,
-    op as unknown as { recheck: MultiTokenPoolOwnedWriteOperation<never, never>['recheck'] },
-  ]),
+  [new UpdatePolicyStoreAuthorizedCallers(), new UpdateMultiTokenPoolHooksAuthorizedCallers()].map(
+    (op) => [
+      op.name,
+      op as unknown as { recheck: MultiTokenPoolOwnedWriteOperation<never, never>['recheck'] },
+    ],
+  ),
 )
 
 /**

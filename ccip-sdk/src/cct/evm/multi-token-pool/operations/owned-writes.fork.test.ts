@@ -10,10 +10,18 @@ import { Console } from 'node:console'
 import { type AddressInfo, createServer } from 'node:net'
 import { after, before, describe, it } from 'node:test'
 
-import { type JsonRpcProvider, Wallet, ZeroAddress, getAddress } from 'ethers'
+import {
+  type JsonRpcProvider,
+  Wallet,
+  ZeroAddress,
+  getAddress,
+  toBeHex,
+  zeroPadValue,
+} from 'ethers'
 import { Instance } from 'prool'
 
 import { type RpcEnvName, rpcEndpoint } from '../../../../../../scripts/test-endpoints.ts'
+import type { ChainGetter } from '../../../../chain.ts'
 import {
   forkProvider,
   rejectionOf,
@@ -21,12 +29,14 @@ import {
 } from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { EVMTokenManager } from '../../index.ts'
 import { GetMultiTokenPoolHooksState } from '../../multi-token-pool-hooks/operations/get-multi-token-pool-hooks-state.ts'
 import {
   ApplyMultiTokenPoolHooksAllowlistUpdates,
   SetMultiTokenPoolHooksBlocklist,
   SetMultiTokenPoolHooksPolicyEngine,
 } from '../../multi-token-pool-hooks/operations/hooks-config-writes.ts'
+import { UpdateMultiTokenPoolHooksAuthorizedCallers } from '../../multi-token-pool-hooks/operations/update-multi-token-pool-hooks-authorized-callers.ts'
 import { mined as minedOn } from '../../pool-config-manager/operations/fork.test.helpers.ts'
 import { readOwnership } from '../contracts.ts'
 import { GetMultiTokenPoolStack } from './get-multi-token-pool-stack.ts'
@@ -295,5 +305,103 @@ describe('MTTP owner-gated writes (Sepolia and Fuji forks)', { skip, timeout: 90
       assert.ok(reverted instanceof CCTParamsInvalidError)
       assert.equal(reverted.context.simulatedFrom, 'sender')
     })
+  })
+
+  it('refuses removing a pool from the hooks while it serves a lane on them; the check re-reads the lanes', async () => {
+    // a live mttp-core lane (Sepolia → Fuji, inline records), and the Fuji hooks' code copied onto a
+    // fresh Sepolia address (no MTTP hooks are deployed on Sepolia): owner set in its slot 1
+    const token = getAddress('0x6377325E0D7F2E0D2Bc770860F0eB3B6c62F7cEd')
+    const FUJI = 14767482510784806043n
+    const config = '0x3F7Ba502948E1A74d2eF94908CA3e0Bb8f17C7Ca' // CONFIG_ROLE on mttp-core
+    const pool = getAddress(CORE_POOL)
+    const hooks = Wallet.createRandom().address
+    const owner = Wallet.createRandom().address
+    await sepolia.provider.send('anvil_setCode', [hooks, await fuji.provider.getCode(FUJI_HOOKS)])
+    await sepolia.provider.send('anvil_setStorageAt', [
+      hooks,
+      toBeHex(1, 32),
+      zeroPadValue(owner, 32),
+    ])
+    const cct = EVMTokenManager.fromChain(sepolia.chain)
+    const getChain: ChainGetter = async (selector) =>
+      BigInt(selector) === FUJI ? fuji.chain : sepolia.chain
+    const callers = new UpdateMultiTokenPoolHooksAuthorizedCallers()
+    await mined(
+      sepolia.provider,
+      callers.execute(sepolia.chain, {
+        hooks,
+        addedCallers: [pool],
+        wallet: await impersonate(sepolia.provider, owner),
+      }),
+    )
+    const lanes = [{ tokenAddress: token, remoteChainSelector: FUJI }]
+    const [lane] = await withForkRetry(() =>
+      cct.getMultiTokenPoolLaneVerifications({ poolAddress: pool, lanes }),
+    )
+    const security = (hook: string | null) => ({
+      ...lanes[0]!,
+      securityConfig: { outboundCCVs: lane!.outboundCCVs, inboundCCVs: lane!.inboundCCVs, hook },
+    })
+    const configWallet = await impersonate(sepolia.provider, config)
+    const setSecurity = (hook: string | null) =>
+      mined(
+        sepolia.provider,
+        cct.applyMultiTokenPoolInlineSecurityConfigUpdates({
+          poolAddress: pool,
+          set: [security(hook)],
+          getChain,
+          wallet: configWallet,
+        }),
+      )
+    // a lane with a hook needs 100,000 more destination gas (the guard's minimum, 300,000)
+    const { destOverhead } = await withForkRetry(() =>
+      cct.getMultiTokenPoolInlineConfigs({ poolAddress: pool, tokenAddress: token }),
+    )
+    const overhead = destOverhead!.find((r) => r.remoteChainSelector === FUJI)!
+    await mined(
+      sepolia.provider,
+      cct.applyMultiTokenPoolInlineDestOverheadConfigUpdates({
+        poolAddress: pool,
+        set: [
+          {
+            ...overhead,
+            destOverheadConfig: { ...overhead.destOverheadConfig, destGasOverhead: 350_000 },
+          },
+        ],
+        getChain,
+        wallet: configWallet,
+      }),
+    )
+    await setSecurity(hooks)
+    const remove = { hooks, removedCallers: [pool] }
+    const refusal = await withForkRetry(() =>
+      rejectionOf(callers.generate(sepolia.chain, remove), 'expected a refusal'),
+    )
+    assert.ok(refusal instanceof CCTParamsInvalidError)
+    assert.equal(refusal.context.param, 'removedCallers[0]')
+    assert.match(String(refusal.context.reason), new RegExp(`${token}:${FUJI}`))
+    const proposal = await callers.generate(sepolia.chain, {
+      ...remove,
+      confirmClosing: lanes,
+      sender: owner,
+    })
+    assert.deepEqual(proposal.snapshot.expected[`removed.${pool}.lanes`], [`${token}:${FUJI}`])
+    const check = () =>
+      withForkRetry(() =>
+        cct.checkMultiTokenPoolSnapshot({
+          snapshot: proposal.snapshot,
+          transaction: proposal,
+          sender: owner,
+        }),
+      )
+    assert.deepEqual((await check()).changed, [])
+    // the lane leaves the hooks: the proposal was judged on a lane it no longer stops
+    await setSecurity(null)
+    const stale = await check()
+    assert.equal(stale.ok, false)
+    assert.deepEqual(
+      stale.changed.map((c) => c.path),
+      [`removed.${pool}.lanes`],
+    )
   })
 })
