@@ -459,4 +459,67 @@ describe('MTTP write ops, built read-only (Sepolia)', { skip, timeout: 600_000 }
       assert.equal(unsigned.transactions.length, 1, name)
     }
   })
+
+  it('builds the E7 role, admin and fee writes through the facade, and names the state refusals', async (t) => {
+    if (!deployed) return t.skip('v5v9 not deployed')
+    const target = { poolAddress: CORE_POOL }
+    const FRESH = '0x00000000000000000000000000000000000E7E7E'
+    const built = [
+      await cct.generateUnsignedGrantMultiTokenPoolRole({
+        ...target,
+        role: 'PAUSER_ROLE',
+        account: FRESH,
+      }),
+      await cct.generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer({
+        ...target,
+        newAdmin: FRESH,
+      }),
+      await cct.generateUnsignedChangeMultiTokenPoolDefaultAdminDelay({ ...target, newDelay: 60 }),
+      await cct.generateUnsignedWithdrawMultiTokenPoolFeeTokens({
+        ...target,
+        feeTokens: ['0x6377325E0D7F2E0D2Bc770860F0eB3B6c62F7cEd'],
+        recipient: FRESH,
+      }),
+    ]
+    for (const unsigned of built) {
+      // record-free: nothing projected, nothing simulated without a sender
+      assert.deepEqual(unsigned.affectedLanes, [])
+      assert.equal(unsigned.simulatedFrom, 'none')
+    }
+    const refused = (param: string, pattern: RegExp) => (e: unknown) =>
+      e instanceof CCTParamsInvalidError && e.context.param === param && pattern.test(e.message)
+    // the live PCM has no pending transfer and no pending delay change
+    const state = await cct.getPoolConfigManagerState(target)
+    if (!('pendingDefaultAdmin' in state)) {
+      await assert.rejects(
+        cct.generateUnsignedAcceptMultiTokenPoolDefaultAdminTransfer(target),
+        refused('poolAddress', /no pending default-admin transfer/),
+      )
+      await assert.rejects(
+        cct.generateUnsignedCancelMultiTokenPoolDefaultAdminTransfer(target),
+        refused('poolAddress', /to cancel/),
+      )
+      await assert.rejects(
+        cct.generateUnsignedRenounceMultiTokenPoolDefaultAdmin({
+          ...target,
+          sender: state.defaultAdmin,
+          confirmPermanentFreeze: true,
+        }),
+        refused('poolAddress', /no scheduled renounce/),
+      )
+    }
+    if (!('pendingDefaultAdminDelay' in state))
+      await assert.rejects(
+        cct.generateUnsignedRollbackMultiTokenPoolDefaultAdminDelay(target),
+        refused('poolAddress', /no pending default-admin delay change/),
+      )
+    await assert.rejects(
+      cct.generateUnsignedRevokeMultiTokenPoolRole({
+        ...target,
+        role: 'PAUSER_ROLE',
+        account: FRESH,
+      }),
+      refused('account', /does not hold PAUSER_ROLE/),
+    )
+  })
 })
