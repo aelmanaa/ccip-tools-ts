@@ -22,25 +22,28 @@ import {
   deriveTokenPoolChainConfigV2Pda,
 } from '../../../../solana/token-pool.ts'
 import { getMultipleAccountsInfoPaged } from '../../../../solana/utils.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
+import { CCTParamsInvalidError, CCTStateChangedError } from '../../../errors.ts'
+import { decodeRemoteAddress } from '../../../remote-address.ts'
 import type { SolanaGenerateParams } from '../../operation.ts'
 import {
   deriveTokenPoolChainConfigPda,
   deriveTokenPoolConfigPda,
 } from '../../programs/token-pool.ts'
 import { parsePublicKey, validateInteger } from '../../validate.ts'
-import { decodePoolGroupChainConfigV2, poolGroupPdas } from '../accounts.ts'
+import { MAX_POOL_GROUP_CHAINS, poolGroupPdas } from '../accounts.ts'
 import { decodeClassBits, decodeRoles, decodeSections, keyOrNull, toBigInt } from '../decode.ts'
 import { isUnread } from '../lane.ts'
 import { createPoolGroupProgram } from '../program.ts'
 import { poolState } from '../remote-lane.ts'
 import {
   type SectionWrite,
+  assertDefaultPoolsFit,
   classBit,
   exactSection,
   parseSectionUpdate,
   sectionArg,
   sectionClass,
+  sectionJudge,
   sectionValue,
 } from '../sections.ts'
 import { type PoolGroupPolicyClass, POOL_GROUP_POLICY_CLASSES } from '../types.ts'
@@ -72,6 +75,7 @@ import {
   decodeOne,
   eventAccounts,
   field,
+  fittedItems,
   keyField,
   laneItems,
   parseGroupWrite,
@@ -81,20 +85,12 @@ import {
   signerRole,
 } from './write-common.ts'
 
-/** `MAX_GROUP_CHAINS`: a policy has at most one record per group chain. */
-const MAX_POLICY_CHAINS = 24
 /** `MAX_NAMED_POLICY_SLOTS` (groups.rs:50). */
 const MAX_NAMED_POLICY_SLOTS = 4
 /** `CLASS_SOURCE_*` (groups.rs:107-111). */
 const SOURCE_INLINE = 0
 const SOURCE_DEFAULT = 1
 const SOURCE_FIRST_NAMED = 2
-
-/** The judge of a section write: RATE_LIMIT judges only the lanes it loosens. */
-const sectionJudge = (write: SectionWrite) =>
-  sectionClass(write) === 'rateLimit'
-    ? ({ scope: 'loosened', failsClosedSeverity: 'error' } as const)
-    : ({ failsClosedSeverity: 'error' } as const)
 
 const u32 = (data: unknown, name: string) => Number(bigField(field(data, 'params', name)) ?? -1)
 
@@ -183,8 +179,8 @@ export class CreatePoolGroupPolicy extends PoolGroupWriteOperation<
 
   /**
    * `create_policy` at the group's `nextPolicyId` (sealed: a concurrent creator moves it).
-   * @throws {@link CCTParamsInvalidError} if `authority` is not the owner or policy admin, or a
-   *   proposal's id is no longer `nextPolicyId`
+   * @throws {@link CCTParamsInvalidError} if `authority` is not the owner or policy admin
+   * @throws {@link CCTStateChangedError} if a proposal's id is no longer `nextPolicyId`
    */
   protected async plan(
     chain: SolanaChain,
@@ -195,10 +191,16 @@ export class CreatePoolGroupPolicy extends PoolGroupWriteOperation<
     requirePolicyManager(this.name, group, authority, 'create_policy')
     const policyId = parsed.policyId ?? group.nextPolicyId
     if (policyId !== group.nextPolicyId)
-      throw new CCTParamsInvalidError(
+      throw new CCTStateChangedError(
         this.name,
-        'transactions',
-        `nextPolicyId moved to ${group.nextPolicyId} (the proposal creates ${policyId}): re-plan`,
+        `group.nextPolicyId moved to ${group.nextPolicyId} (the proposal creates ${policyId}): re-plan`,
+        {
+          context: {
+            changed: [
+              { path: 'group.nextPolicyId', expected: policyId, actual: group.nextPolicyId },
+            ],
+          },
+        },
       )
     const policy = poolGroupPdas.policy(ref.program, ref.group, policyId)
     const ix = await createPoolGroupProgram(chain, ref.program, parsed.payer)
@@ -365,7 +367,7 @@ export class InitPoolGroupPolicyChainRecord extends PoolGroupWriteOperation<
         'remoteChainSelector',
         `policy ${policyId} already has a record for chain ${selector}`,
       )
-    if (chains.length >= MAX_POLICY_CHAINS)
+    if (chains.length >= MAX_POOL_GROUP_CHAINS)
       throw new CCTParamsInvalidError(
         this.name,
         'remoteChainSelector',
@@ -668,6 +670,23 @@ export class SetPoolGroupPolicyDefault extends PoolGroupWriteOperation<
       isSigner: false,
       isWritable: true,
     }))
+    const infos = await getMultipleAccountsInfoPaged(
+      chain.connection,
+      records.map((r) => r.pubkey),
+    )
+    assertDefaultPoolsFit(
+      this.name,
+      section,
+      policy.chainSelectors.map(toBigInt).filter((_, i) => {
+        const info = infos[i]
+        return (
+          !!info &&
+          (decodeOwned('policyChainRecord', info, records[i]!.pubkey, ref.program).inheritsDefault &
+            classBit(cls)) !==
+            0
+        )
+      }),
+    )
     const ix = await createPoolGroupProgram(chain, ref.program, parsed.payer)
       .methods.setPolicyDefault({
         policyId,
@@ -927,11 +946,16 @@ export class AssignPoolGroupLanePolicies extends PoolGroupWriteOperation<
           `${authority.toBase58()} does not own the pool of ${mint.toBase58()} (owner ${pool.state.owner.toBase58()}), who signs its assignment`,
         )
       // records the lane references now: their counts move, so they are passed too
-      for (const p of s.ext.policySlots)
-        if (p)
-          before.add(poolGroupPdas.policyChain(ref.program, new PublicKey(p), selector).toBase58())
+      const refs = s.ext.policySlots.flatMap((p) =>
+        p ? [poolGroupPdas.policyChain(ref.program, new PublicKey(p), selector).toBase58()] : [],
+      )
+      for (const r of refs) before.add(r)
       return {
         mint,
+        refs,
+        ownPools: s.chainConfig.base.remote.poolAddresses.map((p) =>
+          decodeRemoteAddress(Buffer.from(p.address), selector),
+        ),
         sources: POOL_GROUP_POLICY_CLASSES.map((cls) => s.ext!.classSource[cls]),
         metas: [
           { pubkey: stateAddress, isSigner: false, isWritable: false },
@@ -976,13 +1000,20 @@ export class AssignPoolGroupLanePolicies extends PoolGroupWriteOperation<
         'the pool owner and the pool group owner must both sign, and one Squads vault signs for one key: open the membership (setPoolGroupSettings openMembership), or hold both roles in one vault',
       )
     const client = createPoolGroupProgram(chain, ref.program, parsed.payer)
-    const build = (metas: AccountMeta[]) =>
-      client.methods
+    // each instruction passes the slot records and the records its own lanes reference (S3b m6)
+    const slotRecordKeys = slotRecords.flatMap((r) => (r ? [r.toBase58()] : []))
+    const build = (chunk: typeof lanes) => {
+      const own = [...new Set([...slotRecordKeys, ...chunk.flatMap((l) => l.refs)])].map((r) => ({
+        pubkey: new PublicKey(r),
+        isSigner: false,
+        isWritable: true,
+      }))
+      return client.methods
         .assignLanePolicies({
           remoteChainSelector: new BN(selector.toString()),
           classSource: sources.classSource,
           policySlots: sources.policySlots,
-          recordCount: records.length,
+          recordCount: own.length,
         })
         .accountsStrict({
           group: ref.group,
@@ -992,14 +1023,36 @@ export class AssignPoolGroupLanePolicies extends PoolGroupWriteOperation<
           systemProgram: SystemProgram.programId,
           ...eventAccounts(ref.program),
         })
-        .remainingAccounts([...records, ...metas])
+        .remainingAccounts([...own, ...chunk.flatMap((l) => l.metas)])
         .instruction()
-    const items = await laneItems(this.name, chain, parsed, lanes, build, {
-      [authority.toBase58()]: 'pool-owner',
-      ...(owner && !owner.equals(authority) && { [owner.toBase58()]: 'pool-group-owner' }),
+    }
+    const items = await fittedItems(this.name, chain, parsed, lanes, build, {
+      signerRoles: {
+        [authority.toBase58()]: 'pool-owner',
+        ...(owner && !owner.equals(authority) && { [owner.toBase58()]: 'pool-group-owner' }),
+      },
+      tokenAddressesOf: (chunk) => chunk.map((l) => l.mint.toBase58()),
+      describe: (l) => `the lane of ${l.mint.toBase58()}`,
     })
     const roles = decodeRoles(group.roles)
-    const connection = decodeSections(gcp.policy, 0n, selector).connection
+    // the CONNECTION pools these lanes trust after the assignment: the source it picks (M4)
+    const connectionSource = sources.classSource[0]!
+    const namedAt = named.findIndex((n) => n.slot === connectionSource - SOURCE_FIRST_NAMED)
+    const trusted =
+      connectionSource === SOURCE_DEFAULT
+        ? decodeSections(gcp.policy, 0n, selector).connection.remotePools.map((p) => p.address)
+        : connectionSource >= SOURCE_FIRST_NAMED && namedAt >= 0
+          ? decodeSections(
+              decodeOwned(
+                'policyChainRecord',
+                namedInfos[named.length + namedAt]!,
+                slotRecords[named[namedAt]!.slot]!,
+                ref.program,
+              ).sections,
+              0n,
+              selector,
+            ).connection.remotePools.map((p) => p.address)
+          : [...new Set(lanes.flatMap((l) => l.ownPools))]
     return {
       group: ref.group,
       items,
@@ -1022,7 +1075,7 @@ export class AssignPoolGroupLanePolicies extends PoolGroupWriteOperation<
           remotePools: [
             {
               remoteChainSelector: selector,
-              addresses: connection.remotePools.map((p) => p.address),
+              addresses: trusted,
             },
           ],
         },
@@ -1038,7 +1091,6 @@ export class AssignPoolGroupLanePolicies extends PoolGroupWriteOperation<
   ): ParsedAssign {
     const ixs = decodeOne(this.name, instructions, ['assignLanePolicies'], false)
     const first = ixs[0]!
-    const recordCount = u32(first.data, 'recordCount')
     const owner = first.ix.keys[2]!.pubkey
     const raw = field(first.data, 'params', 'classSource')
     const slots = field(first.data, 'params', 'policySlots')
@@ -1047,9 +1099,9 @@ export class AssignPoolGroupLanePolicies extends PoolGroupWriteOperation<
       selector: bigField(field(first.data, 'params', 'remoteChainSelector')) ?? 0n,
       // per lane, after the 7 fixed accounts and the records: State, ChainConfig, V2, override
       lanes: {
-        states: ixs.flatMap(({ ix }) =>
+        states: ixs.flatMap(({ ix, data }) =>
           ix.keys
-            .slice(7 + recordCount)
+            .slice(7 + u32(data, 'recordCount'))
             .filter((_, i) => i % 4 === 0)
             .map((k) => k.pubkey),
         ),
@@ -1155,7 +1207,9 @@ export class ResetPoolGroupLaneBuckets extends PoolGroupWriteOperation<
       requireCarried(this.name, decoded.classes, 'rateLimit', policyId!)
     }
     const mints =
-      'mints' in parsed.lanes ? parsed.lanes.mints : await mintsOfV2s(chain, parsed.lanes.v2s)
+      'mints' in parsed.lanes
+        ? parsed.lanes.mints
+        : await mintsOfV2s(chain, ref.program, parsed.lanes.v2s)
     const states = await readPoolGroupLaneStates(
       chain,
       ref.program,
@@ -1265,7 +1319,7 @@ export class ResetPoolGroupLaneBuckets extends PoolGroupWriteOperation<
 }
 
 /** The mints of `ChainConfigV2` accounts. */
-async function mintsOfV2s(chain: SolanaChain, v2s: PublicKey[]) {
+async function mintsOfV2s(chain: SolanaChain, program: PublicKey, v2s: PublicKey[]) {
   const infos = await getMultipleAccountsInfoPaged(chain.connection, v2s)
   return v2s.map((address, i) => {
     const info = infos[i]
@@ -1275,7 +1329,7 @@ async function mintsOfV2s(chain: SolanaChain, v2s: PublicKey[]) {
         'transactions',
         `no ChainConfigV2 at ${address.toBase58()}`,
       )
-    return new PublicKey(decodePoolGroupChainConfigV2(info.data, address.toBase58()).mint)
+    return decodeOwned('chainConfigV2', info, address, program).mint
   })
 }
 

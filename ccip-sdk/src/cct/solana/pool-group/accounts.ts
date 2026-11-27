@@ -481,3 +481,6 @@ export function normalizeBlocklistAddress(address: Buffer): Buffer {
     ? address.subarray(12)
     : address
 }
+
+/** `MAX_GROUP_CHAINS` (base-token-pool `groups.rs:40`): chains per pool group, records per policy. @internal */
+export const MAX_POOL_GROUP_CHAINS = 24

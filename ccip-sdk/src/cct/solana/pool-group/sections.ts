@@ -16,14 +16,14 @@ import type { BurnmintTokenPoolGroups } from '../../../solana/idl/pool-groups-75
 import { getAddressBytes } from '../../../utils.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import type { RateLimitConfig } from '../../rate-limit.ts'
-import { parseRemoteAddress } from '../../remote-address.ts'
+import { decodeRemoteAddress, parseRemoteAddress } from '../../remote-address.ts'
 import {
   parseAllowedFinality,
   parseTokenTransferFeeConfig,
 } from '../token-pool/operations/chain-config-v2.ts'
 import { parseRateLimitConfig } from '../token-pool/operations/set-chain-rate-limit.ts'
 import { decodeFeeConfig, decodeRateLimitConfig, decodeSections } from './decode.ts'
-import type { IdlPolicySections } from './lane.ts'
+import { type IdlPolicySections, classBit } from './lane.ts'
 import type { PoolGroupPolicyClass } from './types.ts'
 
 /** `MAX_POLICY_REMOTE_POOLS` (groups.rs:42). */
@@ -337,6 +337,38 @@ export function rateLimitsOf(sections: IdlPolicySections) {
   }
 }
 
-/** The bit of a class (`PolicyClass::bit`). @internal */
-export const classBit = (cls: PoolGroupPolicyClass): number =>
-  1 << ['connection', 'fee', 'rateLimit', 'security'].indexOf(cls)
+/**
+ * Checks a default's CONNECTION pools (given as `0x` hex, since a default names no chain) against
+ * each chain that follows the default for CONNECTION: each pool must decode as an address of that
+ * chain's family (A10), so a following chain never stores bytes its OffRamp cannot deliver (S3b m3).
+ * @throws {@link CCTParamsInvalidError} (param `section.connection.remotePools[i]`) otherwise
+ * @internal
+ */
+export function assertDefaultPoolsFit(
+  operation: string,
+  write: SectionWrite,
+  following: readonly bigint[],
+): void {
+  if (write.kind !== 'update' || write.update.policyClass !== 'connection') return
+  write.update.remotePools?.forEach(({ address }, i) => {
+    for (const selector of following)
+      try {
+        decodeRemoteAddress(address, selector)
+      } catch (cause) {
+        throw new CCTParamsInvalidError(
+          operation,
+          `section.connection.remotePools[${i}]`,
+          `0x${address.toString('hex')} is not an address of chain ${selector}, which follows the default for CONNECTION: give a pool every following chain can name, or detach the chain first`,
+          { cause: cause instanceof Error ? cause : undefined },
+        )
+      }
+  })
+}
+
+export { classBit }
+
+/** The judge of a section write: RATE_LIMIT judges only the lanes it loosens. @internal */
+export const sectionJudge = (write: SectionWrite) =>
+  sectionClass(write) === 'rateLimit'
+    ? ({ scope: 'loosened', failsClosedSeverity: 'error' } as const)
+    : ({ failsClosedSeverity: 'error' } as const)

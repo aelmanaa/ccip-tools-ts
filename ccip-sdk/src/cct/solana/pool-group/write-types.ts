@@ -281,9 +281,9 @@ export type ToPoolGroupSquadsBatchResult = {
 }
 
 /**
- * The guard options of every pool-group write (A21): a write that drops remote pools a lane trusts
- * (or turns off `allowLegacyPoolData` on a pool it keeps) is refused unless each drop is listed
- * here, keyed by lane. They are sealed into the snapshot.
+ * The guard options of every pool-group write (A21, A23): a write that drops remote pools a lane
+ * trusts (or turns off `allowLegacyPoolData` on a pool it keeps), or swaps a live lane's CCVs at once,
+ * is refused unless each lane is listed here. They are sealed into the snapshot.
  */
 export type PoolGroupGuardOptions = {
   /**
@@ -291,14 +291,19 @@ export type PoolGroupGuardOptions = {
    * The error's `context.dropped` has this shape.
    */
   confirmDropped?: MultiTokenPoolInlineRemotePoolDrop[]
+  /**
+   * Live lanes whose SECURITY source the write changes, and whose CCVs therefore change at once
+   * (no notice). Without its entry such a lane is refused unless its effective CCVs stay the same
+   * or it is paused (A23).
+   */
+  confirmCCVChanges?: PoolGroupLaneKey[]
 }
 
 /**
- * Options of every write that can make lanes live (clearing a pool-group, chain or lane pause,
- * syncing CCVs into a lane that failed closed, a section write that repairs a lane, ...). The write
- * runs `checkMultiTokenPoolLane` on every lane it makes live, as the write leaves it, chunked,
- * refuses on any error finding, and returns `goingLive` and the findings. No attestations are
- * accepted here: every remote chain must be readable through `getChain`, or the lane fails closed
+ * Options of every write that can make lanes live or change a live lane's CONNECTION or FEE. The
+ * write runs `checkMultiTokenPoolLane` on each such lane as the write leaves it (A23), chunked, and
+ * refuses on a new error finding (any error on a lane it makes live). No attestations are accepted
+ * here: every remote chain must be readable through `getChain`, or the lane fails closed
  * (`REMOTE_UNREADABLE`).
  */
 export type PoolGroupLiveCheckOptions = {

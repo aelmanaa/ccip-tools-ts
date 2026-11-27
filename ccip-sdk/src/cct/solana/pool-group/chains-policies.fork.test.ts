@@ -20,7 +20,9 @@ import { Wallet as AnchorWallet } from '@coral-xyz/anchor'
 import { Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js'
 
 import '../../../index.ts'
-import { rpcEndpoint } from '../../../../../scripts/test-endpoints.ts'
+import { reachableRpcEndpoint, rpcEndpoint } from '../../../../../scripts/test-endpoints.ts'
+import type { ChainGetter } from '../../../chain.ts'
+import { EVMChain } from '../../../evm/index.ts'
 import { networkInfo } from '../../../networks.ts'
 import {
   type SurfpoolInstance,
@@ -30,6 +32,7 @@ import {
   surfnetRequest,
 } from '../../../solana/__tests__/surfpool.ts'
 import { SolanaChain } from '../../../solana/index.ts'
+import { jsonStringify } from '../../../utils.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import { SolanaTokenManager } from '../index.ts'
 import { deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
@@ -59,6 +62,8 @@ describe(
     const wallet = () => new AnchorWallet(owner)
     const ref = { poolProgramAddress: PROGRAM }
     let poolGroupAddress: string
+    // the remote side of the BDiS lanes (Sepolia, read-only): the lane check reads it (A23)
+    let getChain: ChainGetter
 
     /** Rewrites 32 bytes of an account on the fork. */
     async function rewrite(address: string, offset: number, key: PublicKey) {
@@ -85,6 +90,11 @@ describe(
         apiClient: null,
       })
       cct = SolanaTokenManager.fromChain(chain)
+      const sepolia = await EVMChain.fromUrl(await reachableRpcEndpoint('RPC_SEPOLIA'))
+      getChain = async (selector) => {
+        if (selector === SEPOLIA) return sepolia
+        throw new CCTParamsInvalidError('test', 'getChain', `no RPC for ${selector}`)
+      }
       for (const key of [owner, other]) {
         const sig = await started.connection.requestAirdrop(key.publicKey, 10 * LAMPORTS_PER_SOL)
         await started.connection.confirmTransaction(sig)
@@ -337,24 +347,42 @@ describe(
         const detach = chainRecord.inheritsDefault.includes('connection')
         const kept = chainRecord.policy.connection.remotePools
         const extra = `0x${Buffer.from(Keypair.generate().publicKey.toBytes().subarray(0, 20)).toString('hex')}`
-        await cct.setPoolGroupChainPolicy({
+        const add = {
           ...g,
           remoteChainSelector: lane.remoteChainSelector,
           section: {
             policyClass: 'connection',
             connection: { remotePools: [...kept, { address: extra, allowLegacyPoolData: false }] },
-          },
+          } satisfies PoolGroupSectionUpdate,
           ...(detach && { detachFromPoolGroupDefault: true }),
-          wallet: wallet(),
+        }
+        // a CONNECTION change on a live lane runs the lane check (A23): without getChain its remote
+        // side cannot be read, so it fails closed
+        const view = await cct.getMultiTokenPoolLane({
+          tokenAddress: lane.tokenAddress,
+          remoteChainSelector: lane.remoteChainSelector,
+          poolAddress: PROGRAM,
         })
+        const live = view.outboundStatus.status === 'ok' || view.inboundStatus.status === 'ok'
+        if (live)
+          await assert.rejects(
+            cct.generateUnsignedSetPoolGroupChainPolicy({
+              ...add,
+              payer: owner.publicKey.toBase58(),
+            }),
+            /REMOTE_UNREADABLE/,
+          )
+        await cct.setPoolGroupChainPolicy({ ...add, getChain, wallet: wallet() })
+        // drop the added pool again
         const drop: PoolGroupSectionUpdate = {
           policyClass: 'connection',
-          connection: { remotePools: [] },
+          connection: { remotePools: kept },
         }
         const params = {
           ...g,
           remoteChainSelector: lane.remoteChainSelector,
           section: drop,
+          getChain,
           payer: owner.publicKey.toBase58(),
         }
         let dropped: unknown
@@ -380,8 +408,42 @@ describe(
           poolGroupAddress: LINKED_GROUP,
           snapshot: built.snapshot!,
           transaction: built.transactions[0]!,
+          getChain,
         })
-        assert.equal(check.ok, true, JSON.stringify(check))
+        assert.equal(check.ok, true, jsonStringify(check))
+      })
+
+      it('A23 fan-out: a shared FEE default too low for the release reaches every following live lane and is refused by the lane check', async (t) => {
+        const following = lanes.filter((l) => l.classSource?.fee.kind === 'default')
+        if (!following.length) return t.skip('no lane takes FEE from the group')
+        const selector = following[0]!.remoteChainSelector
+        const record = await cct.getPoolGroupChain({ ...g, remoteChainSelector: selector })
+        if (!record.inheritsDefault.includes('fee'))
+          return t.skip('the chain record does not follow the default for FEE')
+        const live: typeof following = []
+        for (const l of following.filter((f) => f.remoteChainSelector === selector)) {
+          const v = await cct.getMultiTokenPoolLane({ ...l, poolAddress: PROGRAM })
+          if (v.outboundStatus.status === 'ok' || v.inboundStatus.status === 'ok') live.push(l)
+        }
+        if (!live.length) return t.skip('no following lane is live')
+        // 1 gas cannot run the destination release: every following live lane is judged and refused
+        await assert.rejects(
+          cct.generateUnsignedSetPoolGroupDefault({
+            ...g,
+            section: { policyClass: 'fee', tokenTransferFeeConfig: { destGasOverhead: 1 } },
+            getChain,
+            payer: owner.publicKey.toBase58(),
+          }),
+          (e: unknown) => {
+            assert.ok(e instanceof CCTParamsInvalidError, String(e))
+            assert.match(e.message, /DEST_GAS_OVERHEAD_TOO_LOW/)
+            const judged = new Set(
+              (e.context.findings as { tokenAddress: string }[]).map((f) => f.tokenAddress),
+            )
+            for (const l of live) assert.ok(judged.has(l.tokenAddress), `${l.tokenAddress} judged`)
+            return true
+          },
+        )
       })
 
       it('assigns and resets lanes the test key owns; another key is refused', async (t) => {
@@ -409,6 +471,34 @@ describe(
           current[k].kind === 'policy'
             ? { kind: 'policy' as const, policyId: current[k].policyId }
             : { kind: current[k].kind }
+        const sources = {
+          connection: keep('connection'),
+          fee: keep('fee'),
+          rateLimit: keep('rateLimit'),
+          security: keep('security'),
+        }
+        const base = {
+          ...g,
+          remoteChainSelector: lane.remoteChainSelector,
+          tokenAddresses: [lane.tokenAddress],
+          payer: owner.publicKey.toBase58(),
+        }
+        // refusals: another expected owner; a policy that does not exist
+        await assert.rejects(
+          cct.generateUnsignedAssignPoolGroupLanePolicies({
+            ...base,
+            classSource: sources,
+            expectedOwner: other.publicKey.toBase58(),
+          }),
+          isParam('expectedOwner'),
+        )
+        await assert.rejects(
+          cct.generateUnsignedAssignPoolGroupLanePolicies({
+            ...base,
+            classSource: { ...sources, fee: { kind: 'policy', policyId: 4_000_000 } },
+          }),
+          isParam('classSource'),
+        )
         // the same sources again: a no-op assignment that still runs every check
         const assigned = await cct.generateUnsignedAssignPoolGroupLanePolicies({
           ...g,

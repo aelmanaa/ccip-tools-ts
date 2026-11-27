@@ -13,7 +13,7 @@ import { CCIPWalletInvalidError } from '../../../errors/index.ts'
 import type { SolanaChain } from '../../../solana/index.ts'
 import { isWallet } from '../../../solana/types.ts'
 import { canonicalHash } from '../../canonical.ts'
-import { CCTParamsInvalidError } from '../../errors.ts'
+import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
 import type { MultiTokenPoolSnapshot, MultiTokenPoolSnapshotCheck } from '../../multi-token-pool.ts'
 import { Operation } from '../../operation.ts'
 import {
@@ -161,6 +161,7 @@ type RawWriteParams = {
   budget?: SolanaTxBudget
   durableNonces?: { accounts: SolanaDurableNonce[] }
   confirmDropped?: PoolGroupGuardOptions['confirmDropped']
+  confirmCCVChanges?: PoolGroupGuardOptions['confirmCCVChanges']
   expectedSnapshot?: MultiTokenPoolSnapshot
 } & PoolGroupLiveCheckOptions
 
@@ -424,14 +425,21 @@ export abstract class PoolGroupWriteOperation<
         `instruction ${foreign} of the proposal writes the pool group ${this.proposalGroup(instructions[foreign]!)?.toBase58() ?? '(none)'}, not ${ref.group.toBase58()}: pass the pool group the proposal targets`,
       )
     const sealed: unknown = snapshot.expected[POOL_GROUP_GUARD_OPTIONS_PATH]
+    const options = typeof sealed === 'object' && sealed !== null ? sealed : {}
     const guardOptions = poolGroupGuardOptionsOf(this.name, {
-      confirmDropped:
-        typeof sealed === 'object' && sealed !== null
-          ? Reflect.get(sealed, 'confirmDropped')
-          : undefined,
+      confirmDropped: Reflect.get(options, 'confirmDropped'),
+      confirmCCVChanges: Reflect.get(options, 'confirmCCVChanges'),
     })
     const parsed = this.fromInstructions(ref, instructions, guardOptions)
-    const plan = await this.plan(chain, parsed)
+    let plan: PoolGroupWritePlan<X>
+    try {
+      plan = await this.plan(chain, parsed)
+    } catch (err) {
+      // a re-plan that finds moved state reports it as moved (S3b m4)
+      const changed: unknown = err instanceof CCTStateChangedError ? err.context.changed : undefined
+      if (!Array.isArray(changed)) throw err
+      return { ok: false, changed, findings: [] }
+    }
     const judgement = plan.judge
       ? await judgeGroups(
           {

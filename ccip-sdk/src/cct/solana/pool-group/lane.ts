@@ -126,8 +126,12 @@ function owned(
  * Decodes a `ChainConfig` as the standard burn-mint layout at its exact length (or with a marker),
  * else as the versioned CCTP/Lombard layout (one leading version byte, never marked). Anchor ignores
  * trailing bytes, so the length is what tells the layouts apart.
+ * @internal
  */
-function decodeChainConfig(data: Buffer, address: PublicKey): TokenPoolChainConfig | Unread {
+export function decodeLaneChainConfig(
+  data: Buffer,
+  address: PublicKey,
+): TokenPoolChainConfig | Unread {
   const what = `the ChainConfig ${address.toBase58()}`
   const standard = tryDecode(what, () => decodeTokenPoolChainConfig(data, 'burn-mint'))
   if (!isUnread(standard)) {
@@ -165,7 +169,7 @@ export function decodePoolGroupLaneBase(
   ] as const)
     if (acc && !acc.owner.equals(program))
       return unknown(`lane account ${addr.toBase58()} is not owned by the pool program`)
-  const base = decodeChainConfig(cc.data, ccAddress)
+  const base = decodeLaneChainConfig(cc.data, ccAddress)
   if (isUnread(base)) return base
   const kind = decodePoolGroupLaneMarker(cc.data, base)
   // An unmarked lane's ChainConfigV2 may be any pool's layout (Lombard swaps version and bump):
@@ -328,6 +332,9 @@ const CLASS_BIT: Record<PoolGroupClass, number> = {
   rateLimit: 4,
   security: 8,
 }
+
+/** The bit of a class (`PolicyClass::bit`). @internal */
+export const classBit = (cls: PoolGroupClass): number => CLASS_BIT[cls]
 
 /**
  * The record a lane takes `cls` from: `undefined` when inline (or not linked), else the sections of

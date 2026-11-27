@@ -14,7 +14,7 @@ import type { SolanaGenerateParams } from '../../operation.ts'
 import { deriveEventAuthorityPda } from '../../programs/token-pool.ts'
 import { poolGroupPdas, poolGroupsCoder } from '../accounts.ts'
 import { decodeRoles, toBigInt } from '../decode.ts'
-import { type PoolGroupPackItem, fitsOneTransaction } from '../packer.ts'
+import { type PoolGroupPackItem, oneTransactionChecks } from '../packer.ts'
 import type { PoolGroupLaneKey, PoolGroupPolicyClass } from '../types.ts'
 import { type ParsedPoolGroupWrite, parseWriteBase } from '../write-operation.ts'
 import type {
@@ -234,8 +234,11 @@ export function idlPolicyClass(cls: PoolGroupPolicyClass) {
 }
 
 /**
- * Splits entries into instructions of as many entries as one transaction fits (greedy), each built
- * by `build`; every instruction is one item (judged alone: the entries are disjoint).
+ * Splits entries into instructions of as many entries as one transaction fits, each built by
+ * `build`; every instruction is one item (judged alone: the entries are disjoint). Greedy by bytes,
+ * locks, trace and heap; then each instruction is simulated, and one that runs out of compute, heap
+ * or trace is split in halves and rebuilt (S3b M6), since a built instruction cannot be split.
+ * @param simulate - `false` for an instruction whose simulation needs an earlier transaction landed.
  * @throws {@link CCTParamsInvalidError} (param `budget`) if one entry does not fit a transaction
  * @internal
  */
@@ -249,6 +252,7 @@ export async function fittedItems<E>(
     signerRoles,
     tokenAddressesOf = () => [],
     describe,
+    simulate = true,
   }: {
     /** The signers' roles of every item. */
     signerRoles?: PoolGroupPackItem['signerRoles']
@@ -256,26 +260,28 @@ export async function fittedItems<E>(
     tokenAddressesOf?: (chunk: E[]) => string[]
     /** An entry, for the error when one does not fit alone. */
     describe: (entry: E) => string
+    /** Whether to size by simulation too; defaults to `true`. */
+    simulate?: boolean
   },
 ): Promise<PoolGroupPackItem[]> {
-  const items: PoolGroupPackItem[] = []
-  let current: E[] = []
+  if (!entries.length) return []
   const itemOf = async (chunk: E[]): Promise<PoolGroupPackItem> => ({
     tokenAddresses: tokenAddressesOf(chunk),
     instructions: [await build(chunk)],
     ...(signerRoles && { signerRoles }),
   })
-  const fits = async (chunk: E[]) =>
-    fitsOneTransaction({
-      operation,
-      chain,
-      payer: parsed.payer,
-      items: [await itemOf(chunk)],
-      ...(parsed.budget && { budget: parsed.budget }),
-      ...(parsed.durableNonces && { durableNonces: parsed.durableNonces }),
-    })
+  const checks = await oneTransactionChecks({
+    operation,
+    chain,
+    payer: parsed.payer,
+    items: [],
+    ...(parsed.budget && { budget: parsed.budget }),
+    ...(parsed.durableNonces && { durableNonces: parsed.durableNonces }),
+  })
+  const chunks: E[][] = []
+  let current: E[] = []
   for (const entry of entries) {
-    if (await fits([...current, entry])) {
+    if (await checks.fits([await itemOf([...current, entry])])) {
       current.push(entry)
       continue
     }
@@ -285,10 +291,29 @@ export async function fittedItems<E>(
         'budget',
         `${describe(entry)} does not fit a transaction alone`,
       )
-    items.push(await itemOf(current))
+    chunks.push(current)
     current = [entry]
   }
-  if (current.length) items.push(await itemOf(current))
+  if (current.length) chunks.push(current)
+  const items: PoolGroupPackItem[] = []
+  const sized = async (chunk: E[]): Promise<void> => {
+    const item = await itemOf(chunk)
+    if (!simulate || !(await checks.tooHeavy([item]))) {
+      items.push(item)
+      return
+    }
+    if (chunk.length === 1)
+      throw new CCTParamsInvalidError(
+        operation,
+        'budget',
+        `${describe(chunk[0]!)} exceeds the compute, heap or instruction-trace limit alone`,
+      )
+    // splitting after a simulation failure is safe: nothing landed
+    const half = Math.ceil(chunk.length / 2)
+    await sized(chunk.slice(0, half))
+    await sized(chunk.slice(half))
+  }
+  for (const chunk of chunks) await sized(chunk)
   return items
 }
 
