@@ -17,7 +17,7 @@ import {
   getMultiTokenPoolInterface,
 } from '../../multi-token-pool/contracts.ts'
 import { validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
-import { type MultiTokenPoolLaneKey, validateLaneKeys } from '../contracts.ts'
+import type { MultiTokenPoolLaneKey } from '../contracts.ts'
 import { readMultiTokenPoolRecordState } from '../record-state.ts'
 import type { InlineRemotePoolConfig } from '../records.ts'
 import {
@@ -29,19 +29,6 @@ import {
 } from '../write-operation.ts'
 import { checkInlineRecordWrite, validateInlineRecordWrite } from './record-writes.ts'
 
-/** Flags a set may turn off on an existing record. */
-const DROPPABLE_FLAGS = ['trustPolicyRemotePools', 'allowLegacyPoolData'] as const
-
-/** What a set may drop from an existing record, confirmed by repeating it. */
-export type MultiTokenPoolInlineRemotePoolDrop = {
-  /** The lane. */
-  lane: MultiTokenPoolLaneKey
-  /** Remote pools the set no longer lists. */
-  remotePools?: string[]
-  /** Flags the set turns off (`allowLegacyPoolData`: on any pool the set keeps). */
-  flags?: (typeof DROPPABLE_FLAGS)[number][]
-}
-
 /** Parameters of `applyMultiTokenPoolInlineRemotePoolConfigUpdates`. Removals run first. */
 export type ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams = PoolConfigManagerWriteParams &
   MultiTokenPoolWriteGuards & {
@@ -50,20 +37,18 @@ export type ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams = PoolConfigM
      * (set `poolDataFormat: 'long'` first, once the remote pool reads it).
      */
     remove?: MultiTokenPoolLaneKey[]
-    /** Records to set; a set replaces the whole record. */
-    set?: InlineRemotePoolConfig[]
     /**
-     * Pools and flags a set drops from an existing record: a set replaces the whole record, so each
-     * dropped pool or flag must be repeated here.
+     * Records to set; a set replaces the whole record, so every pool or flag it drops from the lane
+     * needs `confirmDropped` (a guard option of every write).
      */
-    confirmDropped?: MultiTokenPoolInlineRemotePoolDrop[]
+    set?: InlineRemotePoolConfig[]
   }
 
 /**
  * Writes inline remote pool records.
  * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the store would refuse
- *   (no inline record, an unregistered token, a removal of a legacy-sending record), a set drops a pool
- *   or flag `confirmDropped` does not list, `sender` lacks the gate, or a lane guard refuses;
+ *   (no inline record, an unregistered token, a removal of a legacy-sending record), `sender` lacks
+ *   the gate, or a lane guard refuses (a dropped pool `confirmDropped` does not list included);
  *   `context.recordType` is `'remotePool'`
  */
 export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends PoolConfigManagerWriteOperation<ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams> {
@@ -96,30 +81,6 @@ export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends PoolConfig
         ),
       )
     })
-    if (params.confirmDropped !== undefined) {
-      validateArray(this.name, 'confirmDropped', params.confirmDropped)
-      validateLaneKeys(
-        this.name,
-        'confirmDropped',
-        params.confirmDropped.map((d) => (d as { lane?: unknown } | undefined)?.lane),
-        0,
-      )
-      params.confirmDropped.forEach((d, i) => {
-        if (d.flags !== undefined) {
-          validateArray(this.name, `confirmDropped[${i}].flags`, d.flags)
-          Array.from(d.flags, (f, j) =>
-            validateOneOf(this.name, `confirmDropped[${i}].flags[${j}]`, f, DROPPABLE_FLAGS),
-          )
-        }
-        if (d.remotePools !== undefined)
-          parseUniqueRemoteAddresses(
-            this.name,
-            `confirmDropped[${i}].remotePools`,
-            d.remotePools,
-            d.lane.remoteChainSelector,
-          )
-      })
-    }
     return params
   }
 
@@ -158,8 +119,6 @@ export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends PoolConfig
         )
     })
 
-    // a set replaces the whole record: what it drops must be confirmed
-    const confirmed = new Map((params.confirmDropped ?? []).map((d) => [laneKey(d.lane), d]))
     const parsedPools = (c: InlineRemotePoolConfig, i: number) =>
       parseUniqueRemoteAddresses(
         this.name,
@@ -167,60 +126,6 @@ export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends PoolConfig
         c.remotePools.map((p) => p.address),
         c.remoteChainSelector,
       )
-    ;(params.set ?? []).forEach((c, i) => {
-      const was = current(c)
-      if (!was) return
-      const parsed = parsedPools(c, i)
-      const keeps = new Set(parsed)
-      const legacyKept = new Map(parsed.map((a, j) => [a, c.remotePools[j]!.allowLegacyPoolData]))
-      const pools = was.remotePools.map((p) => p.address).filter((a) => !keeps.has(a))
-      const flags = [
-        ...(was.trustPolicyRemotePools && !c.trustPolicyRemotePools
-          ? (['trustPolicyRemotePools'] as const)
-          : []),
-        ...(was.remotePools.some(
-          (p) => p.allowLegacyPoolData && keeps.has(p.address) && !legacyKept.get(p.address),
-        )
-          ? (['allowLegacyPoolData'] as const)
-          : []),
-      ]
-      const ok = confirmed.get(laneKey(c))
-      const okPools = new Set(
-        ok?.remotePools
-          ? parseUniqueRemoteAddresses(
-              this.name,
-              'confirmDropped',
-              ok.remotePools,
-              c.remoteChainSelector,
-            )
-          : [],
-      )
-      const missingPools = pools.filter((p) => !okPools.has(p))
-      const missingFlags = flags.filter((f) => !ok?.flags?.includes(f))
-      if (missingPools.length || missingFlags.length)
-        throw new CCTParamsInvalidError(
-          this.name,
-          'confirmDropped',
-          `set[${i}] replaces the record of ${laneKey(c)} and drops ${[
-            ...(missingPools.length ? [`remote pools ${missingPools.join(', ')}`] : []),
-            ...(missingFlags.length ? [`flags ${missingFlags.join(', ')}`] : []),
-          ].join(
-            ' and ',
-          )}: a set replaces the whole record, so in-flight messages from a dropped pool would revert. List them in confirmDropped for this lane, or keep them in the set`,
-          {
-            context: {
-              ...context,
-              lane: {
-                tokenAddress: getAddress(c.tokenAddress),
-                remoteChainSelector: c.remoteChainSelector,
-              },
-              remotePools: missingPools,
-              flags: missingFlags,
-            },
-          },
-        )
-    })
-
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
       'applyInlineRemotePoolConfigUpdates',
       [

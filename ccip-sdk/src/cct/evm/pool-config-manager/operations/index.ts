@@ -141,7 +141,6 @@ export {
 } from './apply-multi-token-pool-remote-token-address-provider-updates.ts'
 export {
   type ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams,
-  type MultiTokenPoolInlineRemotePoolDrop,
   ApplyMultiTokenPoolInlineRemotePoolConfigUpdates,
 } from './apply-multi-token-pool-inline-remote-pool-config-updates.ts'
 export {

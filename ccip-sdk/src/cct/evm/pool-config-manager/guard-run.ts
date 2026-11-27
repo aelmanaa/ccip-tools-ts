@@ -28,7 +28,7 @@ import type {
   MultiTokenPoolRemoteAttestation,
   MultiTokenPoolSnapshot,
 } from '../../multi-token-pool.ts'
-import { decodeRemoteAddress } from '../../remote-address.ts'
+import { decodeRemoteAddress, parseUniqueRemoteAddresses } from '../../remote-address.ts'
 import {
   type MultiTokenPoolVersion,
   ANY_FINALITY_CONFIG,
@@ -55,7 +55,9 @@ import {
   multiTokenPoolAffectedLanes,
   multiTokenPoolCandidateLanes,
   multiTokenPoolChainLanes,
+  multiTokenPoolDroppedPools,
   multiTokenPoolLaneTransitions,
+  multiTokenPoolPcmLaneCheck,
   requiredMultiTokenPoolGuardFacts,
 } from './guards.ts'
 import { decodeLaneRecordLevels } from './operations/get-multi-token-pool-lane-record-levels.ts'
@@ -236,6 +238,61 @@ export async function runMultiTokenPoolGuards(
         { context: { ...input.errorContext, extra } },
       )
   }
+  // a lane the write stops trusting a remote pool on (or whose kept pools lose legacy receive): in-flight
+  // inbound messages from it revert, so the caller confirms every drop
+  const dropped = multiTokenPoolDroppedPools(lanes)
+  if (dropped.length) {
+    const confirmed = new Map((input.confirmDropped ?? []).map((d) => [guardLaneKey(d.lane), d]))
+    const unconfirmed = dropped
+      .map((d) => {
+        const ok = confirmed.get(guardLaneKey(d.lane))
+        // canonical spellings on both sides (base58 is case-sensitive)
+        const okPools = new Set(
+          ok?.remotePools
+            ? parseUniqueRemoteAddresses(
+                errorOperation,
+                'confirmDropped',
+                ok.remotePools,
+                d.lane.remoteChainSelector,
+              )
+            : [],
+        )
+        return {
+          lane: d.lane,
+          remotePools: d.remotePools.filter((p) => !okPools.has(p)),
+          flags: d.flags.filter((f) => !ok?.flags?.includes(f)),
+        }
+      })
+      .filter((d) => d.remotePools.length || d.flags.length)
+    if (unconfirmed.length)
+      throw new CCTParamsInvalidError(
+        errorOperation,
+        'confirmDropped',
+        `the write drops trusted remote pools, so in-flight inbound messages from them would revert: ${unconfirmed
+          .map(
+            (d) =>
+              `${d.lane.tokenAddress} → ${d.lane.remoteChainSelector} drops ${[
+                ...(d.remotePools.length ? [`pools ${d.remotePools.join(', ')}`] : []),
+                ...(d.flags.length ? [`flags ${d.flags.join(', ')}`] : []),
+              ].join(' and ')}`,
+          )
+          .join(
+            '; ',
+          )}. To proceed, add confirmDropped: context.dropped (same shape), or keep them trusted`,
+        { context: { ...input.errorContext, dropped: unconfirmed } },
+      )
+  }
+  // the PCM's own post-write lane check, from the projection (no RPC; no eth_simulateV1 needed)
+  for (const f of multiTokenPoolPcmLaneCheck(after, decoded.changes))
+    if (
+      !findings.some(
+        (g) =>
+          g.check === f.check &&
+          g.recordType === f.recordType &&
+          guardLaneKey(g) === guardLaneKey(f),
+      )
+    )
+      findings.push(f)
   const errors = findings.filter((f) => f.severity === 'error')
   if (errors.length && !input.reportFindings)
     throw new CCTParamsInvalidError(
@@ -370,6 +427,18 @@ export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGua
           directions: [...new Set(directions)].sort(),
         }))
         .sort((a, b) => guardLaneKey(a).localeCompare(guardLaneKey(b))),
+    }),
+    ...(o.confirmDropped?.length && {
+      confirmDropped: [...o.confirmDropped]
+        .map(({ lane, remotePools, flags }) => ({
+          lane: {
+            tokenAddress: getAddress(lane.tokenAddress),
+            remoteChainSelector: lane.remoteChainSelector,
+          },
+          ...(remotePools?.length && { remotePools: [...remotePools].sort() }),
+          ...(flags?.length && { flags: [...new Set(flags)].sort() }),
+        }))
+        .sort((a, b) => guardLaneKey(a.lane).localeCompare(guardLaneKey(b.lane))),
     }),
     ...(o.migrationWindowChains?.length && {
       migrationWindowChains: [...o.migrationWindowChains].sort((a, b) =>
@@ -605,7 +674,6 @@ async function crossCheckWithSimulateV1(
   blockTag: number,
 ): Promise<boolean> {
   const { poolConfigManager, version, operation } = input
-  if (!lanes.length) return true
   const pcm = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version)
   const keys = lanes.map(toAbiLaneKey)
   const views = [

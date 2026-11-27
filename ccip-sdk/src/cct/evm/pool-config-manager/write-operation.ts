@@ -191,6 +191,7 @@ export abstract class PoolConfigManagerWriteOperation<
       }),
       ...(params.confirmClosing && { confirmClosing: params.confirmClosing }),
       ...(params.confirmOpening && { confirmOpening: params.confirmOpening }),
+      ...(params.confirmDropped && { confirmDropped: params.confirmDropped }),
       ...(params.migrationWindowChains && { migrationWindowChains: params.migrationWindowChains }),
     })
     return {

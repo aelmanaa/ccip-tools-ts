@@ -104,15 +104,17 @@ export class ApplyMultiTokenPoolInlineConnectionConfigUpdates extends PoolConfig
         .find((t) => getAddress(t.tokenAddress) === getAddress(l.tokenAddress))
         ?.inline.connection.find((r) => r.remoteChainSelector === l.remoteChainSelector)
     // after a removal the lane falls back to its policy, which must not resolve another remote token
-    // (PolicyRemoteTokenMismatch): project the exact write
-    if (params.remove?.length) {
+    // (PolicyRemoteTokenMismatch). The store checks it in its removal loop, before any set: project
+    // the removals alone
+    const removals = params.remove ?? []
+    if (removals.length) {
       const after = applyMultiTokenPoolRecordChanges(
         state,
-        decodeMultiTokenPoolWrite(data, version).changes,
+        decodeMultiTokenPoolWrite(data, version).changes.filter((c) => c.kind === 'removeInline'),
       )
-      await fillProviderAnswers(chain, after, params.remove, blockTag)
-      resolveMultiTokenPoolLanes(after, params.remove).forEach((lane, i) => {
-        const was = inline(params.remove![i]!)?.remoteToken
+      await fillProviderAnswers(chain, after, removals, blockTag)
+      resolveMultiTokenPoolLanes(after, removals).forEach((lane, i) => {
+        const was = inline(lane)?.remoteToken
         const policy = lane.connection.remoteToken
         if (policy !== null && was !== undefined && policy !== was)
           throw new CCTParamsInvalidError(

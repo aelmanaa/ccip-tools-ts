@@ -13,12 +13,14 @@ import { ZeroAddress, getAddress } from 'ethers'
 import type { LaneRecordType, RateLimiterState, TransferDirection } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { canonicalJson } from '../../canonical.ts'
+import { CCTParamsInvalidError } from '../../errors.ts'
 import {
   type MultiTokenPoolLaneFinding,
   type MultiTokenPoolRemoteAttestation,
   type MultiTokenPoolRemoteFact,
   sortFindings,
 } from '../../multi-token-pool.ts'
+import { parseUniqueRemoteAddresses } from '../../remote-address.ts'
 import {
   validateArray,
   validateBoolean,
@@ -27,11 +29,14 @@ import {
   validateUint64,
 } from '../validate.ts'
 import {
+  type MultiTokenPoolInlineRemotePoolDrop,
   type MultiTokenPoolLaneDirections,
   type MultiTokenPoolLaneKey,
+  DROPPABLE_REMOTE_POOL_FLAGS,
   validateLaneKeys,
 } from './contracts.ts'
 import {
+  type MultiTokenPoolRecordChange,
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
   laneKey,
@@ -71,6 +76,11 @@ export type MultiTokenPoolGuardOptions = {
    */
   confirmOpening?: MultiTokenPoolLaneDirections[]
   /**
+   * Remote pools (and flags) the caller agrees this write drops from a lane's trusted pools: refused
+   * when it drops one not listed, since in-flight inbound messages from a dropped pool revert.
+   */
+  confirmDropped?: MultiTokenPoolInlineRemotePoolDrop[]
+  /**
    * Remote chains where a lane may accept legacy pool data from a remote multi-token pool: only for
    * a migration window.
    */
@@ -78,7 +88,10 @@ export type MultiTokenPoolGuardOptions = {
 }
 
 // the family-neutral remote fact and the lane directions; re-exported so importers keep their path
-export type { MultiTokenPoolLaneDirections } from './contracts.ts'
+export type {
+  MultiTokenPoolInlineRemotePoolDrop,
+  MultiTokenPoolLaneDirections,
+} from './contracts.ts'
 export type { MultiTokenPoolRemoteFact } from '../../multi-token-pool.ts'
 
 /** What the remote side of one lane does. @internal */
@@ -703,6 +716,41 @@ export function validateMultiTokenPoolGuardOptions(
       )
     })
   }
+  if (o.confirmDropped !== undefined) {
+    validateArray(operation, at('confirmDropped'), o.confirmDropped)
+    const seen = new Map<string, string>()
+    Array.from(o.confirmDropped, (d, i) => {
+      const entry = at(`confirmDropped[${i}]`)
+      const { lane, remotePools, flags } = (d ?? {}) as Record<string, unknown>
+      if (lane === undefined)
+        throw new CCTParamsInvalidError(
+          operation,
+          `${entry}.lane`,
+          'is required: the lane the write drops pools from',
+        )
+      validateLaneKeys(operation, `${entry}.lane`, [lane], 1)
+      const key = guardLaneKey(lane as MultiTokenPoolLaneKey)
+      const first = seen.get(key)
+      if (first !== undefined)
+        throw new CCTParamsInvalidError(operation, entry, `repeats ${first}: give each lane once`)
+      seen.set(key, entry)
+      if (remotePools !== undefined) {
+        validateArray(operation, `${entry}.remotePools`, remotePools)
+        parseUniqueRemoteAddresses(
+          operation,
+          `${entry}.remotePools`,
+          remotePools,
+          (lane as MultiTokenPoolLaneKey).remoteChainSelector,
+        )
+      }
+      if (flags !== undefined) {
+        validateArray(operation, `${entry}.flags`, flags)
+        Array.from(flags, (f, j) =>
+          validateOneOf(operation, `${entry}.flags[${j}]`, f, DROPPABLE_REMOTE_POOL_FLAGS),
+        )
+      }
+    })
+  }
   if (o.migrationWindowChains !== undefined) {
     validateArray(operation, at('migrationWindowChains'), o.migrationWindowChains)
     Array.from(o.migrationWindowChains, (c, i) =>
@@ -747,4 +795,84 @@ export function multiTokenPoolLaneTransitions(
     if (newly.length) goingLive.push(entry(after, newly))
   }
   return { opened, goingLive }
+}
+
+/**
+ * What a write drops from each lane's trusted remote pools: pools trusted before and not after, and
+ * `allowLegacyPoolData` turned off on a pool kept. Lanes closed or opened by the write are not
+ * drops (`confirmClosing` and `confirmOpening` cover them). Addresses are canonical spellings.
+ * @internal
+ */
+export function multiTokenPoolDroppedPools(
+  lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
+): { lane: MultiTokenPoolLaneKey; remotePools: string[]; flags: 'allowLegacyPoolData'[] }[] {
+  return lanes
+    .filter(
+      ({ before, after }) => before.connection.hasConnection && after.connection.hasConnection,
+    )
+    .map(({ before, after }) => {
+      const kept = new Map(
+        after.connection.remotePools.map((p) => [p.address, p.allowLegacyPoolData]),
+      )
+      const remotePools = before.connection.remotePools
+        .filter((p) => !kept.has(p.address))
+        .map((p) => p.address)
+      const legacyOff = before.connection.remotePools.some(
+        (p) => p.allowLegacyPoolData && kept.get(p.address) === false,
+      )
+      return {
+        lane: { tokenAddress: after.tokenAddress, remoteChainSelector: after.remoteChainSelector },
+        remotePools,
+        flags: legacyOff ? (['allowLegacyPoolData'] as const).slice() : [],
+      }
+    })
+    .filter((d) => d.remotePools.length || d.flags.length)
+}
+
+/** The record types the PCM's post-write `_checkLane` requires (each store's `checkLaneRecords`). */
+const PCM_CHECKED_RECORD_TYPES = [
+  'remotePool',
+  'fee',
+  'destOverhead',
+  'rateLimit',
+  'security',
+] as const
+
+/**
+ * The PoolConfigManager's own post-write lane check (`_checkLane`), on the projection: every lane an
+ * inline connection sets or a subset adds must resolve a record of each type the three stores check
+ * (chainlink-ccip c950d9bc `PoolConfigManager.sol:852`; it runs even while `onlySubsetTokens` is
+ * false). Returns a `RECORD_MISSING` error per missing record, so no RPC or `eth_simulateV1` is needed.
+ * @internal
+ */
+export function multiTokenPoolPcmLaneCheck(
+  after: MultiTokenPoolRecordState,
+  changes: readonly MultiTokenPoolRecordChange[],
+): MultiTokenPoolLaneFinding[] {
+  const keys = new Map<string, MultiTokenPoolLaneKey>()
+  for (const c of changes) {
+    if (c.kind === 'setInline' && c.type === 'connection')
+      keys.set(guardLaneKey(c.record), {
+        tokenAddress: c.record.tokenAddress,
+        remoteChainSelector: c.record.remoteChainSelector,
+      })
+    if (c.kind === 'updateSubsetTokens')
+      for (const t of c.add ?? [])
+        keys.set(guardLaneKey({ tokenAddress: t, remoteChainSelector: c.remoteChainSelector }), {
+          tokenAddress: getAddress(t),
+          remoteChainSelector: c.remoteChainSelector,
+        })
+  }
+  return resolveMultiTokenPoolLanes(after, [...keys.values()]).flatMap((lane) =>
+    PCM_CHECKED_RECORD_TYPES.filter((type) => lane.levels[type] === 'none').map(
+      (type): MultiTokenPoolLaneFinding => ({
+        check: 'RECORD_MISSING',
+        severity: 'error',
+        tokenAddress: lane.tokenAddress,
+        remoteChainSelector: lane.remoteChainSelector,
+        recordType: type,
+        reason: `the lane resolves no ${type} record, and the PoolConfigManager checks every record after this write (_checkLane), so it reverts: write the ${type} record first (inline or through a policy)`,
+      }),
+    ),
+  )
 }
