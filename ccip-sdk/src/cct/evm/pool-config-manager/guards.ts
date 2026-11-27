@@ -26,7 +26,11 @@ import {
   validateUint32,
   validateUint64,
 } from '../validate.ts'
-import { type MultiTokenPoolLaneKey, validateLaneKeys } from './contracts.ts'
+import {
+  type MultiTokenPoolLaneDirections,
+  type MultiTokenPoolLaneKey,
+  validateLaneKeys,
+} from './contracts.ts'
 import {
   type MultiTokenPoolRecordState,
   type ProjectedMultiTokenPoolLane,
@@ -60,7 +64,8 @@ export type MultiTokenPoolGuardOptions = Pick<
   | 'migrationWindowChains'
 >
 
-// the family-neutral remote fact; re-exported so EVM importers keep their path
+// the family-neutral remote fact and the lane directions; re-exported so importers keep their path
+export type { MultiTokenPoolLaneDirections } from './contracts.ts'
 export type { MultiTokenPoolRemoteFact } from '../../multi-token-pool.ts'
 
 /** What the remote side of one lane does. @internal */
@@ -655,12 +660,6 @@ export function validateMultiTokenPoolGuardOptions(
       validateUint64(operation, at(`migrationWindowChains[${i}]`), c),
     )
   }
-}
-
-/** A lane and the directions an answer concerns. @internal */
-export type MultiTokenPoolLaneDirections = MultiTokenPoolLaneKey & {
-  /** The directions. */
-  directions: TransferDirection[]
 }
 
 /** Whether a lane is live in a direction: it has a connection and no pause holds that direction. */

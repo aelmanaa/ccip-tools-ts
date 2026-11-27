@@ -32,7 +32,7 @@ import {
 } from '../write-operation.ts'
 
 /** One policy assignment. */
-export type TokenPolicyAssignment = {
+export type MultiTokenPoolTokenPolicyAssignment = {
   /** The token. */
   tokenAddress: string
   /** The policy to assign, or `null` to clear the token's assignment of this type. */
@@ -45,7 +45,7 @@ export type ApplyMultiTokenPoolTokenPolicyUpdatesParams = PoolConfigManagerWrite
     /** The record type whose policy the assignments set: one of `LANE_RECORD_TYPES`. */
     recordType: LaneRecordType
     /** The assignments, at least one; each token at most once. */
-    assignments: TokenPolicyAssignment[]
+    assignments: MultiTokenPoolTokenPolicyAssignment[]
   }
 
 /**
@@ -72,7 +72,7 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
       validateAddress(
         this.name,
         `assignments[${i}].tokenAddress`,
-        (a as TokenPolicyAssignment | undefined)?.tokenAddress,
+        (a as MultiTokenPoolTokenPolicyAssignment | undefined)?.tokenAddress,
       )
       if (a.policyName !== null)
         encodePolicyName(this.name, `assignments[${i}].policyName`, a.policyName)

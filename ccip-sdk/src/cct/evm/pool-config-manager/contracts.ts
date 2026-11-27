@@ -18,6 +18,7 @@ import {
   isHexString,
 } from 'ethers'
 
+import type { TransferDirection } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import {
   type PoolConfigManagerStores,
@@ -355,6 +356,12 @@ export type MultiTokenPoolLaneKey = {
   tokenAddress: string
   /** CCIP selector of the remote chain. */
   remoteChainSelector: bigint
+}
+
+/** A lane key plus the directions that apply to it (`goingLive`, `confirmOpening`). */
+export type MultiTokenPoolLaneDirections = MultiTokenPoolLaneKey & {
+  /** The directions. */
+  directions: TransferDirection[]
 }
 
 /** Lanes or tokens per PCM batch view call (every batch view chunks by it). */

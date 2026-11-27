@@ -46,7 +46,7 @@ import {
 } from '../write-operation.ts'
 
 /** A full token profile, for a new registration. */
-export type TokenProfile = {
+export type MultiTokenPoolTokenProfile = {
   /** The token. */
   tokenAddress: string
   /** Decimals the pool uses for the token; defaults to the token's `decimals()`. */
@@ -68,9 +68,12 @@ export type TokenProfile = {
  * A partial profile, for a registered token: omitted fields keep their on-chain value (the op reads
  * and merges); `null` clears a nullable field. `localDecimals` cannot change.
  */
-export type TokenProfileUpdate = { tokenAddress: string } & Partial<
+export type MultiTokenPoolTokenProfileUpdate = {
+  /** The registered token to update. */
+  tokenAddress: string
+} & Partial<
   Pick<
-    TokenProfile,
+    MultiTokenPoolTokenProfile,
     'lockOrBurnFlavor' | 'allowedFinality' | 'lockOrBurnAddress' | 'additionalPoolDataProvider'
   >
 >
@@ -85,9 +88,9 @@ export type ApplyMultiTokenPoolTokenProfileUpdatesParams = PoolConfigManagerWrit
      * (so deregistering and re-registering in one call is valid). A re-registered token keeps its old
      * pause flags.
      */
-    profilesToSet?: TokenProfile[]
+    profilesToSet?: MultiTokenPoolTokenProfile[]
     /** Updates of registered tokens, merged with the on-chain profile. */
-    profilesToUpdate?: TokenProfileUpdate[]
+    profilesToUpdate?: MultiTokenPoolTokenProfileUpdate[]
     /**
      * Allow changing the flavor, `lockOrBurnAddress` or `additionalPoolDataProvider` of a token that
      * has lanes (F1). Defaults to `false`. The lanes are judged again with the new profile either way.
@@ -198,7 +201,7 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
   /** Validates one profile's fields, before any RPC. */
   #validateProfile(
     params: ApplyMultiTokenPoolTokenProfileUpdatesParams,
-    p: Partial<TokenProfile> | undefined,
+    p: Partial<MultiTokenPoolTokenProfile> | undefined,
     at: string,
     full: boolean,
   ): void {

@@ -5865,12 +5865,12 @@ export type {
   MultiTokenPoolWriteGuards,
   PoolConfigManagerWriteParams,
 } from './pool-config-manager/write-operation.ts'
-export type { MultiTokenPoolLaneDirections } from './pool-config-manager/guards.ts'
 export type * from './policy-store/operations/index.ts'
 export type * from './multi-token-pool-hooks/operations/index.ts'
 export type * from './multi-token-pool-providers/operations/index.ts'
 export type * from './pool-config-manager/records.ts'
 export type {
+  MultiTokenPoolLaneDirections,
   MultiTokenPoolLaneKey,
   PolicyName,
   PoolConfigManagerTarget,

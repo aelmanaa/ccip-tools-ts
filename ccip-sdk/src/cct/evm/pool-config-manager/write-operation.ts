@@ -29,13 +29,14 @@ import { type EVMExecuteParams, EVMOperation } from '../operation.ts'
 import { submit } from '../submit.ts'
 import { validateAddress } from '../validate.ts'
 import {
+  type MultiTokenPoolLaneDirections,
   type MultiTokenPoolLaneKey,
   type PoolConfigManagerTarget,
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from './contracts.ts'
 import { runMultiTokenPoolGuards } from './guard-run.ts'
-import { type MultiTokenPoolLaneDirections, validateMultiTokenPoolGuardOptions } from './guards.ts'
+import { validateMultiTokenPoolGuardOptions } from './guards.ts'
 
 /** Common fields of every PoolConfigManager write. */
 export type PoolConfigManagerWriteParams = PoolConfigManagerTarget & {

@@ -112,12 +112,12 @@ export { GetMultiTokenPoolLane } from './get-multi-token-pool-lane.ts'
 export { CheckMultiTokenPoolLane } from './check-multi-token-pool-lane.ts'
 export {
   type ApplyMultiTokenPoolTokenPolicyUpdatesParams,
-  type TokenPolicyAssignment,
+  type MultiTokenPoolTokenPolicyAssignment,
   ApplyMultiTokenPoolTokenPolicyUpdates,
 } from './apply-multi-token-pool-token-policy-updates.ts'
 export {
   type ApplyMultiTokenPoolTokenProfileUpdatesParams,
-  type TokenProfile,
-  type TokenProfileUpdate,
+  type MultiTokenPoolTokenProfile,
+  type MultiTokenPoolTokenProfileUpdate,
   ApplyMultiTokenPoolTokenProfileUpdates,
 } from './apply-multi-token-pool-token-profile-updates.ts'
