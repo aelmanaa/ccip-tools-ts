@@ -10,6 +10,7 @@ import { getAddress } from 'ethers'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { resultToObject } from '../../../../evm/types.ts'
 import { readAllAuthorizedCallers } from '../../advanced-pool-hooks/contracts.ts'
+import { latestBlock } from '../../mined-block.ts'
 import {
   type MultiTokenPoolHooksType,
   type PendingOwner,
@@ -71,7 +72,7 @@ export class GetMultiTokenPoolHooksState extends EVMQuery<
     const type = await assertMultiTokenPoolAuxContract(chain, hooks, MULTI_TOKEN_POOL_HOOKS_TYPES)
     const contract = multiTokenPoolHooksContract(chain, hooks)
     // every read pinned to one block, so the owner and its pending transfer agree
-    const blockTag = await chain.provider.getBlockNumber()
+    const blockTag = await latestBlock(chain)
     const [ownership, allowlistEnabled, allowlist, policyEngine, authorizedCallers, blocklist] =
       await Promise.all([
         readOwnership(chain, hooks, blockTag),

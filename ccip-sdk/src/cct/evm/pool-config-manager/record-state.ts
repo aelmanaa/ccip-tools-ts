@@ -12,6 +12,7 @@ import type { EVMChain } from '../../../evm/index.ts'
 import { LANE_RECORD_TYPES, isZeroHex } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
+import { latestBlock } from '../mined-block.ts'
 import {
   type MultiTokenPoolVersion,
   connectionPolicyStoreContract,
@@ -83,7 +84,7 @@ export async function readMultiTokenPoolRecordState(
   version: MultiTokenPoolVersion,
   { tokenAddresses, blockTag, extraChains = [] }: ReadMultiTokenPoolRecordStateOptions = {},
 ): Promise<MultiTokenPoolRecordStateRead> {
-  const blockNumber = blockTag ?? (await chain.provider.getBlockNumber())
+  const blockNumber = blockTag ?? (await latestBlock(chain))
   const at = { blockTag: blockNumber }
   const pcm = poolConfigManagerContract(chain, address, version)
   const [staticConfig, tokens, nameLists] = await Promise.all([

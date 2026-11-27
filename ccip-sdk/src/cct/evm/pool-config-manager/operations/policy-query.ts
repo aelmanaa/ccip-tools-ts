@@ -7,6 +7,7 @@
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
+import { latestBlock } from '../../mined-block.ts'
 import { poolConfigManagerContract } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
 import {
@@ -84,7 +85,7 @@ export abstract class PolicyQuery<
   ): Promise<B & MultiTokenPoolPolicyIdentity> {
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
     const pcm = poolConfigManagerContract(chain, address, version)
-    const blockTag = this.blockTagOf(params) ?? (await chain.provider.getBlockNumber())
+    const blockTag = this.blockTagOf(params) ?? (await latestBlock(chain))
     const [records, names] = await Promise.all([
       this.readPolicy(pcm, params, { chain, blockTag }),
       pcm.getPolicyNames({ blockTag }),

@@ -30,6 +30,7 @@ import type {
   MultiTokenPoolSnapshot,
 } from '../../multi-token-pool.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
+import { latestBlock } from '../mined-block.ts'
 import {
   type MultiTokenPoolVersion,
   ANY_FINALITY_CONFIG,
@@ -160,7 +161,7 @@ export async function runMultiTokenPoolGuards(
   const { chain, operation, poolConfigManager, version, data, sender } = input
   const errorOperation = input.errorOperation ?? operation
   const decoded = decodeMultiTokenPoolWrite(data, version)
-  const blockNumber = input.blockTag ?? (await chain.provider.getBlockNumber())
+  const blockNumber = input.blockTag ?? (await latestBlock(chain))
   const { state: before, staticConfig } = await stateBefore(input, decoded, blockNumber)
   const after = applyMultiTokenPoolRecordChanges(before, decoded.changes)
   // both sides need provider answers for every lane they resolve from a policy

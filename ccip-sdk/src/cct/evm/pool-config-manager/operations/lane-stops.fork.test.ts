@@ -335,19 +335,51 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
       getChain,
     })
     assert.deepEqual(unsigned.goingLive, [])
-    // lifting a broken lane's own token pause makes it live: judged, refused
+    // lifting a broken lane's own token pause makes it live: judged, refused (0x08f7: its lane is
+    // not stopped, unlike 0x0a75's after the B1 case, which an unpause correctly does not judge)
     await mined(cct.unpauseMultiTokenPoolGlobally({ ...v5, getChain }))
     await assert.rejects(
       cct.generateUnsignedUnpauseMultiTokenPoolTokens({
         poolAddress: V5V9_POOL,
         sender: V5V9_OPERATOR,
-        tokenAddresses: [V5V9_FUJI_TOKEN],
+        tokenAddresses: ['0x08f749F5Ee026753e88920088bE5F54590A8B14f'],
         direction: 'outbound',
         getChain,
       }),
       (e: unknown) =>
         e instanceof CCTParamsInvalidError &&
         (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
+    )
+  })
+
+  it('R3 M5 repro: a build right after a signed write sees the write (no sleep)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: INLINE_TOKEN, remoteChainSelector: FUJI }]
+    const wallet = await signer(CORE_CONFIG)
+    const stopped = await cct.stopMultiTokenPoolLanes({
+      poolAddress: CORE_POOL,
+      lanes,
+      direction: 'outbound',
+      wallet,
+    })
+    // immediately: before the fix this read the block before the stop ("not stopped: nothing to lift")
+    const lift = await cct.generateUnsignedLiftMultiTokenPoolLaneStops({
+      poolAddress: CORE_POOL,
+      lanes,
+      direction: 'outbound',
+      getChain,
+      restore: stopped.snapshot,
+    })
+    assert.ok(lift.snapshot.observedAt >= BigInt(stopped.blockNumber))
+    await mined(
+      cct.liftMultiTokenPoolLaneStops({
+        poolAddress: CORE_POOL,
+        lanes,
+        direction: 'outbound',
+        wallet,
+        getChain,
+        restore: stopped.snapshot,
+      }),
     )
   })
 })

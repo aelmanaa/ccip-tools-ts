@@ -37,6 +37,7 @@ import {
 
 export type { MultiTokenPoolSimulatedFrom } from './guard-run.ts'
 export type { MultiTokenPoolGuardOptions } from './guards.ts'
+import { latestBlock, noteMinedBlock } from '../mined-block.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
 /** Common fields of every PoolConfigManager write. */
@@ -90,7 +91,10 @@ export type MultiTokenPoolTransactionResult = TransactionResult &
   Pick<
     MultiTokenPoolUnsignedTx,
     'projectionVerified' | 'simulatedFrom' | 'affectedLanes' | 'goingLive' | 'warnings' | 'snapshot'
-  >
+  > & {
+    /** The block the write mined in; every later MTTP read or build on the provider is at or after it. */
+    blockNumber: number
+  }
 
 /**
  * A resolved PCM, the block a write is built at, and the PCM's stored records read once at that
@@ -162,7 +166,7 @@ export abstract class PoolConfigManagerWriteOperation<
     params: Parsed,
   ): Promise<MultiTokenPoolUnsignedTx> {
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
-    const blockTag = await chain.provider.getBlockNumber()
+    const blockTag = await latestBlock(chain)
     if (params.sender !== undefined)
       await assertPoolConfigManagerRole(
         this.name,
@@ -228,9 +232,11 @@ export abstract class PoolConfigManagerWriteOperation<
       sender,
       expectedSnapshot: params.expectedSnapshot ?? first.snapshot,
     })
-    const { response } = await submit(chain, params.wallet, unsigned, this.name)
+    const { response, receipt } = await submit(chain, params.wallet, unsigned, this.name)
+    // the next read or build on this provider never pins before this write (ethers' block cache)
+    noteMinedBlock(chain, receipt.blockNumber)
     const { family: _, transactions: __, ...impact } = unsigned
-    return { hash: response.hash, ...impact }
+    return { hash: response.hash, blockNumber: receipt.blockNumber, ...impact }
   }
 }
 

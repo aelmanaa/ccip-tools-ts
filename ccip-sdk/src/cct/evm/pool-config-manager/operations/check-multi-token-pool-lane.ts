@@ -19,6 +19,7 @@ import {
   type MultiTokenPoolLaneFinding,
   sortFindings,
 } from '../../../multi-token-pool.ts'
+import { latestBlock } from '../../mined-block.ts'
 import { poolConfigManagerContract } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
 import { IsBurner } from '../../token/operations/is-burner.ts'
@@ -82,7 +83,7 @@ export class CheckMultiTokenPoolLane extends EVMQuery<
   ): Promise<MultiTokenPoolLaneCheckResult> {
     const poolAddress = await resolveLanePool(this.name, chain, params)
     const pcm = await resolvePoolConfigManagerTarget(chain, { poolAddress })
-    const blockTag = await chain.provider.getBlockNumber()
+    const blockTag = await latestBlock(chain)
     const key = {
       tokenAddress: getAddress(params.tokenAddress),
       remoteChainSelector: params.remoteChainSelector,

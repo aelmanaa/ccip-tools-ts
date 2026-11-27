@@ -33,6 +33,7 @@ import type {
   MultiTokenPoolInlineRemotePoolDrop,
   MultiTokenPoolLaneKey,
 } from '../../multi-token-pool.ts'
+import { latestBlock } from '../mined-block.ts'
 import {
   type LockOrBurnFlavor,
   type MultiTokenPoolVersion,
@@ -138,7 +139,7 @@ export async function readPagesAtBlock<T>(
       'pageSize',
       'must be an integer of at least 1',
     )
-  const blockNumber = blockTag ?? (await chain.provider.getBlockNumber())
+  const blockNumber = blockTag ?? (await latestBlock(chain))
   const items: T[] = []
   for (let pages = 0; pages < MAX_PAGES; pages++) {
     const page = await fetch(BigInt(items.length), BigInt(pageSize), blockNumber)
@@ -254,7 +255,7 @@ export async function scanLogs(
   scanned: { fromBlock: number; toBlock: number }
   complete: boolean
 }> {
-  const toBlock = range.toBlock ?? (await chain.provider.getBlockNumber())
+  const toBlock = range.toBlock ?? (await latestBlock(chain))
   // a scan from block 0 is complete by definition, so it needs no deployment search
   const deployed = range.fromBlock === 0 ? 0 : await findDeploymentBlock(chain, address, toBlock)
   const fromBlock = range.fromBlock ?? deployed
