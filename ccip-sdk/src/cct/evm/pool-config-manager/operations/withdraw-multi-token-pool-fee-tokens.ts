@@ -46,11 +46,17 @@ export type WithdrawMultiTokenPoolFeeTokensParams = {
 /** Result of `withdrawMultiTokenPoolFeeTokens`: the amounts, from the pool's `FeeTokenWithdrawn` logs. */
 export type WithdrawMultiTokenPoolFeeTokensResult = MultiTokenPoolTransactionResult & {
   /** Each token's amount the pool sent to the recipient. */
-  withdrawn: { token: string; amount: bigint }[]
+  withdrawn: {
+    /** The fee token. */
+    token: string
+    /** The amount sent, in the token's smallest unit. */
+    amount: bigint
+  }[]
 }
 
 /** Params after `prepare`: the target is the pool, the PCM kept to compare. */
 type Parsed = Omit<WithdrawMultiTokenPoolFeeTokensParams, 'poolConfigManager'> & {
+  /** Never set after `prepare`: the pool is the target. */
   poolConfigManager?: undefined
   /** The PCM the caller named, checked against the pool's. */
   expectedPoolConfigManager?: string
@@ -62,10 +68,7 @@ type Parsed = Omit<WithdrawMultiTokenPoolFeeTokensParams, 'poolConfigManager'> &
  * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `poolConfigManager` is
  *   not the pool's, or `sender` lacks the gate
  */
-export class WithdrawMultiTokenPoolFeeTokens extends PoolConfigManagerWriteOperation<
-  Parsed & { poolConfigManager?: undefined },
-  Parsed
-> {
+export class WithdrawMultiTokenPoolFeeTokens extends PoolConfigManagerWriteOperation<Parsed> {
   readonly name = 'withdrawMultiTokenPoolFeeTokens'
 
   /** Validates every address, as main's `withdrawFeeTokens` does; an empty list would mine as a no-op. */
