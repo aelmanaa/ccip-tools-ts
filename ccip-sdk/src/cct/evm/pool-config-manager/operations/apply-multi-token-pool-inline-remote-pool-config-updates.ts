@@ -7,6 +7,7 @@
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { POOL_DATA_FORMATS } from '../../../multi-token-pool.ts'
 import { parseRemoteAddress } from '../../../remote-address.ts'
 import { assertUnique, validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
 import type { MultiTokenPoolLaneKey } from '../contracts.ts'
@@ -51,7 +52,7 @@ export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends InlineReco
     at: string,
   ): InlineRemotePoolConfig {
     validateBoolean(this.name, `${at}.trustPolicyRemotePools`, c.trustPolicyRemotePools)
-    validateOneOf(this.name, `${at}.poolDataFormat`, c.poolDataFormat, ['legacy', 'long'] as const)
+    validateOneOf(this.name, `${at}.poolDataFormat`, c.poolDataFormat, POOL_DATA_FORMATS)
     validateArray(this.name, `${at}.remotePools`, c.remotePools)
     // each pool at its own path, then the list unique
     const remotePools = Array.from(c.remotePools as readonly unknown[], (p, j) => {

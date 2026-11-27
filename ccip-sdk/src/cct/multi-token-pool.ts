@@ -45,7 +45,9 @@ export type MultiTokenPoolDirection = TransferDirection
  *   never mints. A canonical Solana pool on interface 1 counts as "does not read long data":
  *   it ignores the data now and strands it after a later move to interface 2.
  */
-export type PoolDataFormat = 'legacy' | 'long'
+export type PoolDataFormat = (typeof POOL_DATA_FORMATS)[number]
+/** Every {@link PoolDataFormat}, for validation. @internal */
+export const POOL_DATA_FORMATS = ['legacy', 'long'] as const
 
 /** A reference to a shared policy: an EVM policy name, or a Solana policy id. */
 export type MultiTokenPoolPolicyRef =
