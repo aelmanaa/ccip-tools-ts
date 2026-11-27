@@ -2,7 +2,8 @@
  * Family-neutral multi-token pool (MTTP) types shared by the EVM and Solana CCT surfaces.
  *
  * It holds types, two runtime constant tuples (`MULTI_TOKEN_POOL_LANE_CHECKS`,
- * `MULTI_TOKEN_POOL_STEP_SIGNER_KINDS`) and the two snapshot (de)serializers. Both
+ * `MULTI_TOKEN_POOL_STEP_SIGNER_KINDS`), the two snapshot (de)serializers, and small lane helpers
+ * both families' lane checks use (`abiWord`, `isStop`, internal). Both
  * `@chainlink/ccip-sdk/cct/evm` and `@chainlink/ccip-sdk/cct/solana` re-export the types with
  * `export type` and the runtime values as values. The module has no side effects and imports no
  * family code; the canonical JSON it hashes with lives in the internal `canonical.ts`.
@@ -14,6 +15,8 @@
  * @packageDocumentation
  */
 
+import { getAddress, hexlify } from 'ethers'
+
 import type {
   ChainGetter,
   LaneRecordType,
@@ -24,7 +27,7 @@ import type {
 } from '../chain.ts'
 import type { FinalityRequested } from '../extra-args.ts'
 import type { ChainFamily } from '../networks.ts'
-import { jsonParse } from '../utils.ts'
+import { encodeAddressToAny, jsonParse } from '../utils.ts'
 import { canonicalHash, canonicalJson } from './canonical.ts'
 import { type CCTStateChange, CCTParamsInvalidError } from './errors.ts'
 import type { RateLimitConfig } from './rate-limit.ts'
@@ -403,10 +406,14 @@ export type MultiTokenPoolLaneCheckResult = {
    * - `'missing'`: read, and the remote side lacks what the lane needs (e.g. no pool registered);
    * - `'unknown'`: not read: the SDK cannot read that chain, `getChain` is missing, or the lane has no
    *   connection to check.
-   * `ok` already counts anything but `'known'` as a failure (fail closed): gate on `ok`.
+   * `ok` already folds this in (fail closed): gate on `ok`.
    */
   remote: MultiTokenPoolFact
-  /** `true` when no finding is an error. */
+  /**
+   * `true` when no error finding remains. It usually needs remote `'known'`, but a token-scope
+   * pause or stop waives a missing remote pool, so it can be `true` with `'missing'`; remote
+   * `'unknown'` is never ok.
+   */
   ok: boolean
 }
 
@@ -815,4 +822,21 @@ export const LEGACY_POOL_DATA_BYTES = 32
 /** Bytes of long pool data with `extra` bytes of additional data (ABI-padded to 32). @internal */
 export function longPoolDataBytes(extra: number): number {
   return LONG_POOL_DATA_BYTES + Math.ceil(extra / 32) * 32
+}
+
+/**
+ * An EVM address as the 32-byte ABI word (`abi.encode(address)`), lower-case: the form an EVM chain
+ * sends and a remote lane must store for it.
+ * @internal
+ */
+export function abiWord(address: string): string {
+  return hexlify(encodeAddressToAny(getAddress(address)))
+}
+
+/**
+ * Whether a rate-limit bucket is a stop: enabled with zero capacity and rate, so nothing passes.
+ * @internal
+ */
+export function isStop(bucket: { isEnabled: boolean; capacity: bigint; rate: bigint }): boolean {
+  return bucket.isEnabled && bucket.capacity === 0n && bucket.rate === 0n
 }

@@ -16,19 +16,17 @@ import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
-  poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
-import { validateArray, validateUint64 } from '../../validate.ts'
+import { assertUnique, validateArray, validateUint64 } from '../../validate.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PolicyName,
-  type PoolConfigManagerReader,
   encodePolicyName,
+  toAbiLaneKey,
   validateLaneKeys,
 } from '../contracts.ts'
 import { type MultiTokenPoolRecordState, policyKey } from '../projection.ts'
-import { readMultiTokenPoolRecordState } from '../record-state.ts'
-import type { PolicyRecordKey } from '../records.ts'
+import type { PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
   type PoolConfigManagerWrite,
@@ -36,6 +34,17 @@ import {
   type PoolConfigManagerWriteParams,
   PoolConfigManagerWriteOperation,
 } from '../write-operation.ts'
+
+/**
+ * The policy names of one record type from a `getPolicyNames` result (one list per type, in
+ * `LANE_RECORD_TYPES` order), as lower-case words.
+ * @internal
+ */
+export function policyNamesOf(lists: readonly unknown[], type: LaneRecordType): Set<string> {
+  return new Set(
+    ((lists[LANE_RECORD_TYPES.indexOf(type)] ?? []) as string[]).map((w) => w.toLowerCase()),
+  )
+}
 
 /** The removal and set lists of a policy record write. @internal */
 export type PolicyRecordWrite = {
@@ -59,8 +68,7 @@ export function validatePolicyRecordWrite(
 ): void {
   const keys = (list: unknown, param: string) => {
     validateArray(operation, param, list)
-    const seen = new Map<string, string>()
-    Array.from(list, (k, i) => {
+    const words = Array.from(list, (k, i) => {
       const { policyName, remoteChainSelector } = (k ?? {}) as Record<string, unknown>
       const word = encodePolicyName(operation, `${param}[${i}].policyName`, policyName)
       validateUint64(operation, `${param}[${i}].remoteChainSelector`, remoteChainSelector)
@@ -70,22 +78,18 @@ export function validatePolicyRecordWrite(
           `${param}[${i}].remoteChainSelector`,
           'is 0: this record type has no default record; give a remote chain (ZeroChainSelectorNotAllowed)',
         )
-      const key = `${word.toLowerCase()}:${String(remoteChainSelector)}`
-      const first = seen.get(key)
-      if (first !== undefined)
-        throw new CCTParamsInvalidError(
-          operation,
-          `${param}[${i}]`,
-          `repeats ${first}: give each record once`,
-        )
-      seen.set(key, `${param}[${i}]`)
+      return `${word.toLowerCase()}:${String(remoteChainSelector)}`
     })
+    assertUnique(operation, param, words, (w) => w, 'record')
   }
   if (recordsToRemove !== undefined) keys(recordsToRemove, 'recordsToRemove')
   if (recordsToSet !== undefined) keys(recordsToSet, 'recordsToSet')
   if (policiesToRemove !== undefined) {
     validateArray(operation, 'policiesToRemove', policiesToRemove)
-    Array.from(policiesToRemove, (n, i) => encodePolicyName(operation, `policiesToRemove[${i}]`, n))
+    const words = Array.from(policiesToRemove, (n, i) =>
+      encodePolicyName(operation, `policiesToRemove[${i}]`, n).toLowerCase(),
+    )
+    assertUnique(operation, 'policiesToRemove', words, (w) => w, 'policy')
   }
   if (!recordsToRemove?.length && !policiesToRemove?.length && !recordsToSet?.length)
     throw new CCTParamsInvalidError(
@@ -101,14 +105,12 @@ export function validatePolicyRecordWrite(
  * (`PolicyInUse`) or keeps records after the removals (`PolicyHasRecords`).
  * @internal
  */
-export async function checkPolicyRecordWrite(
+export function checkPolicyRecordWrite(
   operation: string,
-  pcm: PoolConfigManagerReader,
-  state: MultiTokenPoolRecordState,
+  { state, policyNames }: Pick<RecordWriteContext, 'state' | 'policyNames'>,
   type: LaneRecordType,
   { recordsToRemove = [], policiesToRemove = [] }: PolicyRecordWrite,
-  blockTag: number,
-): Promise<void> {
+): void {
   const records = state.policies[type] as readonly PolicyRecordKey[]
   const key = (k: PolicyRecordKey) =>
     `${policyKey(k.policyName, 'policyName')}:${k.remoteChainSelector}`
@@ -118,15 +120,12 @@ export async function checkPolicyRecordWrite(
       throw new CCTParamsInvalidError(
         operation,
         `recordsToRemove[${i}]`,
-        `${type} policy ${k.policyName} has no record for chain ${k.remoteChainSelector} (PolicyRecordNotFound)`,
+        `${type} policy ${k.policyName} has no record for chain ${k.remoteChainSelector} (PolicyRecordNotFound): drop it from recordsToRemove (getMultiTokenPool${type[0]!.toUpperCase()}${type.slice(1)}Policy lists the records)`,
         { context: { recordType: type } },
       )
   })
   if (!policiesToRemove.length) return
-  const lists = await pcm.getPolicyNames({ blockTag })
-  const names = new Set(
-    ((lists[LANE_RECORD_TYPES.indexOf(type)] ?? []) as string[]).map((w) => w.toLowerCase()),
-  )
+  const names = policyNames[type]
   const removed = new Set(recordsToRemove.map(key))
   policiesToRemove.forEach((name, i) => {
     const word = policyKey(name, `policiesToRemove[${i}]`)
@@ -135,7 +134,7 @@ export async function checkPolicyRecordWrite(
       throw new CCTParamsInvalidError(
         operation,
         param,
-        `no ${type} policy ${name} exists (PolicyNotFound)`,
+        `no ${type} policy ${name} exists (PolicyNotFound): check the name (getMultiTokenPoolPolicyNames)`,
         {
           context: { recordType: type },
         },
@@ -187,7 +186,6 @@ export function validateInlineRecordWrite(
   ] as const) {
     if (list === undefined) continue
     validateLaneKeys(operation, param, list, 0)
-    const seen = new Map<string, string>()
     list.forEach((l, i) => {
       if (param === 'set' && l.remoteChainSelector === 0n)
         throw new CCTParamsInvalidError(
@@ -195,16 +193,14 @@ export function validateInlineRecordWrite(
           `set[${i}].remoteChainSelector`,
           'is 0: an inline record is for one remote chain (ZeroChainSelectorNotAllowed)',
         )
-      const k = `${getAddress(l.tokenAddress)}:${l.remoteChainSelector}`
-      const first = seen.get(k)
-      if (first !== undefined)
-        throw new CCTParamsInvalidError(
-          operation,
-          `${param}[${i}]`,
-          `repeats ${first}: give each lane once`,
-        )
-      seen.set(k, `${param}[${i}]`)
     })
+    assertUnique(
+      operation,
+      param,
+      list,
+      (l) => `${getAddress(l.tokenAddress)}:${l.remoteChainSelector}`,
+      'lane',
+    )
   }
   if (!remove?.length && !set?.length)
     throw new CCTParamsInvalidError(operation, 'set', 'nothing to do: give remove or set')
@@ -229,7 +225,7 @@ export function checkInlineRecordWrite(
       throw new CCTParamsInvalidError(
         operation,
         `remove[${i}]`,
-        `${getAddress(l.tokenAddress)} has no inline ${type} record for chain ${l.remoteChainSelector} (InlineRecordNotFound)`,
+        `${getAddress(l.tokenAddress)} has no inline ${type} record for chain ${l.remoteChainSelector} (InlineRecordNotFound): drop it from remove (getMultiTokenPoolInlineConfigs lists the records)`,
         { context: { recordType: type } },
       )
   })
@@ -244,16 +240,18 @@ export function checkInlineRecordWrite(
   })
 }
 
-/** Parameters every policy record write takes. @internal */
+/** The record lists every policy record write takes (the shape its params extend). @internal */
 export type PolicyRecordWriteParams<R extends PolicyRecordKey> = PoolConfigManagerWriteParams &
-  MultiTokenPoolWriteGuards & {
+  MultiTokenPoolWriteGuards &
+  PolicyRemovalOptions & {
     /** Records to remove (first, as on chain). */
     recordsToRemove?: PolicyRecordKey[]
-    /** Whole policies to remove; each needs no token and no record left. */
-    policiesToRemove?: PolicyName[]
     /** Records to set; a set replaces the record. */
     recordsToSet?: R[]
   }
+
+/** The context a record write's own state checks get: the write context. @internal */
+export type RecordWriteContext = PoolConfigManagerWriteContext
 
 /**
  * Base of the policy record writes (`apply<Type>PolicyConfigUpdates`): the lists are validated before
@@ -275,20 +273,30 @@ export abstract class PolicyRecordWriteOperation<
   /** Whether the type has a default record (chain `0n`). */
   protected abstract readonly allowDefault: boolean
 
-  /** Validates one record to set, before any RPC. */
-  protected abstract validateRecord(params: P, record: R, at: string): void
+  /** Validates one record to set before any RPC, and returns it canonical (what `encodeRecord` gets). */
+  protected abstract parseRecord(params: P, record: R, at: string): R
 
-  /** Encodes one record to set as the ABI struct. */
+  /** Encodes one parsed record to set as the ABI struct. */
   protected abstract encodeRecord(record: R, word: string): unknown
 
-  /** Further refusals from the state, for a type with its own rules. */
-  protected checkState(_params: P, _state: MultiTokenPoolRecordState): void {}
+  /** Further refusals from the state (or other reads), for a type with its own rules. */
+  protected async checkState(
+    _chain: EVMChain,
+    _params: P,
+    _ctx: RecordWriteContext,
+  ): Promise<void> {}
 
   protected override prepare(params: P): P {
     super.prepare(params)
     validatePolicyRecordWrite(this.name, params, { allowDefault: this.allowDefault })
-    params.recordsToSet?.forEach((r, i) => this.validateRecord(params, r, `recordsToSet[${i}]`))
-    return params
+    return params.recordsToSet
+      ? {
+          ...params,
+          recordsToSet: params.recordsToSet.map((r, i) =>
+            this.parseRecord(params, r, `recordsToSet[${i}]`),
+          ),
+        }
+      : params
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
@@ -302,12 +310,11 @@ export abstract class PolicyRecordWriteOperation<
   protected async encode(
     chain: EVMChain,
     params: P,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
+    ctx: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
-    const { state } = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
-    const pcm = poolConfigManagerContract(chain, address, version)
-    await checkPolicyRecordWrite(this.name, pcm, state, this.recordType, params, blockTag)
-    this.checkState(params, state)
+    const { state, version } = ctx
+    checkPolicyRecordWrite(this.name, ctx, this.recordType, params)
+    await this.checkState(chain, params, ctx)
     const word = (name: PolicyName, at: string) => encodePolicyName(this.name, at, name)
     const remove = (params.recordsToRemove ?? []).map((k, i) => [
       word(k.policyName, `recordsToRemove[${i}].policyName`),
@@ -331,6 +338,95 @@ export abstract class PolicyRecordWriteOperation<
       [...(params.recordsToRemove ?? []), ...(params.recordsToSet ?? [])].map((k) => [
         `policies.${this.recordType}.${keyOf(k)}`,
         stored.find((s) => keyOf(s) === keyOf(k)) ?? null,
+      ]),
+    )
+    return { data, expected }
+  }
+}
+
+/** The record lists every inline record write takes (the shape its params extend). @internal */
+export type InlineRecordWriteParams<R extends MultiTokenPoolLaneKey> =
+  PoolConfigManagerWriteParams &
+    MultiTokenPoolWriteGuards & {
+      /** Lanes whose inline record to remove (first, as on chain). */
+      remove?: MultiTokenPoolLaneKey[]
+      /** Records to set; a set replaces the lane's record. */
+      set?: R[]
+    }
+
+/**
+ * Base of the inline record writes (`applyInline<Type>ConfigUpdates`): the lanes are validated before
+ * any RPC, the stores' bookkeeping refusals are named from the state at the build block, and the
+ * replaced records are sealed in the snapshot. A subclass supplies the record type, its role, and the
+ * validation and encoding of one record.
+ * @internal
+ */
+export abstract class InlineRecordWriteOperation<
+  R extends MultiTokenPoolLaneKey,
+  P extends InlineRecordWriteParams<R> = InlineRecordWriteParams<R>,
+> extends PoolConfigManagerWriteOperation<P> {
+  /** The record type. */
+  protected abstract readonly recordType: LaneRecordType
+  /** The PCM function. */
+  protected abstract readonly functionName: string
+  /** The type's own role (with `CONFIG_ROLE` and `TOKEN_MANAGER_ROLE`, `_checkTokenRoles`). */
+  protected abstract readonly typeRole: PoolConfigManagerRole
+
+  /** Validates one record to set before any RPC, and returns it canonical (what `encodeRecord` gets). */
+  protected abstract parseRecord(params: P, record: R, at: string): R
+
+  /** Encodes one parsed record to set as the ABI struct. */
+  protected abstract encodeRecord(record: R): unknown
+
+  /** Further refusals from the state (or other reads), for a type with its own rules. */
+  protected async checkState(
+    _chain: EVMChain,
+    _params: P,
+    _ctx: RecordWriteContext,
+  ): Promise<void> {}
+
+  protected override prepare(params: P): P {
+    super.prepare(params)
+    validateInlineRecordWrite(this.name, params)
+    return params.set
+      ? { ...params, set: params.set.map((r, i) => this.parseRecord(params, r, `set[${i}]`)) }
+      : params
+  }
+
+  protected gate(): readonly PoolConfigManagerRole[] {
+    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', this.typeRole]
+  }
+
+  protected override errorContext(): Record<string, unknown> {
+    return { recordType: this.recordType }
+  }
+
+  protected async encode(
+    chain: EVMChain,
+    params: P,
+    ctx: PoolConfigManagerWriteContext,
+  ): Promise<PoolConfigManagerWrite> {
+    const { state, version } = ctx
+    checkInlineRecordWrite(this.name, state, this.recordType, params)
+    await this.checkState(chain, params, ctx)
+    const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
+      this.functionName,
+      [
+        (params.remove ?? []).map(toAbiLaneKey),
+        (params.set ?? []).map((r) => this.encodeRecord(r)),
+      ],
+    )
+    // the values the write replaces: each touched lane's inline record (absent: `null`)
+    const current = (l: MultiTokenPoolLaneKey) =>
+      (
+        state.tokens.find((t) => getAddress(t.tokenAddress) === getAddress(l.tokenAddress))?.inline[
+          this.recordType
+        ] as readonly MultiTokenPoolLaneKey[] | undefined
+      )?.find((r) => r.remoteChainSelector === l.remoteChainSelector) ?? null
+    const expected = Object.fromEntries(
+      [...(params.remove ?? []), ...(params.set ?? [])].map((l) => [
+        `inline.${this.recordType}.${getAddress(l.tokenAddress)}:${l.remoteChainSelector}`,
+        current(l),
       ]),
     )
     return { data, expected }

@@ -10,12 +10,13 @@
  * @packageDocumentation
  */
 
-import type { TokenTransferFeeConfig } from '../../../chain.ts'
+import type { TokenTransferFeeConfig, TransferDirection } from '../../../chain.ts'
 import type {
   MultiTokenPoolRateLimits,
   MultiTokenPoolRemotePool,
   PoolDataFormat,
 } from '../../multi-token-pool.ts'
+import type { RateLimitConfig } from '../../rate-limit.ts'
 import type { MultiTokenPoolLaneKey, PolicyName } from './contracts.ts'
 
 /** One policy record: a policy and a remote chain (`0n` = the policy's default record). */
@@ -24,6 +25,12 @@ export type PolicyRecordKey = {
   policyName: PolicyName
   /** `0n` addresses a fee, overhead, rate limit or security default; connection and remote pool policies have none. */
   remoteChainSelector: bigint
+}
+
+/** Removal of whole policies, for a policy record write: each needs no token and no record left. */
+export type PolicyRemovalOptions = {
+  /** Policies to remove, after the records the same call removes. */
+  policiesToRemove?: PolicyName[]
 }
 
 /** An inline connection record: the remote token of one lane. */
@@ -53,7 +60,10 @@ export type InlineRemotePoolConfig = MultiTokenPoolLaneKey & {
   trustPolicyRemotePools: boolean
   /** Pool data the lane sends (the contract's `useLegacyPoolDataOnSend` is `poolDataFormat === 'legacy'`). */
   poolDataFormat: PoolDataFormat
-  /** Unique; may be empty (outbound only). */
+  /**
+   * Unique. An empty list is allowed on chain, but the SDK's guards refuse a lane that then trusts no
+   * remote pool (`NO_REMOTE_POOL`), unless `trustPolicyRemotePools` brings in policy pools.
+   */
   remotePools: InlineRemotePool[]
 }
 
@@ -78,6 +88,36 @@ export type RateLimitPolicyRecord = PolicyRecordKey & {
   localDecimals: number
   /** The record's four buckets. */
   rateLimits: MultiTokenPoolRateLimits
+}
+
+/** The directions a pause or stop covers. */
+export type PauseDirection = TransferDirection | 'both'
+
+/** `ConnectionPolicyStore.PauseDirection` on chain: `Outbound` 0, `Inbound` 1, `Both` 2. @internal */
+export const PAUSE_DIRECTIONS = [
+  'outbound',
+  'inbound',
+  'both',
+] as const satisfies readonly PauseDirection[]
+
+/** One bucket of an existing inline rate limit record: a direction and finality tier. */
+export type InlineRateLimitBucketUpdate = MultiTokenPoolLaneKey & {
+  /** The direction. */
+  direction: TransferDirection
+  /** The faster-than-finality bucket (`true`) or the finality one. */
+  fastFinality: boolean
+  /** The bucket. */
+  config: RateLimitConfig
+}
+
+/** One bucket of an existing rate limit policy record. */
+export type RateLimitPolicyBucketUpdate = PolicyRecordKey & {
+  /** The direction. */
+  direction: TransferDirection
+  /** The faster-than-finality bucket (`true`) or the finality one. */
+  fastFinality: boolean
+  /** The bucket. */
+  config: RateLimitConfig
 }
 
 /** Fee fields: the fee half of core `TokenTransferFeeConfig`. A fee record has no disabled state. */

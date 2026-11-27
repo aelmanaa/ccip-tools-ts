@@ -5,29 +5,15 @@
  * @packageDocumentation
  */
 
-import { getAddress, hexlify } from 'ethers'
-
 import type { EVMChain } from '../../../../evm/index.ts'
-import { encodeAddressToAny } from '../../../../utils.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { parseUniqueRemoteAddresses } from '../../../remote-address.ts'
-import {
-  type PoolConfigManagerRole,
-  POOL_CONFIG_MANAGER_TYPE,
-  getMultiTokenPoolInterface,
-} from '../../multi-token-pool/contracts.ts'
-import { validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
+import { parseRemoteAddress } from '../../../remote-address.ts'
+import { assertUnique, validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
 import type { MultiTokenPoolLaneKey } from '../contracts.ts'
-import { readMultiTokenPoolRecordState } from '../record-state.ts'
+import { encodeInlineRemotePoolConfig } from '../decode.ts'
 import type { InlineRemotePoolConfig } from '../records.ts'
-import {
-  type MultiTokenPoolWriteGuards,
-  type PoolConfigManagerWrite,
-  type PoolConfigManagerWriteContext,
-  type PoolConfigManagerWriteParams,
-  PoolConfigManagerWriteOperation,
-} from '../write-operation.ts'
-import { checkInlineRecordWrite, validateInlineRecordWrite } from './record-writes.ts'
+import type { MultiTokenPoolWriteGuards, PoolConfigManagerWriteParams } from '../write-operation.ts'
+import { type RecordWriteContext, InlineRecordWriteOperation } from './record-writes.ts'
 
 /** Parameters of `applyMultiTokenPoolInlineRemotePoolConfigUpdates`. Removals run first. */
 export type ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams = PoolConfigManagerWriteParams &
@@ -51,109 +37,65 @@ export type ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams = PoolConfigM
  *   the gate, or a lane guard refuses (a dropped pool `confirmDropped` does not list included);
  *   `context.recordType` is `'remotePool'`
  */
-export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends PoolConfigManagerWriteOperation<ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams> {
+export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends InlineRecordWriteOperation<
+  InlineRemotePoolConfig,
+  ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams
+> {
   readonly name = 'applyMultiTokenPoolInlineRemotePoolConfigUpdates'
+  protected readonly recordType = 'remotePool'
+  protected readonly functionName = 'applyInlineRemotePoolConfigUpdates'
+  protected readonly typeRole = 'REMOTE_POOL_ROLE'
 
-  protected override prepare(
-    params: ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams,
-  ): ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams {
-    super.prepare(params)
-    validateInlineRecordWrite(this.name, params)
-    params.set?.forEach((c, i) => {
-      const at = `set[${i}]`
-      validateBoolean(this.name, `${at}.trustPolicyRemotePools`, c.trustPolicyRemotePools)
-      validateOneOf(this.name, `${at}.poolDataFormat`, c.poolDataFormat, [
-        'legacy',
-        'long',
-      ] as const)
-      validateArray(this.name, `${at}.remotePools`, c.remotePools)
-      parseUniqueRemoteAddresses(
-        this.name,
-        `${at}.remotePools`,
-        Array.from(c.remotePools, (p) => (p as { address?: unknown } | undefined)?.address),
-        c.remoteChainSelector,
-      )
-      c.remotePools.forEach((p, j) =>
-        validateBoolean(
+  protected parseRecord(
+    _params: ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams,
+    c: InlineRemotePoolConfig,
+    at: string,
+  ): InlineRemotePoolConfig {
+    validateBoolean(this.name, `${at}.trustPolicyRemotePools`, c.trustPolicyRemotePools)
+    validateOneOf(this.name, `${at}.poolDataFormat`, c.poolDataFormat, ['legacy', 'long'] as const)
+    validateArray(this.name, `${at}.remotePools`, c.remotePools)
+    // each pool at its own path, then the list unique
+    const remotePools = Array.from(c.remotePools as readonly unknown[], (p, j) => {
+      const { address, allowLegacyPoolData } = (p ?? {}) as Record<string, unknown>
+      validateBoolean(this.name, `${at}.remotePools[${j}].allowLegacyPoolData`, allowLegacyPoolData)
+      return {
+        address: parseRemoteAddress(
           this.name,
-          `${at}.remotePools[${j}].allowLegacyPoolData`,
-          p.allowLegacyPoolData,
+          `${at}.remotePools[${j}].address`,
+          address,
+          c.remoteChainSelector,
         ),
-      )
+        allowLegacyPoolData,
+      }
     })
-    return params
+    assertUnique(this.name, `${at}.remotePools`, remotePools, (p) => p.address, 'remote pool')
+    return { ...c, remotePools }
   }
 
-  protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', 'REMOTE_POOL_ROLE']
+  protected encodeRecord(c: InlineRemotePoolConfig): unknown {
+    return encodeInlineRemotePoolConfig(c)
   }
 
-  protected override errorContext(): Record<string, unknown> {
-    return { recordType: 'remotePool' }
-  }
-
-  protected async encode(
-    chain: EVMChain,
-    params: ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
-  ): Promise<PoolConfigManagerWrite> {
-    const { state } = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
-    checkInlineRecordWrite(this.name, state, 'remotePool', params)
-    const context = { recordType: 'remotePool' }
-    const laneKey = (l: MultiTokenPoolLaneKey) =>
-      `${getAddress(l.tokenAddress)}:${l.remoteChainSelector}`
-    const current = (l: MultiTokenPoolLaneKey) =>
-      state.tokens
-        .find((t) => getAddress(t.tokenAddress) === getAddress(l.tokenAddress))
+  /**
+   * Falling back to the policy, which never sends legacy data, while the remote pool still reads
+   * only legacy would burn tokens it cannot process (`LegacyRemotePoolRecord`).
+   */
+  protected override async checkState(
+    _chain: EVMChain,
+    { remove = [] }: ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams,
+    { state }: RecordWriteContext,
+  ): Promise<void> {
+    remove.forEach((l, i) => {
+      const record = state.tokens
+        .find((t) => t.tokenAddress.toLowerCase() === l.tokenAddress.toLowerCase())
         ?.inline.remotePool.find((r) => r.remoteChainSelector === l.remoteChainSelector)
-
-    ;(params.remove ?? []).forEach((l, i) => {
-      // falling back to the policy, which never sends legacy data, while the remote pool still reads
-      // only legacy would burn tokens it cannot process (LegacyRemotePoolRecord)
-      if (current(l)?.poolDataFormat === 'legacy')
+      if (record?.poolDataFormat === 'legacy')
         throw new CCTParamsInvalidError(
           this.name,
           `remove[${i}]`,
           `the record sends legacy pool data; the policy it would fall back to sends long data the remote pool may not read (LegacyRemotePoolRecord): once the remote pool reads long data, set poolDataFormat: 'long' first, then remove it`,
-          { context },
+          { context: { recordType: 'remotePool' } },
         )
     })
-
-    const parsedPools = (c: InlineRemotePoolConfig, i: number) =>
-      parseUniqueRemoteAddresses(
-        this.name,
-        `set[${i}].remotePools`,
-        c.remotePools.map((p) => p.address),
-        c.remoteChainSelector,
-      )
-    const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
-      'applyInlineRemotePoolConfigUpdates',
-      [
-        (params.remove ?? []).map((l) => ({
-          localToken: getAddress(l.tokenAddress),
-          remoteChainSelector: l.remoteChainSelector,
-        })),
-        (params.set ?? []).map((c, i) => ({
-          localToken: getAddress(c.tokenAddress),
-          remoteChainSelector: c.remoteChainSelector,
-          trustPolicyRemotePools: c.trustPolicyRemotePools,
-          remotePoolConfig: {
-            useLegacyPoolDataOnSend: c.poolDataFormat === 'legacy',
-            remotePools: parsedPools(c, i).map((pool, j) => ({
-              remotePoolAddress: hexlify(encodeAddressToAny(pool)),
-              allowLegacyPoolDataOnReceive: c.remotePools[j]!.allowLegacyPoolData,
-            })),
-          },
-        })),
-      ],
-    )
-    // the values the write replaces: each touched lane's inline record (absent: `null`)
-    const expected = Object.fromEntries(
-      [...(params.remove ?? []), ...(params.set ?? [])].map((l) => [
-        `inline.remotePool.${laneKey(l)}`,
-        current(l) ?? null,
-      ]),
-    )
-    return { data, expected }
   }
 }

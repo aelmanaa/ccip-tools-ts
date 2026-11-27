@@ -14,7 +14,7 @@ import { useResource } from '../../../../../../scripts/useResource.ts'
 import type { ChainGetter } from '../../../../chain.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { EVMTokenManager } from '../../index.ts'
+import { type MultiTokenPoolInlineRemotePoolDrop, EVMTokenManager } from '../../index.ts'
 
 const skip = !!process.env.SKIP_INTEGRATION_TESTS
 
@@ -165,8 +165,10 @@ describe(
         }),
         (e: unknown) =>
           refusedAt('confirmDropped')(e) &&
-          JSON.stringify((e as CCTParamsInvalidError).context.remotePools) ===
-            JSON.stringify([TWO_POOLS[1]]),
+          JSON.stringify(
+            ((e as CCTParamsInvalidError).context.dropped as { remotePools: string[] }[])[0]
+              ?.remotePools,
+          ) === JSON.stringify([TWO_POOLS[1]]),
       )
       // confirmed: the drop guard passes and the lane guard decides (it may still refuse the lane)
       await cct
@@ -198,12 +200,26 @@ describe(
 
     it('refuses removing a remote pool policy record its lanes still trust', async (t) => {
       if (!deployed) return t.skip('mttp-core not deployed')
-      // the policy lanes then trust no remote pool: refused, naming the fix
+      // the policy lanes then trust no remote pool: the drop is confirmed first (A21), then refused
+      const removal = {
+        ...core,
+        getChain,
+        recordsToRemove: [{ policyName: 'core-pol', remoteChainSelector: FUJI }],
+      }
+      const dropped = await cct
+        .generateUnsignedApplyMultiTokenPoolRemotePoolPolicyConfigUpdates(removal)
+        .then(
+          () => assert.fail('built'),
+          (e: unknown) => {
+            assert.ok(refusedAt('confirmDropped')(e), String(e))
+            return (e as CCTParamsInvalidError).context
+              .dropped as MultiTokenPoolInlineRemotePoolDrop[]
+          },
+        )
       await assert.rejects(
         cct.generateUnsignedApplyMultiTokenPoolRemotePoolPolicyConfigUpdates({
-          ...core,
-          getChain,
-          recordsToRemove: [{ policyName: 'core-pol', remoteChainSelector: FUJI }],
+          ...removal,
+          confirmDropped: dropped,
         }),
         (e: unknown) =>
           e instanceof CCTParamsInvalidError &&
@@ -213,9 +229,7 @@ describe(
             (e.context.findings as { check: string; tokenAddress: string }[])
               .filter((f) => f.check === 'NO_REMOTE_POOL')
               .map((f) => f.tokenAddress),
-          ).size ===
-            new Set((e.context.findings as { tokenAddress: string }[]).map((f) => f.tokenAddress))
-              .size,
+          ).size === dropped.length,
       )
     })
 
@@ -243,6 +257,91 @@ describe(
       assert.deepEqual(unsigned.affectedLanes, remove)
       testLogger.info(
         `inline connection removal, no sender: projectionVerified ${unsigned.projectionVerified}`,
+      )
+    })
+
+    const BASE_SEPOLIA = 10344971235874465080n
+
+    it('refuses an inline connection that opens a lane confirmOpening does not list', async (t) => {
+      if (!deployed) return t.skip('mttp-core not deployed')
+      await assert.rejects(
+        cct.generateUnsignedApplyMultiTokenPoolInlineConnectionConfigUpdates({
+          ...core,
+          getChain,
+          set: [
+            {
+              tokenAddress: INLINE_TOKEN,
+              remoteChainSelector: BASE_SEPOLIA,
+              remoteToken: INLINE_TOKEN,
+            },
+          ],
+          confirmOpening: [],
+        }),
+        refusedAt('confirmOpening'),
+      )
+    })
+
+    it("refuses a connection record that opens every policy token's lane unless confirmOpening lists them", async (t) => {
+      if (!deployed) return t.skip('mttp-core not deployed')
+      await assert.rejects(
+        cct.generateUnsignedApplyMultiTokenPoolConnectionPolicyConfigUpdates({
+          ...core,
+          getChain,
+          recordsToSet: [
+            { policyName: 'core-pol', remoteChainSelector: BASE_SEPOLIA, onlySubsetTokens: false },
+          ],
+          openToAllPolicyTokens: true,
+          confirmOpening: [],
+        }),
+        (e: unknown) =>
+          refusedAt('confirmOpening')(e) &&
+          ((e as CCTParamsInvalidError).context.extra as unknown[]).length > 1,
+      )
+    })
+
+    it('does not refuse a remove and set of the same lane with the same remote token', async (t) => {
+      if (!deployed) return t.skip('mttp-core not deployed')
+      const lane = { tokenAddress: INLINE_TOKEN, remoteChainSelector: FUJI }
+      const { lane: view } = await cct.checkMultiTokenPoolLane({
+        poolAddress: CORE_POOL,
+        ...lane,
+        getChain,
+      })
+      // the store checks the policy fallback only in its removal loop: a remove plus set is no mismatch
+      await cct.generateUnsignedApplyMultiTokenPoolInlineConnectionConfigUpdates({
+        ...core,
+        getChain,
+        remove: [lane],
+        set: [{ ...lane, remoteToken: view.remoteToken! }],
+      })
+    })
+
+    it('refuses a remote pool policy record that drops trusted pools on its lanes unless confirmed (A21)', async (t) => {
+      if (!deployed) return t.skip('mttp-core not deployed')
+      const policy = await cct.getMultiTokenPoolRemotePoolPolicy({
+        poolAddress: CORE_POOL,
+        policyName: 'core-pol',
+      })
+      const [current] = policy.records.find(
+        (r) => r.remoteChainSelector === FUJI,
+      )!.remotePoolAddresses
+      await assert.rejects(
+        cct.generateUnsignedApplyMultiTokenPoolRemotePoolPolicyConfigUpdates({
+          ...core,
+          getChain,
+          recordsToSet: [
+            {
+              policyName: 'core-pol',
+              remoteChainSelector: FUJI,
+              remotePoolAddresses: [TWO_POOLS[0]!],
+            },
+          ],
+        }),
+        (e: unknown) =>
+          refusedAt('confirmDropped')(e) &&
+          ((e as CCTParamsInvalidError).context.dropped as { remotePools: string[] }[]).every((d) =>
+            d.remotePools.includes(current!),
+          ),
       )
     })
   },

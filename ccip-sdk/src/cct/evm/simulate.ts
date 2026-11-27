@@ -107,8 +107,9 @@ function toErrorArgs(fragment: ErrorFragment, args: Result | undefined) {
  * Decodes the error `revertData` encodes, trying the core SDK ABIs first, then the CCT-only ones.
  * Function and event fragments sharing the selector are skipped, since a revert only carries
  * errors.
+ * @internal
  */
-function decodeError(
+export function decodeError(
   revertData: string,
 ): Pick<Extract<SimulateEVMTxResult, { success: false }>, 'errorName' | 'errorArgs'> {
   if (revertData.length >= 10) {

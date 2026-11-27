@@ -91,6 +91,19 @@ export function validateUint8(operation: string, param: string, value: unknown):
 }
 
 /**
+ * Asserts `value` is an integer in `[0, 65535]` (a Solidity `uint16`).
+ * @throws {@link CCTParamsInvalidError} if `value` is not such an integer
+ */
+export function validateUint16(operation: string, param: string, value: unknown): void {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 0xffff) return
+  throw new CCTParamsInvalidError(
+    operation,
+    param,
+    `must be an integer in [0, 65535], got ${String(value)}`,
+  )
+}
+
+/**
  * Asserts `value` is an integer in `[0, 2^32 − 1]` (a Solidity `uint32`).
  * @throws {@link CCTParamsInvalidError} if `value` is not such an integer
  */
@@ -329,4 +342,31 @@ export function validateOneOf<const T extends readonly string[]>(
 ): asserts value is T[number] {
   if (!allowed.some((a) => a === value))
     throw new CCTParamsInvalidError(operation, param, `must be one of ${allowed.join(', ')}`)
+}
+
+/**
+ * Refuses an entry whose key repeats an earlier one in the same list, naming both as
+ * `${param}[i]` (`repeats ${param}[j]: give each <noun> once`): a repeated entry would make the result
+ * depend on order.
+ * @throws {@link CCTParamsInvalidError} at the first repeat
+ */
+export function assertUnique<T>(
+  operation: string,
+  param: string,
+  values: readonly T[],
+  keyOf: (value: T, i: number) => string,
+  noun: string,
+): void {
+  const seen = new Map<string, number>()
+  values.forEach((v, i) => {
+    const key = keyOf(v, i)
+    const first = seen.get(key)
+    if (first !== undefined)
+      throw new CCTParamsInvalidError(
+        operation,
+        `${param}[${i}]`,
+        `repeats ${param}[${first}]: give each ${noun} once`,
+      )
+    seen.set(key, i)
+  })
 }

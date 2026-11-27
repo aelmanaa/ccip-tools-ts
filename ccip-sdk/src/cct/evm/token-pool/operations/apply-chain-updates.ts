@@ -37,6 +37,7 @@ import {
   type ParsedRateLimitConfig,
   type RateLimitConfig,
   parseRateLimitConfig,
+  toAbiRateLimitConfig,
 } from '../rate-limit.ts'
 
 // ---------------------------------------------------------------------------
@@ -230,11 +231,7 @@ function parseLanes(
 }
 
 /** Re-keys the SDK's `enabled` to the ABI's `isEnabled`. */
-const toAbiRateLimit = ({ enabled: isEnabled, capacity, rate }: ParsedRateLimitConfig) => ({
-  isEnabled,
-  capacity,
-  rate,
-})
+const toAbiRateLimit = toAbiRateLimitConfig
 
 /**
  * Encodes parsed params into `applyChainUpdates` calldata. `operation` is for the errors of an

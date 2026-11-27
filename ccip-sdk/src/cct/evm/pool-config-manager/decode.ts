@@ -5,13 +5,14 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
+import { ZeroAddress, getAddress, hexlify } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
 import { decodeRemotePools } from '../../../evm/multi-token-pool.ts'
+import { encodeAddressToAny } from '../../../utils.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
 import { nullableAddress } from '../multi-token-pool/contracts.ts'
-import { fromAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
+import { fromAbiRateLimitConfig, toAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PolicyName,
@@ -95,6 +96,27 @@ export function decodeSecurityConfig(c: {
   }
 }
 
+/** Encodes the four buckets of a parsed rate limit record (`decodeRateLimits`' inverse). @internal */
+export function encodeRateLimits(c: MultiTokenPoolRateLimits): AbiRateLimits {
+  const abi = (b: MultiTokenPoolRateLimits[keyof MultiTokenPoolRateLimits]) =>
+    toAbiRateLimitConfig({ enabled: b.enabled, capacity: b.capacity ?? 0n, rate: b.rate ?? 0n })
+  return {
+    outbound: abi(c.outbound),
+    inbound: abi(c.inbound),
+    fastFinalityOutbound: abi(c.fastFinalityOutbound),
+    fastFinalityInbound: abi(c.fastFinalityInbound),
+  }
+}
+
+/** Encodes a security record (`decodeSecurityConfig`' inverse). @internal */
+export function encodeSecurityConfig(c: MultiTokenPoolSecurityConfig): {
+  outboundCCVs: string[]
+  inboundCCVs: string[]
+  hook: string
+} {
+  return { outboundCCVs: c.outboundCCVs, inboundCCVs: c.inboundCCVs, hook: c.hook ?? ZeroAddress }
+}
+
 /** The policy record key of a decoded record. @internal */
 export function decodePolicyRecordKey(c: {
   policyName: string
@@ -136,6 +158,34 @@ export function decodeInlineRemotePoolConfig(c: {
     remotePools: decodeRemotePools(c.remotePoolConfig.remotePools, (bytes) =>
       decodeRemoteAddress(bytes, key.remoteChainSelector),
     ),
+  }
+}
+
+/**
+ * Encodes an inline remote pool record as the ABI struct `decodeInlineRemotePoolConfig` reads: the
+ * inverse, so a record read can be written back. `remotePools` addresses must already be canonical.
+ * @internal
+ */
+export function encodeInlineRemotePoolConfig(c: InlineRemotePoolConfig): {
+  localToken: string
+  remoteChainSelector: bigint
+  trustPolicyRemotePools: boolean
+  remotePoolConfig: {
+    useLegacyPoolDataOnSend: boolean
+    remotePools: { remotePoolAddress: string; allowLegacyPoolDataOnReceive: boolean }[]
+  }
+} {
+  return {
+    localToken: getAddress(c.tokenAddress),
+    remoteChainSelector: c.remoteChainSelector,
+    trustPolicyRemotePools: c.trustPolicyRemotePools,
+    remotePoolConfig: {
+      useLegacyPoolDataOnSend: c.poolDataFormat === 'legacy',
+      remotePools: c.remotePools.map((p) => ({
+        remotePoolAddress: hexlify(encodeAddressToAny(p.address)),
+        allowLegacyPoolDataOnReceive: p.allowLegacyPoolData,
+      })),
+    },
   }
 }
 

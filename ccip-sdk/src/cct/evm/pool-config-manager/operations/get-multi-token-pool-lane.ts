@@ -12,17 +12,17 @@ import { LANE_RECORD_TYPES, toMultiTokenLaneStatus } from '../../../../evm/multi
 import { resultToObject } from '../../../../evm/types.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import type {
-  MultiTokenPoolConfigSource,
-  MultiTokenPoolLane,
-  MultiTokenPoolLaneParams,
+import {
+  type MultiTokenPoolConfigSource,
+  type MultiTokenPoolLane,
+  type MultiTokenPoolLaneParams,
+  isStop,
 } from '../../../multi-token-pool.ts'
 import {
   type MultiTokenPoolVersion,
   poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
-import type { TokenBucket } from '../../token-pool/contracts.ts'
 import { validateAddress, validateNonZeroAddress, validateUint64 } from '../../validate.ts'
 import {
   type MultiTokenPoolLaneKey,
@@ -57,7 +57,6 @@ function sourceOf(
 }
 
 /** An enabled bucket with no capacity and no rate holds the direction (a stop). */
-const isStop = (b: TokenBucket) => b.isEnabled && b.capacity === 0n && b.rate === 0n
 
 /**
  * Resolves the multi-token pool of a lane read: `poolAddress`, or `TAR.getPool(token)` through

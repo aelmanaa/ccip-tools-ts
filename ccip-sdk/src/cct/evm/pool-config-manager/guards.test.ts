@@ -9,6 +9,7 @@ import { ZeroAddress, getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
+import type { CCTParamsInvalidError } from '../../errors.ts'
 import { attestedRemoteFacts } from './guard-facts.ts'
 import {
   type MultiTokenPoolGuardFacts,
@@ -19,7 +20,10 @@ import {
   guardPoolKey,
   multiTokenPoolAffectedLanes,
   multiTokenPoolChainLanes,
+  multiTokenPoolDroppedPools,
   multiTokenPoolLaneTransitions,
+  multiTokenPoolPcmLaneCheck,
+  validateMultiTokenPoolGuardOptions,
 } from './guards.ts'
 import {
   type MultiTokenPoolRecordChange,
@@ -694,5 +698,92 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     assert.deepEqual(r.errors, ['NO_REMOTE_POOL'])
     assert.match(r.findings[0]!.reason, /trusts no remote pool[\s\S]*add the remote pool/)
     assert.deepEqual(r.factFailures, [])
+  })
+
+  it("lists what a write drops from a lane's trusted pools, and only that", () => {
+    const P1 = addr(0xf1)
+    const P2 = addr(0xf2)
+    const pools = (legacy: boolean) => [
+      { address: P1, allowLegacyPoolData: legacy },
+      { address: P2, allowLegacyPoolData: false },
+    ]
+    const base = applyMultiTokenPoolRecordChanges(empty(), inlineLane(T1, { pools: pools(true) }))
+    const reset = (remotePools: { address: string; allowLegacyPoolData: boolean }[]) =>
+      multiTokenPoolDroppedPools(
+        multiTokenPoolAffectedLanes(
+          base,
+          applyMultiTokenPoolRecordChanges(base, [
+            {
+              kind: 'setInline',
+              type: 'remotePool',
+              record: {
+                tokenAddress: T1,
+                remoteChainSelector: C1,
+                trustPolicyRemotePools: false,
+                poolDataFormat: 'long',
+                remotePools,
+              },
+            },
+          ]),
+        ),
+      )
+    const lane = { tokenAddress: T1, remoteChainSelector: C1 }
+    // dropping P2, and turning legacy receive off on the P1 it keeps
+    assert.deepEqual(reset([{ address: P1, allowLegacyPoolData: false }]), [
+      { lane, remotePools: [P2], flags: ['allowLegacyPoolData'] },
+    ])
+    // keeping both, unchanged: nothing dropped
+    assert.deepEqual(reset(pools(true)), [])
+    // a closed lane is not a drop (confirmClosing covers it)
+    const closed = applyMultiTokenPoolRecordChanges(base, [
+      { kind: 'removeInline', type: 'connection', tokenAddress: T1, remoteChainSelector: C1 },
+    ])
+    assert.deepEqual(multiTokenPoolDroppedPools(multiTokenPoolAffectedLanes(base, closed)), [])
+  })
+
+  it("judges the PoolConfigManager's post-write lane check from the projection", () => {
+    const lane = { tokenAddress: T1, remoteChainSelector: C1 }
+    // an inline connection set on a lane with every record: nothing missing
+    const full = applyMultiTokenPoolRecordChanges(empty(), inlineLane(T1))
+    const set = inlineLane(T1).filter((c) => c.kind === 'setInline' && c.type === 'connection')
+    assert.deepEqual(multiTokenPoolPcmLaneCheck(full, set), [])
+    // with the fee and security records missing, _checkLane would revert: named per record type
+    const partial = applyMultiTokenPoolRecordChanges(
+      empty(),
+      inlineLane(T1, { skip: ['fee', 'security'] }),
+    )
+    assert.deepEqual(
+      multiTokenPoolPcmLaneCheck(partial, set).map((f) => [
+        f.check,
+        f.recordType,
+        f.tokenAddress,
+        f.remoteChainSelector,
+      ]),
+      [
+        ['RECORD_MISSING', 'fee', lane.tokenAddress, lane.remoteChainSelector],
+        ['RECORD_MISSING', 'security', lane.tokenAddress, lane.remoteChainSelector],
+      ],
+    )
+  })
+
+  it('validates confirmDropped with the exact path, and refuses a lane given twice', () => {
+    const lane = { tokenAddress: T1, remoteChainSelector: C1 }
+    const at = (o: unknown) => {
+      try {
+        validateMultiTokenPoolGuardOptions('op', '', { confirmDropped: o })
+      } catch (e) {
+        return (e as CCTParamsInvalidError).context.param
+      }
+      return 'ok'
+    }
+    assert.equal(at([{ remotePools: [] }]), 'confirmDropped[0].lane')
+    assert.equal(
+      at([{ lane: { ...lane, tokenAddress: '0x12' } }]),
+      'confirmDropped[0].lane.tokenAddress',
+    )
+    assert.equal(at([{ lane }, { lane }]), 'confirmDropped[1]')
+    assert.equal(at([{ lane, remotePools: 'not-a-list' }]), 'confirmDropped[0].remotePools')
+    assert.equal(at([{ lane, flags: ['everything'] }]), 'confirmDropped[0].flags[0]')
+    assert.equal(at([{ lane, remotePools: [addr(0xf1)], flags: ['allowLegacyPoolData'] }]), 'ok')
   })
 })

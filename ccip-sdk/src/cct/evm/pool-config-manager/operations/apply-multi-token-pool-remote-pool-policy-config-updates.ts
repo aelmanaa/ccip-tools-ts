@@ -8,14 +8,22 @@
 import { hexlify } from 'ethers'
 
 import { encodeAddressToAny } from '../../../../utils.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
 import { parseUniqueRemoteAddresses } from '../../../remote-address.ts'
 import { validateArray } from '../../validate.ts'
-import type { RemotePoolPolicyRecord } from '../records.ts'
-import { type PolicyRecordWriteParams, PolicyRecordWriteOperation } from './record-writes.ts'
+import type { PolicyRecordKey, PolicyRemovalOptions, RemotePoolPolicyRecord } from '../records.ts'
+import type { MultiTokenPoolWriteGuards, PoolConfigManagerWriteParams } from '../write-operation.ts'
+import { PolicyRecordWriteOperation } from './record-writes.ts'
 
 /** Parameters of `applyMultiTokenPoolRemotePoolPolicyConfigUpdates`. */
-export type ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams =
-  PolicyRecordWriteParams<RemotePoolPolicyRecord>
+export type ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams = PoolConfigManagerWriteParams &
+  MultiTokenPoolWriteGuards &
+  PolicyRemovalOptions & {
+    /** Records to remove (first, as on chain). */
+    recordsToRemove?: PolicyRecordKey[]
+    /** Records to set; a set replaces the record's pools. */
+    recordsToSet?: RemotePoolPolicyRecord[]
+  }
 
 /**
  * Writes remote pool policy records. Policy pools never send legacy data, so the lanes they serve
@@ -24,35 +32,44 @@ export type ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams =
  *   (a missing record or policy, a policy in use or with records left), `sender` lacks the gate, or a
  *   lane guard refuses; `context.recordType` is `'remotePool'`
  */
-export class ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates extends PolicyRecordWriteOperation<RemotePoolPolicyRecord> {
+export class ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates extends PolicyRecordWriteOperation<
+  RemotePoolPolicyRecord,
+  ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams
+> {
   readonly name = 'applyMultiTokenPoolRemotePoolPolicyConfigUpdates'
   protected readonly recordType = 'remotePool'
   protected readonly functionName = 'applyRemotePoolPolicyConfigUpdates'
   protected readonly typeRole = 'REMOTE_POOL_ROLE'
   protected readonly allowDefault = false
 
-  protected validateRecord(
+  protected parseRecord(
     _params: ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams,
     record: RemotePoolPolicyRecord,
     at: string,
-  ): void {
-    // a record without pools trusts nothing (PolicyRecordHasNoPools)
-    validateArray(this.name, `${at}.remotePoolAddresses`, record.remotePoolAddresses, 1)
-    parseUniqueRemoteAddresses(
-      this.name,
-      `${at}.remotePoolAddresses`,
-      record.remotePoolAddresses,
-      record.remoteChainSelector,
-    )
+  ): RemotePoolPolicyRecord {
+    validateArray(this.name, `${at}.remotePoolAddresses`, record.remotePoolAddresses)
+    if (!record.remotePoolAddresses.length)
+      throw new CCTParamsInvalidError(
+        this.name,
+        `${at}.remotePoolAddresses`,
+        'is empty: a remote pool policy record without pools trusts nothing (PolicyRecordHasNoPools); give at least one pool, or remove the record with recordsToRemove',
+      )
+    return {
+      ...record,
+      remotePoolAddresses: parseUniqueRemoteAddresses(
+        this.name,
+        `${at}.remotePoolAddresses`,
+        record.remotePoolAddresses,
+        record.remoteChainSelector,
+      ),
+    }
   }
 
   protected encodeRecord(record: RemotePoolPolicyRecord, word: string): unknown {
-    const pools = parseUniqueRemoteAddresses(
-      this.name,
-      'remotePoolAddresses',
-      record.remotePoolAddresses,
+    return [
+      word,
       record.remoteChainSelector,
-    )
-    return [word, record.remoteChainSelector, pools.map((p) => hexlify(encodeAddressToAny(p)))]
+      record.remotePoolAddresses.map((p) => hexlify(encodeAddressToAny(p))),
+    ]
   }
 }

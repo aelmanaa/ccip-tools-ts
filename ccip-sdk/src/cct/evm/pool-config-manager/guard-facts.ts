@@ -5,16 +5,19 @@
  * @packageDocumentation
  */
 
-import { dataLength, getAddress, hexlify, isError, zeroPadValue } from 'ethers'
+import { dataLength, getAddress, hexlify, isError } from 'ethers'
 
 import type { Chain, ChainGetter } from '../../../chain.ts'
-import { CCIPTokenPoolChainConfigNotFoundError } from '../../../errors/index.ts'
+import {
+  CCIPContractNotRouterError,
+  CCIPTokenPoolChainConfigNotFoundError,
+} from '../../../errors/index.ts'
 import { EVMChain } from '../../../evm/index.ts'
 import { decodeLaneConnection, decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { CCTContractTypeInvalidError, CCTContractVersionUnsupportedError } from '../../errors.ts'
-import type { MultiTokenPoolRemoteAttestation } from '../../multi-token-pool.ts'
+import { type MultiTokenPoolRemoteAttestation, abiWord } from '../../multi-token-pool.ts'
 import { laneFamilyOf } from '../../remote-address.ts'
 import { readAllAuthorizedCallers } from '../advanced-pool-hooks/contracts.ts'
 import {
@@ -73,6 +76,8 @@ export type ReadMultiTokenPoolGuardFactsInput = {
    * changes (`null`: none); others read the provider stored now.
    */
   providerOverrides?: ReadonlyMap<string, string | null>
+  /** The provider each token stores now, from the state already read (others are read). */
+  storedProviders?: ReadonlyMap<string, string | null>
 }
 
 /** A remote family the SDK reads the remote side of (attestations are refused for it). */
@@ -191,6 +196,7 @@ async function readProviderData({
   blockTag,
   requests,
   providerOverrides,
+  storedProviders,
 }: ReadMultiTokenPoolGuardFactsInput): Promise<ProvidedData> {
   const out: ProvidedData = {
     providers: new Map(),
@@ -200,7 +206,10 @@ async function readProviderData({
   }
   const tokens = [...new Set(requests.providerLanes.map((l) => getAddress(l.tokenAddress)))]
   if (!tokens.length) return out
-  const stored = tokens.filter((t) => !providerOverrides?.has(t))
+  const stored = tokens.filter((t) => !providerOverrides?.has(t) && !storedProviders?.has(t))
+  for (const t of tokens)
+    if (!providerOverrides?.has(t) && storedProviders?.has(t))
+      out.providers.set(t, storedProviders.get(t) ?? null)
   const configs = stored.length
     ? await poolConfigManagerContract(chain, poolConfigManager, version).getTokenConfigBatch(
         stored,
@@ -395,7 +404,17 @@ async function readRemoteLane(
     }
   if (laneFamilyOf(lane.remoteChainSelector) === ChainFamily.Solana)
     return readSolanaRemoteLane(input, lane, localSelector, servingPools, remote)
-  const registry = await remote.getTokenAdminRegistryFor(trusted[0]!)
+  // the remote registry is found from the first trusted pool; an address that does not answer as a
+  // CCIP pool leaves the remote side unlocated: fail closed, with the fix
+  const registry = await remote.getTokenAdminRegistryFor(trusted[0]!).catch((err: unknown) => {
+    if (isNotCcipContract(err) || err instanceof CCIPContractNotRouterError) return undefined
+    throw err
+  })
+  if (registry === undefined)
+    return {
+      status: 'missing',
+      reason: `the lane's first trusted remote pool ${trusted[0]} does not answer as a CCIP pool on the remote chain, so the remote registry cannot be found from it: trust the remote token's pool`,
+    }
   const registryPool = await readRegistryPool(remote, registry, remoteToken)
   if (registryPool === null)
     return {
@@ -600,7 +619,6 @@ async function readSolanaRemoteLane(
   if (facts.status !== 'known') return facts
   const { back } = facts
   const legacy = lane.connection.poolDataFormat === 'legacy'
-  const abiWord = (address: string) => zeroPadValue(getAddress(address), 32).toLowerCase()
   const length = facts.sourcePoolAddressLength
   if (back && (length === null || length === undefined || length < 20 || length > 32))
     return {

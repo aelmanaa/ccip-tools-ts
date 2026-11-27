@@ -7,6 +7,7 @@
 
 import { getAddress, isError } from 'ethers'
 
+import type { LaneRecordType } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import { LANE_RECORD_TYPES, isZeroHex } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
@@ -21,6 +22,7 @@ import {
   type MultiTokenPoolLaneKey,
   type PoolConfigManagerStaticConfig,
   LANE_BATCH_SIZE,
+  decodeTokenProfile,
   policyNameOf,
   readChainPauseFlags,
   readConfiguredTokens,
@@ -59,6 +61,8 @@ export type MultiTokenPoolRecordStateRead = {
   lanes: MultiTokenPoolLaneKey[]
   /** The PCM's static config, read at the same block (callers need its TokenAdminRegistry). */
   staticConfig: PoolConfigManagerStaticConfig
+  /** The policy names of each record type, as lower-case words. */
+  policyNames: Record<LaneRecordType, ReadonlySet<string>>
 }
 
 /**
@@ -110,12 +114,14 @@ export async function readMultiTokenPoolRecordState(
               ),
             ),
           ) as MultiTokenPoolTokenRecords['inline']
+          const config = resultToObject(configs[i]!)
           return {
             tokenAddress,
             isOutboundPaused: profile.isOutboundPaused,
             isInboundPaused: profile.isInboundPaused,
-            policies: decodeTokenPolicies(resultToObject(configs[i]!)),
+            policies: decodeTokenPolicies(config),
             inline,
+            profile: decodeTokenProfile(tokenAddress, config, address),
           }
         }),
       )
@@ -190,7 +196,11 @@ export async function readMultiTokenPoolRecordState(
     requiredMultiTokenPoolProviderAnswers(state, lanes),
     blockNumber,
   )
-  return { state, blockNumber, lanes, staticConfig }
+  const policyNames = {} as Record<LaneRecordType, ReadonlySet<string>>
+  LANE_RECORD_TYPES.forEach((type, t) => {
+    policyNames[type] = new Set((nameLists[t] ?? []).map((w) => String(w).toLowerCase()))
+  })
+  return { state, blockNumber, lanes, staticConfig, policyNames }
 }
 
 /**
@@ -231,4 +241,19 @@ export async function readProviderAnswers(
       return { ...q, provider, remoteToken }
     }),
   )
+}
+
+/**
+ * Adds to `state` the provider answers its policy lanes among `lanes` need, read at `blockTag`.
+ * @internal
+ */
+export async function fillProviderAnswers(
+  chain: EVMChain,
+  state: MultiTokenPoolRecordState,
+  lanes: readonly MultiTokenPoolLaneKey[],
+  blockTag: number,
+): Promise<void> {
+  const queries = requiredMultiTokenPoolProviderAnswers(state, lanes)
+  if (queries.length)
+    state.providerAnswers.push(...(await readProviderAnswers(chain, queries, blockTag)))
 }
