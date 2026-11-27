@@ -282,7 +282,7 @@ function laneAddresses(
  * `confirmDropped`), lanes going live (refused unless `goingLiveSeverity: 'warning'`: no S3 write
  * checks lanes it opens), lanes left failing closed now or from a later time (refused, or a warning
  * with `failsClosedSeverity: 'warning'`), and affected lanes that cannot be read
- * (`REMOTE_UNREADABLE` at the same severity: never passed silently; an accept warns and lists them). Lanes are listed only when
+ * (`LANE_UNREADABLE` at the same severity: never passed silently; an accept warns and lists them). Lanes are listed only when
  * the write changes a lane account; that listing needs `getProgramAccounts` and fails closed
  * without it. Fails closed compares the program error, not its text.
  * @throws {@link CCTParamsInvalidError} if the simulation refuses the write, a drop is unconfirmed,
@@ -374,12 +374,12 @@ export async function judgePoolGroupWrite(
     const v0 = viewOf(s0)
     const v1 = viewOf(s1)
     inputs.push({ lane: laneKey(key), before: isUnread(v0) ? { unread: v0.reason } : v0 })
-    // no local-lane "unreadable" code exists yet (LANE_UNREADABLE proposed): REMOTE_UNREADABLE, at
-    // the fails-closed severity, so an accept (warning) is never blocked by a lane it cannot read
+    // LANE_UNREADABLE (a local lane fact), at the fails-closed severity, so an accept (warning) is
+    // never blocked by a lane it cannot read
     if (isUnread(v1)) {
       unreadable.push(key)
       findings.push({
-        check: 'REMOTE_UNREADABLE',
+        check: 'LANE_UNREADABLE',
         severity,
         ...key,
         reason: `the local lane this write changes cannot be read after it (${v1.reason}), so it is not judged${severity === 'error' ? ': the write is refused' : ': check it with checkMultiTokenPoolLane'}`,
