@@ -39,7 +39,7 @@ import {
   policyStoresOf,
   poolConfigManagerContract,
 } from '../multi-token-pool/contracts.ts'
-import { decodeError, simulateEVMTx } from '../simulate.ts'
+import { type SimulateEVMTxResult, decodeError, simulateEVMTx } from '../simulate.ts'
 import { toTokenTransferFeeConfig } from '../token-pool/contracts.ts'
 import { type DecodedMultiTokenPoolWrite, decodeMultiTokenPoolWrite } from './calldata.ts'
 import {
@@ -309,21 +309,14 @@ export async function runMultiTokenPoolGuards(
       { from: call.from, blockTag: blockNumber },
     )
     if (!sim.success)
-      throw new CCTParamsInvalidError(
-        errorOperation,
+      throw revertRefusal(
+        input,
         sender ? 'sender' : 'data',
         sender
-          ? `the write reverts when ${sender} executes it: ${sim.errorName ?? sim.revertData}`
-          : `the write reverts in the PoolConfigManager's store ${call.to}: ${sim.errorName ?? sim.revertData}`,
-        {
-          context: {
-            ...input.errorContext,
-            simulatedFrom,
-            errorName: sim.errorName,
-            errorArgs: sim.errorArgs,
-            revertData: sim.revertData,
-          },
-        },
+          ? `the write reverts when ${sender} executes it`
+          : `the write reverts in the PoolConfigManager's store ${call.to}`,
+        sim,
+        simulatedFrom,
       )
   }
   // without a sender, the PCM's own post-write lane checks join the bundle after the store calls
@@ -747,20 +740,12 @@ async function crossCheckWithSimulateV1(
   if (failed >= 0) {
     const call = writes[failed]!
     const revertData = calls[failed]!.returnData
-    const { errorName, errorArgs } = decodeError(revertData)
-    throw new CCTParamsInvalidError(
-      input.errorOperation ?? operation,
+    throw revertRefusal(
+      input,
       'data',
-      `${call.label ?? `the write (its call to ${call.to})`} reverts with the state the write leaves: ${errorName ?? revertData}`,
-      {
-        context: {
-          ...input.errorContext,
-          simulatedFrom: input.sender ? 'sender' : 'pcm',
-          errorName,
-          errorArgs,
-          revertData,
-        },
-      },
+      `${call.label ?? `the write (its call to ${call.to})`} reverts with the state the write leaves`,
+      { revertData, ...decodeError(revertData) },
+      input.sender ? 'sender' : 'pcm',
     )
   }
   // views that did not run are not a confirmation
@@ -847,4 +832,33 @@ const LANE_JUDGING: Readonly<Record<string, 'loosened' | 'none'>> = {
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolChains')]: 'none',
   [multiTokenPoolFunctionOf('applyMultiTokenPoolInlineRateLimitBucketUpdates')]: 'loosened',
   [multiTokenPoolFunctionOf('applyMultiTokenPoolRateLimitPolicyBucketUpdates')]: 'loosened',
+}
+
+/**
+ * The refusal of a write whose simulation reverts, single `eth_call` or `eth_simulateV1` bundle
+ * alike: the decoded revert (`errorName`, `errorArgs`, `revertData`) and who it was simulated from.
+ */
+function revertRefusal(
+  input: Pick<RunMultiTokenPoolGuardsInput, 'operation' | 'errorOperation' | 'errorContext'>,
+  param: string,
+  reason: string,
+  revert: Pick<Extract<SimulateEVMTxResult, { success: false }>, 'errorName' | 'errorArgs'> & {
+    revertData: string
+  },
+  simulatedFrom: MultiTokenPoolSimulatedFrom,
+): CCTParamsInvalidError {
+  return new CCTParamsInvalidError(
+    input.errorOperation ?? input.operation,
+    param,
+    `${reason}: ${revert.errorName ?? revert.revertData}`,
+    {
+      context: {
+        ...input.errorContext,
+        simulatedFrom,
+        errorName: revert.errorName,
+        errorArgs: revert.errorArgs,
+        revertData: revert.revertData,
+      },
+    },
+  )
 }
