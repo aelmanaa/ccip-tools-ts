@@ -870,7 +870,11 @@ export type MultiTokenPoolLaneKey = {
   remoteChainSelector: bigint
 }
 
-/** Flags a write may turn off on a lane's trusted pools, confirmed in `confirmDropped`. */
+/**
+ * Flags a write may turn off on a lane's trusted pools, confirmed in `confirmDropped` (the type of
+ * `MultiTokenPoolInlineRemotePoolDrop.flags` is derived from it).
+ * @internal
+ */
 export const DROPPABLE_REMOTE_POOL_FLAGS = [
   'trustPolicyRemotePools',
   'allowLegacyPoolData',
