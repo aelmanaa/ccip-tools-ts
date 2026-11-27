@@ -444,6 +444,24 @@ export const TOKEN_POLICY_ROLES = {
   security: 'SECURITY_ROLE',
 } as const satisfies Record<LaneRecordType, PoolConfigManagerRole>
 
+/**
+ * Who may write a token's own records of a type (`PoolConfigManager._checkTokenRoles`): any one of
+ * these roles.
+ * @internal
+ */
+export function tokenRolesGate(type: LaneRecordType): readonly PoolConfigManagerRole[] {
+  return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', TOKEN_POLICY_ROLES[type]]
+}
+
+/**
+ * Who may write a policy of a type, its records and subsets (`PoolConfigManager._checkPolicyRoles`):
+ * any one of these roles.
+ * @internal
+ */
+export function policyRolesGate(type: LaneRecordType): readonly PoolConfigManagerRole[] {
+  return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES[type]]
+}
+
 /** An MTTP op name, or an existing CCT op a planner step runs. */
 export type MultiTokenPoolOperationName =
   | keyof typeof OPERATIONS

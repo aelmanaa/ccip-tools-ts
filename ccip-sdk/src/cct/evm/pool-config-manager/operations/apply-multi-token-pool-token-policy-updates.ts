@@ -15,8 +15,8 @@ import {
   type PoolConfigManagerRole,
   MULTI_TOKEN_POOL_OPERATIONS,
   POOL_CONFIG_MANAGER_TYPE,
-  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
+  tokenRolesGate,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateAddress, validateArray, validateOneOf } from '../../validate.ts'
 import { type PolicyName, encodePolicyName } from '../contracts.ts'
@@ -88,7 +88,7 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
   protected gate({
     recordType,
   }: ApplyMultiTokenPoolTokenPolicyUpdatesParams): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', TOKEN_POLICY_ROLES[recordType]]
+    return tokenRolesGate(recordType)
   }
 
   /** Every refusal names the record type. */

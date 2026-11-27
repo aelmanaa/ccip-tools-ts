@@ -6,7 +6,6 @@
  */
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
 import { validateBoolean } from '../../validate.ts'
 import { policyKey } from '../projection.ts'
 import type { ConnectionPolicyRecord, PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
@@ -53,11 +52,9 @@ export class ApplyMultiTokenPoolConnectionPolicyConfigUpdates extends PolicyReco
   ): ConnectionPolicyRecord {
     validateBoolean(this.name, `${at}.onlySubsetTokens`, record.onlySubsetTokens)
     if (!record.onlySubsetTokens && params.openToAllPolicyTokens !== true)
-      throw new CCTParamsInvalidError(
-        this.name,
+      throw this.refuse(
         `${at}.onlySubsetTokens`,
         `is false, which opens chain ${record.remoteChainSelector} to every current and future token of policy ${record.policyName}: pass openToAllPolicyTokens: true to confirm, or list the tokens with applyMultiTokenPoolSubsetTokenUpdates`,
-        { context: { recordType: 'connection' } },
       )
     return record
   }
@@ -86,11 +83,9 @@ export class ApplyMultiTokenPoolConnectionPolicyConfigUpdates extends PolicyReco
         chains: [r.remoteChainSelector],
       })
       if (conflicts.length)
-        throw new CCTParamsInvalidError(
-          this.name,
+        throw this.refuse(
           `recordsToSet[${i}].remoteChainSelector`,
           `connection policy ${r.policyName} answers remote tokens with a same-address provider, which is no address of non-EVM chain ${r.remoteChainSelector}: give that chain's lanes inline remote tokens, or set another provider first`,
-          { context: { recordType: 'connection' } },
         )
     }
   }

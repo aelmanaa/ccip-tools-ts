@@ -12,9 +12,9 @@ import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
-  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
+  policyRolesGate,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateAddress, validateArray } from '../../validate.ts'
 import { encodePolicyName, validatePolicyRecordKey } from '../contracts.ts'
@@ -76,7 +76,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES.connection]
+    return policyRolesGate('connection')
   }
 
   protected override errorContext(): Record<string, unknown> {

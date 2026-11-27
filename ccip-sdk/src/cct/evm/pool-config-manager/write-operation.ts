@@ -41,7 +41,7 @@ import {
 
 export type { MultiTokenPoolSimulatedFrom } from './guard-run.ts'
 export type { MultiTokenPoolGuardOptions } from './guards.ts'
-import { CCTStateChangedError } from '../../errors.ts'
+import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
 import { latestBlock, noteMinedBlock } from '../mined-block.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
@@ -148,6 +148,15 @@ export abstract class PoolConfigManagerWriteOperation<
   /** Context every refusal of this op carries (e.g. a merged op's kind). */
   protected errorContext(_params: Parsed): Record<string, unknown> | undefined {
     return undefined
+  }
+
+  /**
+   * A refusal of this op at `param`, carrying its {@link errorContext} (pass `params` when the op's
+   * context depends on them).
+   */
+  protected refuse(param: string, reason: string, params?: Parsed): CCTParamsInvalidError {
+    const context = this.errorContext(params as Parsed)
+    return new CCTParamsInvalidError(this.name, param, reason, context && { context })
   }
 
   /** Validates the target, sender and guard options; subclasses validate their own fields after it. */

@@ -891,3 +891,19 @@ export function inlineRecordOf<T extends LaneRecordType>(
       | undefined
   )?.find((r) => r.remoteChainSelector === lane.remoteChainSelector)
 }
+
+/** A policy's record of one type for one chain in a state (chain `0n`: its default), or `undefined`. @internal */
+export function policyRecordOf<T extends LaneRecordType>(
+  state: Pick<MultiTokenPoolRecordState, 'policies'>,
+  type: T,
+  key: PolicyRecordKey,
+): MultiTokenPoolPolicyRecords[T][number] | undefined {
+  const word = policyKey(key.policyName, 'policyName')
+  return (state.policies[type] as readonly MultiTokenPoolPolicyRecords[T][number][]).find(
+    (r) =>
+      'policyName' in r &&
+      policyKey(r.policyName, 'policyName') === word &&
+      'remoteChainSelector' in r &&
+      r.remoteChainSelector === key.remoteChainSelector,
+  )
+}

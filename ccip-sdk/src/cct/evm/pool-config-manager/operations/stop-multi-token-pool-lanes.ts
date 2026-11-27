@@ -13,7 +13,6 @@ import { getAddress } from 'ethers'
 import type { TransferDirection } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { canonicalHash } from '../../../canonical.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   type MultiTokenPoolExpectedSnapshot,
   type MultiTokenPoolRateLimits,
@@ -26,9 +25,9 @@ import {
   type MultiTokenPoolSingleFunctionOperation,
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
-  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
+  tokenRolesGate,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateOneOf } from '../../validate.ts'
 import { type MultiTokenPoolLaneKey, toAbiLaneKey, validateLaneKeys } from '../contracts.ts'
@@ -153,7 +152,7 @@ abstract class LaneStopWriteOperation<
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', TOKEN_POLICY_ROLES.rateLimit]
+    return tokenRolesGate('rateLimit')
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -170,13 +169,6 @@ abstract class LaneStopWriteOperation<
       multiTokenPoolFunctionOf(this.name),
       [remove.map(toAbiLaneKey), set.map((s) => encodeRecord(s.lane, s.rateLimits))],
     )
-  }
-
-  /** A refusal at `lanes[i]`, with the record type. */
-  protected refuse(param: string, reason: string): CCTParamsInvalidError {
-    return new CCTParamsInvalidError(this.name, param, reason, {
-      context: { recordType: 'rateLimit' },
-    })
   }
 }
 

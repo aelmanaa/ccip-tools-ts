@@ -6,7 +6,6 @@
  */
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
 import { POOL_DATA_FORMATS } from '../../../multi-token-pool.ts'
 import { parseRemoteAddress } from '../../../remote-address.ts'
 import { assertUnique, validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
@@ -88,11 +87,9 @@ export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends InlineReco
     remove.forEach((l, i) => {
       const record = inlineRecordOf(state, 'remotePool', l)
       if (record?.poolDataFormat === 'legacy')
-        throw new CCTParamsInvalidError(
-          this.name,
+        throw this.refuse(
           `remove[${i}]`,
           `the record sends legacy pool data; the policy it would fall back to sends long data the remote pool may not read (LegacyRemotePoolRecord): once the remote pool reads long data, set poolDataFormat: 'long' first, then remove it`,
-          { context: { recordType: 'remotePool' } },
         )
     })
   }

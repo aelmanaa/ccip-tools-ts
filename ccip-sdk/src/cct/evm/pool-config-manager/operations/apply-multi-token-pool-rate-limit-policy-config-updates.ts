@@ -6,7 +6,6 @@
  */
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
 import { validateUint8 } from '../../validate.ts'
 import { encodeRateLimits } from '../decode.ts'
 import { policyKey } from '../projection.ts'
@@ -83,11 +82,9 @@ export class ApplyMultiTokenPoolRateLimitPolicyConfigUpdates extends PolicyRecor
       // the stored decimals, from the build's one state read
       const decimals = rateLimitPolicyDecimals.get(word)
       if (decimals !== undefined && decimals !== r.localDecimals)
-        throw new CCTParamsInvalidError(
-          this.name,
+        throw this.refuse(
           `recordsToSet[${i}].localDecimals`,
           `is ${r.localDecimals}, but rate limit policy ${r.policyName} has ${decimals} decimals (InvalidRateLimitPolicyDecimals): its limits are raw amounts in those units; use the policy's decimals, or another policy`,
-          { context: { recordType: 'rateLimit' } },
         )
     }
   }
