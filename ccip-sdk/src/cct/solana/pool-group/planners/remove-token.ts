@@ -27,6 +27,7 @@ import { readTokenPoolChainConfigV2 } from '../../token-pool/operations/chain-co
 import { EditChainConfigV2 } from '../../token-pool/operations/edit-chain-config-v2.ts'
 import { U64_MAX, parsePublicKey, validateBigInt } from '../../validate.ts'
 import { isUnread } from '../lane.ts'
+import type { SolanaLaneRemoteSide } from '../multi-token-pool-check.ts'
 import { readSolanaMultiTokenPoolLane } from '../multi-token-pool-lane.ts'
 import { parsePoolGroupRef } from '../operations/common.ts'
 import { GetPoolGroupChain } from '../operations/get-pool-group-chain.ts'
@@ -207,8 +208,10 @@ export type RemoteStop =
  * Whether the remote side of a lane stopped sending toward this chain (S6 review M3): the pool the
  * remote registry names (the one the remote Router sends through, read with `readEvmRemote`, the
  * lane check's reader) has its lane paused or stopped outbound. A delisted token (no registry pool)
- * is stopped; a registry pool with no lane toward this chain (`exists: false`) is not (fail
- * closed); a pool that is not a multi-token pool, or a remote the SDK cannot read, is unread.
+ * is stopped; a multi-token pool with no lane toward this chain (`exists: false`) is not (fail
+ * closed); a standard pool is stopped when it has no chain config toward this chain or a 0/0
+ * outbound limiter (core's token-pool reads); a custom pool, or a remote the SDK cannot read, is
+ * unread.
  * Unread is attestable only where the SDK cannot read it: a remote family it does not read, or a
  * `getChain` that was given and failed (M4); an EVM remote without `getChain` is not.
  * @internal
@@ -244,11 +247,31 @@ export async function readRemoteStop(
     ...base,
     getMultiTokenPoolLane: async (r, p) => (view = await base.getMultiTokenPoolLane(r, p)),
   })
+  return remoteStopOf(side, view)
+}
+
+/**
+ * The remote stop a read of the remote side shows (pure): see {@link readRemoteStop}.
+ * @param view - The registry's multi-token pool lane, when `readEvmRemote` read one.
+ * @internal
+ */
+export function remoteStopOf(side: SolanaLaneRemoteSide, view?: MultiTokenPoolLane): RemoteStop {
   if (side.status !== 'known') return { unread: side.reason, attestable: true }
   if (side.registryPool === null) return { stopped: true }
-  if (!side.readsLongData || !view)
+  // a standard pool, read through core's token-pool reads (S6 re-check R-minor 4): no chain config
+  // toward this chain, or an enabled 0/0 outbound limiter (A17 stop), sends nothing here
+  if (!side.readsLongData) {
+    const out = side.back?.outbound
+    if (!side.back) return { stopped: true }
+    if (out && out.capacity === 0n && out.rate === 0n) return { stopped: true }
     return {
-      unread: `the remote registry's pool ${side.registryPool} is not a multi-token pool, so its outbound stop is not read`,
+      stopped: false,
+      reason: `the remote registry's standard pool ${side.registryPool} has a chain config toward this chain with an outbound limit that is not stopped`,
+    }
+  }
+  if (!view)
+    return {
+      unread: `the remote registry's pool ${side.registryPool} answered no lane read`,
       attestable: true,
     }
   if (!view.exists)

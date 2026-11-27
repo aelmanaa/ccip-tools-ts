@@ -433,10 +433,12 @@ export type SolanaRemoveMultiTokenPoolTokenParams = MultiTokenPoolPlanOptions &
       /** Only these chains' lanes leave; omitted, every lane leaves and the membership closes. */
       remoteChainSelectors?: bigint[]
       /**
-       * Lanes whose remote side the caller confirms stopped sending toward this chain. Accepted only
-       * where the SDK cannot read it: a remote family it does not read, or a `getChain` that was given
-       * and could not serve the chain. An EVM remote side without `getChain` gives `blockedBy` (pass
-       * `getChain`); a readable one is read, never attested.
+       * Lanes whose remote side the caller confirms no longer sends toward this chain: paused, stopped
+       * (A17: its outbound rate limit 0/0) or delisted. Accepted only where the SDK cannot read it: a
+       * remote family it does not read, a remote pool that answers no CCIP read, or a `getChain` that
+       * was given and could not serve the chain. An EVM remote side without `getChain` gives
+       * `blockedBy` (pass `getChain`); a readable one (a multi-token pool or a standard pool) is
+       * read, never attested.
        */
       confirmRemoteOutboundStopped?: MultiTokenPoolLaneKey[]
       /**

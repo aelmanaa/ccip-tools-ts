@@ -385,7 +385,12 @@ async function tokenOnboardingSteps(
     return []
   const other = state.registry?.tokenPool
   if (other && !other.equals(poolPda) && !other.equals(PublicKey.default))
-    await refuseLivePool(ctx, token, index, other)
+    await refuseLivePool(ctx, token, index, other, 'other')
+  // this pool on interface 1: the switch to interface 2 moves its standard lanes onto the v2 path,
+  // which serves a lane with no ChainConfigV2 on defaults (full finality only; its own fee and CCV
+  // rules: burn_v2/processor.rs:90-91 at 7558722), before any group lane exists (S6 re-check R-major 1)
+  if (state.pool && other?.equals(poolPda) && state.registry?.interfaceVersion !== 2)
+    await refuseLivePool(ctx, token, index, poolPda, 'interface')
   try {
     return planTokenOnboarding(parsedToken, state).map((s) => s.name)
   } catch (err) {
@@ -393,12 +398,18 @@ async function tokenOnboardingSteps(
   }
 }
 
-/** Refuses a mint whose registry names `pool` while that pool serves lanes (or cannot be read). @internal */
+/**
+ * Refuses a mint whose registry names `pool` while that pool serves lanes (or cannot be read):
+ * `'other'`, another pool (`setPool` to the group pool would fail its transfers); `'interface'`,
+ * this program's pool on interface 1 (the interface switch would change how its live lanes run).
+ * @internal
+ */
 export async function refuseLivePool(
   ctx: PlannerContext,
   token: ParsedOnboardingToken,
   index: number,
   pool: PublicKey,
+  kind: 'other' | 'interface' = 'other',
 ): Promise<void> {
   const param = `tokens[${index}].tokenAddress`
   let remotes
@@ -408,11 +419,17 @@ export async function refuseLivePool(
     throw new CCTParamsInvalidError(
       NAME,
       param,
-      `${token.mint}'s registry names another pool, ${pool.toBase58()}, whose lanes cannot be read (${err instanceof Error ? err.message : String(err)}): moving the token to the group pool unchecked could fail live transfers, so it is refused. Read that pool, then migrate the token off it first`,
+      `${token.mint}'s registry names ${kind === 'other' ? 'another pool' : 'this pool on interface 1'}, ${pool.toBase58()}, whose lanes cannot be read (${err instanceof Error ? err.message : String(err)}): moving the token to the group pool unchecked could fail live transfers, so it is refused. Read that pool, then migrate the token off it first`,
       { cause: err instanceof Error ? err : undefined },
     )
   }
   const live = Object.entries(remotes).filter(([, r]) => r.remotePools.length)
+  if (live.length && kind === 'interface')
+    throw new CCTParamsInvalidError(
+      NAME,
+      param,
+      `${token.mint}'s registry names this pool on interface 1, and it serves ${live.length} lane(s) (${live.map(([n]) => n).join(', ')}): onboarding switches it to interface 2 before any group lane exists, which moves those lanes onto the v2 path (full finality only, their own fee and CCV rules) unchecked. Migrate first: check each lane on interface 2 (checkMultiTokenPoolLane) and switch it yourself (setPoolInterfaceImplementation), or stop and drain them and remove their chain configs, then onboard`,
+    )
   if (live.length)
     throw new CCTParamsInvalidError(
       NAME,

@@ -10,8 +10,9 @@
  *    `planners.fork.test.ts`), remove the N (batched: the remote registry names no pool for them,
  *    so the remote side reads as stopped);
  * 2. lift the chain pause (no member left: the check has no lane), so Sepolia is live;
- * 3. onboard the N onto the live Sepolia (join without it, then paused creation; no lift, 1
- *    `set_lane_pause` per mint), remove them.
+ * 3. onboard the N onto the live Sepolia (join without it, then paused creation), lift the N lane
+ *    pauses (the planner's lift op, one `set_lane_pause` per mint, run under a chain pause so the
+ *    fresh lanes do not go live: their make-live check refuses them), remove them.
  * It prints the transaction, signature and approval-round counts, the lanes per materialize and
  * paused-creation transaction, and the Squads execute CU.
  *
@@ -221,6 +222,34 @@ describe(
             // fresh mints have no Sepolia counterpart: the configuration check may refuse them
             assert.match(live.blockedBy?.reason ?? 'lane check refuses', /lane check refuses/)
             tally(`onboard ${N} onto the live chain (no lift)`, live.steps)
+            // the lift: the planner's unpausePoolGroupLanes op, one per mint, under a chain pause so
+            // the fresh lanes do not go live (their make-live check would refuse them)
+            const chainPause = { ...g, remoteChainSelector: SEPOLIA, getChain, wallet }
+            await cct.setPoolGroupChainPause({
+              ...chainPause,
+              pausedOutbound: true,
+              pausedInbound: true,
+            })
+            const lifts = []
+            for (const tokenAddress of mints)
+              lifts.push(
+                await cct.setPoolGroupLanePause({
+                  ...g,
+                  tokenAddress,
+                  remoteChainSelectors: [SEPOLIA],
+                  pausedOutbound: false,
+                  pausedInbound: false,
+                  wallet,
+                }),
+              )
+            const liftTxs = lifts.reduce((n, r) => n + r.transactions.length, 0)
+            rows.push({
+              flow: `lift ${N} lane pauses (wallet)`,
+              steps: N,
+              txs: liftTxs,
+              signatures: liftTxs,
+              rounds: 0,
+            })
             const removedLive = await cct.removeMultiTokenPoolToken({
               ...removal,
               solana: removalSolana,
@@ -228,6 +257,12 @@ describe(
             })
             assert.equal(removedLive.blockedBy, undefined, removedLive.blockedBy?.reason ?? '')
             tally(`remove ${N} (live chain)`, removedLive.steps)
+            // no member left: lifting the chain pause re-opens nothing
+            await cct.setPoolGroupChainPause({
+              ...chainPause,
+              pausedOutbound: false,
+              pausedInbound: false,
+            })
             // back to 'off' for the Squads run
             await cct.setPoolGroupChainLanes({
               ...g,
@@ -364,6 +399,52 @@ describe(
           )
           // fresh mints have no Sepolia counterpart: the configuration check may refuse them
           assert.match(live.blockedBy?.reason ?? 'lane check refuses', /lane check refuses/)
+          // the lift, as on the wallet path: every mint's lift is a ready step of one wave
+          const pause = await cct.generateUnsignedSetPoolGroupChainPause({
+            ...g,
+            remoteChainSelector: SEPOLIA,
+            pausedOutbound: true,
+            pausedInbound: true,
+            payer: vault,
+            budget,
+          })
+          const proposeAll = async (
+            ready: { id: string; transactions: typeof pause.transactions }[],
+          ) => {
+            const { batches } = toPoolGroupSquadsBatch({ ready, vault })
+            for (const b of batches) {
+              const index = await squads.proposeBatch(m1!, b.transactions)
+              await squads.approve(index, m1!, m2!)
+              await squads.executeBatch(m3!, index, b.transactions)
+            }
+            return batches
+          }
+          await proposeAll([{ id: 'chain-pause', transactions: pause.transactions }])
+          const liftReady = []
+          for (const tokenAddress of mints)
+            liftReady.push({
+              id: tokenAddress,
+              transactions: (
+                await cct.generateUnsignedSetPoolGroupLanePause({
+                  ...g,
+                  tokenAddress,
+                  remoteChainSelectors: [SEPOLIA],
+                  pausedOutbound: false,
+                  pausedInbound: false,
+                  payer: vault,
+                  budget,
+                })
+              ).transactions,
+            })
+          const liftBatches = await proposeAll(liftReady)
+          const liftTxs = liftBatches.reduce((n, b) => n + b.transactions.length, 0)
+          rows.push({
+            flow: `lift ${N} lane pauses (Squads)`,
+            steps: N,
+            txs: liftTxs,
+            signatures: liftBatches.length * 3 + liftTxs,
+            rounds: liftBatches.length,
+          })
           await waves(`remove ${N} (live chain)`, () =>
             cct.generateUnsignedRemoveMultiTokenPoolToken({
               ...removal,

@@ -31,7 +31,12 @@ import {
   parseOnboarding,
   refuseLivePool,
 } from './onboard.ts'
-import { type RemovalInputs, expandRemovalFrom, parseRemoval } from './remove-token.ts'
+import {
+  type RemovalInputs,
+  expandRemovalFrom,
+  parseRemoval,
+  remoteStopOf,
+} from './remove-token.ts'
 import { evaluatePlan } from './run.ts'
 
 const SEPOLIA = networkInfo('ethereum-testnet-sepolia').chainSelector
@@ -327,6 +332,12 @@ describe('onboarding goldens', () => {
       } as unknown as SolanaChain,
     }
     await refuseLivePool(idle, t!, 0, pool)
+    // R-major 1: this pool on interface 1 that serves lanes is refused before the switch
+    await assert.rejects(
+      refuseLivePool(ctx, t!, 0, pool, 'interface'),
+      (e: unknown) => e instanceof CCTParamsInvalidError && /on interface 1/.test(e.message),
+    )
+    await refuseLivePool(idle, t!, 0, pool, 'interface')
   })
 })
 
@@ -519,6 +530,47 @@ describe('removal goldens', () => {
       attested.ready.map((s) => s.step.name),
       ['dropChainsAndCloseLanes'],
     )
+  })
+
+  it('the remote stop from a read: delisted, standard pool (core reads), multi-token pool (R-minor 4)', () => {
+    const known = (over: Record<string, unknown>) =>
+      ({
+        status: 'known',
+        registryPool: POOL,
+        readsLongData: false,
+        legacyFromMultiTokenPools: [],
+        ...over,
+      }) as never
+    const bucket = (capacity: bigint, rate: bigint) => ({ tokens: 0n, capacity, rate })
+    assert.deepEqual(remoteStopOf(known({ registryPool: null })), { stopped: true })
+    // a standard pool: no chain config toward us, or a 0/0 limiter, is stopped; else it sends
+    assert.deepEqual(remoteStopOf(known({})), { stopped: true })
+    assert.deepEqual(remoteStopOf(known({ back: { outbound: bucket(0n, 0n) } })), { stopped: true })
+    // a disabled limiter (null) lets everything through: it sends
+    const open = remoteStopOf(known({ back: { outbound: null } }))
+    assert.ok('stopped' in open && !open.stopped)
+    const sends = remoteStopOf(known({ back: { outbound: bucket(10n, 1n) } }))
+    assert.ok(
+      'stopped' in sends && !sends.stopped,
+      'a standard pool with a live limiter is read as sending, not attestable',
+    )
+    // a multi-token pool: exists false is not stopped; paused is
+    const lane = (over: Record<string, unknown>) =>
+      ({
+        exists: true,
+        outboundStatus: { status: 'ok' },
+        stopped: { outbound: false },
+        ...over,
+      }) as never
+    const mttp = known({ readsLongData: true })
+    assert.equal(
+      (remoteStopOf(mttp, lane({ exists: false })) as { stopped: boolean }).stopped,
+      false,
+    )
+    assert.deepEqual(remoteStopOf(mttp, lane({ outboundStatus: { status: 'paused' } })), {
+      stopped: true,
+    })
+    assert.ok('unread' in remoteStopOf({ status: 'unknown', reason: 'x' } as never))
   })
 
   it('Squads: the pause split ids are stable (by the inbound flag, not by position)', () => {
