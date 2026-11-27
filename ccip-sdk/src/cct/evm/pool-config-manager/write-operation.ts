@@ -5,12 +5,9 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
-
 import type { EVMChain } from '../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
-import { CCTParamsInvalidError } from '../../errors.ts'
 import type {
   MultiTokenPoolExpectedSnapshot,
   MultiTokenPoolLaneFinding,
@@ -21,8 +18,7 @@ import type { TransactionResult } from '../../operation.ts'
 import {
   type MultiTokenPoolVersion,
   type PoolConfigManagerRole,
-  poolConfigManagerContract,
-  poolConfigManagerRoleId,
+  assertPoolConfigManagerRole,
 } from '../multi-token-pool/contracts.ts'
 import { type EVMExecuteParams, EVMOperation } from '../operation.ts'
 import { submit } from '../submit.ts'
@@ -168,7 +164,16 @@ export abstract class PoolConfigManagerWriteOperation<
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
     const blockTag = await chain.provider.getBlockNumber()
     if (params.sender !== undefined)
-      await this.#preflightGate(chain, address, version, params, params.sender, blockTag)
+      await assertPoolConfigManagerRole(
+        this.name,
+        chain,
+        address,
+        version,
+        params.sender,
+        this.gate(params),
+        blockTag,
+        this.errorContext(params),
+      )
     // the stored records, read once: the op checks and encodes from them, the guard judges on them
     const read = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
     const { data, expected } = await this.encode(chain, params, {
@@ -206,31 +211,6 @@ export abstract class PoolConfigManagerWriteOperation<
       warnings: result.warnings,
       snapshot: result.snapshot,
     }
-  }
-
-  /** One `hasRole` per accepted role, at the build block; refused when the sender holds none. */
-  async #preflightGate(
-    chain: EVMChain,
-    address: string,
-    version: MultiTokenPoolVersion,
-    params: Parsed,
-    sender: string,
-    blockTag: number,
-  ): Promise<void> {
-    const roles = this.gate(params)
-    const pcm = poolConfigManagerContract(chain, address, version)
-    const held = await Promise.all(
-      roles.map((role) =>
-        pcm.hasRole(poolConfigManagerRoleId(role), getAddress(sender), { blockTag }),
-      ),
-    )
-    if (!held.some(Boolean))
-      throw new CCTParamsInvalidError(
-        this.name,
-        'sender',
-        `${sender} holds none of ${roles.join(', ')} on PoolConfigManager ${address}, which this write needs: send it from a holder, or grant one of the roles first`,
-        { context: { ...this.errorContext(params), roles } },
-      )
   }
 
   /**

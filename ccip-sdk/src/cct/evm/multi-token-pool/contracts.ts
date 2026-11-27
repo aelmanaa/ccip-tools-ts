@@ -21,6 +21,7 @@ import {
   CCTContractTypeInvalidError,
   CCTContractVersionUnsupportedError,
   CCTDataDecodeError,
+  CCTParamsInvalidError,
 } from '../../errors.ts'
 import BURN_MINT_MULTI_TOKEN_POOL_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/burn-mint-multi-token-pool.ts'
 import CONNECTION_POLICY_STORE_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/connection-policy-store.ts'
@@ -616,6 +617,56 @@ export function poolConfigManagerContract(
   version: MultiTokenPoolVersion,
 ): TypedContract<typeof POOL_CONFIG_MANAGER_V2_1_0_DEV_ABI> {
   return getTypedContract(chain, address, MULTI_TOKEN_POOL_ABIS.PoolConfigManager[version])
+}
+
+/**
+ * The roles of `roles` that `account` holds on a PCM, in the order given (one `hasRole` each, pinned
+ * to `blockTag` when given).
+ * @internal
+ */
+export async function readPoolConfigManagerRolesHeld(
+  pcm: Pick<ReturnType<typeof poolConfigManagerContract>, 'hasRole'>,
+  account: string,
+  roles: readonly PoolConfigManagerRole[],
+  blockTag?: number,
+): Promise<PoolConfigManagerRole[]> {
+  const a = getAddress(account)
+  const held = await Promise.all(
+    roles.map((role) =>
+      pcm.hasRole(
+        poolConfigManagerRoleId(role),
+        a,
+        ...(blockTag === undefined ? [] : [{ blockTag }]),
+      ),
+    ),
+  )
+  return roles.filter((_, i) => held[i])
+}
+
+/**
+ * The PCM role pre-flight of a write, as main's `assert<Contract><Role>` checks: `sender` must hold
+ * one of `roles` at `blockTag`.
+ * @throws {@link CCTParamsInvalidError} (param `sender`, `context.roles`) if it holds none
+ * @internal
+ */
+export async function assertPoolConfigManagerRole(
+  operation: string,
+  chain: EVMChain,
+  address: string,
+  version: MultiTokenPoolVersion,
+  sender: string,
+  roles: readonly PoolConfigManagerRole[],
+  blockTag: number,
+  context?: Record<string, unknown>,
+): Promise<void> {
+  const pcm = poolConfigManagerContract(chain, address, version)
+  if ((await readPoolConfigManagerRolesHeld(pcm, sender, roles, blockTag)).length) return
+  throw new CCTParamsInvalidError(
+    operation,
+    'sender',
+    `${sender} holds none of ${roles.join(', ')} on PoolConfigManager ${address}, which this write needs: send it from a holder, or grant one of the roles first`,
+    { context: { ...context, roles } },
+  )
 }
 
 /**

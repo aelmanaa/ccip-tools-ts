@@ -11,7 +11,7 @@ import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_ROLES,
   poolConfigManagerContract,
-  poolConfigManagerRoleId,
+  readPoolConfigManagerRolesHeld,
 } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
 import { validateAddressArray } from '../../validate.ts'
@@ -58,16 +58,13 @@ export class GetMultiTokenPoolRoles extends EVMQuery<
   ): Promise<GetMultiTokenPoolRolesResult> {
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
     const pcm = poolConfigManagerContract(chain, address, version)
+    // every account at one block, so the answers are consistent
+    const blockTag = await chain.provider.getBlockNumber()
     return Promise.all(
-      params.accounts.map(async (raw) => {
-        const account = getAddress(raw)
-        const held = await Promise.all(
-          POOL_CONFIG_MANAGER_ROLES.map((role) =>
-            pcm.hasRole(poolConfigManagerRoleId(role), account),
-          ),
-        )
-        return { account, roles: POOL_CONFIG_MANAGER_ROLES.filter((_, i) => held[i]) }
-      }),
+      params.accounts.map(async (raw) => ({
+        account: getAddress(raw),
+        roles: await readPoolConfigManagerRolesHeld(pcm, raw, POOL_CONFIG_MANAGER_ROLES, blockTag),
+      })),
     )
   }
 }
