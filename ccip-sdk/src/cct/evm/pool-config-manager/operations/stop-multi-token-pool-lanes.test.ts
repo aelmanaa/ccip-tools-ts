@@ -84,6 +84,18 @@ describe('lane stops (cct/evm pool-config-manager)', () => {
         { ...base, restore: snapshot('stopMultiTokenPoolLanes', {}) },
         'lanes[0]',
       ],
+      // a prior record of the wrong shape is a CCT refusal, not a TypeError (R3 m1)
+      [
+        new LiftMultiTokenPoolLaneStops(),
+        {
+          ...base,
+          restore: snapshot('stopMultiTokenPoolLanes', {
+            ...covering,
+            [`inline.rateLimit.${T}:${FUJI}`]: 42,
+          }),
+        },
+        `restore.inline.rateLimit.${T}:${FUJI}`,
+      ],
       // the buckets read back out of a snapshot are parsed
       [
         new LiftMultiTokenPoolLaneStops(),

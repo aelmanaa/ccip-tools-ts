@@ -19,6 +19,7 @@ import { reachableRpcEndpoint, rpcEndpoint } from '../../../../../../scripts/tes
 import type { ChainGetter } from '../../../../chain.ts'
 import { forkProvider, withForkRetry } from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
+import { canonicalHash } from '../../../canonical.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../../errors.ts'
 import type { RateLimitConfig } from '../../../rate-limit.ts'
 import { EVMTokenManager } from '../../index.ts'
@@ -430,6 +431,34 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
       (e: unknown) =>
         e instanceof CCTStateChangedError &&
         (e.context.changed as { path: string }[]).some((c) => c.path === 'calldataHash'),
+    )
+  })
+
+  it("refuses a restore from another pool's stop (R3 m1)", async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: INLINE_TOKEN, remoteChainSelector: FUJI }]
+    const built = await stop.generate(chain, {
+      poolAddress: CORE_POOL,
+      lanes,
+      direction: 'outbound',
+    })
+    // the same lanes, sealed by another PCM (rehashed: the hash guards integrity, not origin)
+    const { hash: _, ...fields } = {
+      ...built.snapshot,
+      expected: { ...built.snapshot.expected, 'stop.poolConfigManager': V5V9_POOL },
+    }
+    const foreign = { ...fields, hash: canonicalHash(fields) }
+    await assert.rejects(
+      lift.generate(chain, {
+        poolAddress: CORE_POOL,
+        lanes,
+        direction: 'outbound',
+        restore: foreign,
+      }),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        e.context.param === 'restore' &&
+        /is a stop on PoolConfigManager/.test(e.message),
     )
   })
 })

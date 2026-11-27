@@ -102,6 +102,8 @@ export function stoppedRateLimits(
   return out
 }
 
+/** The snapshot path the stop seals its PoolConfigManager under (a restore must match it). */
+const STOP_PCM_PATH = 'stop.poolConfigManager'
 /** The snapshot path of a lane's inline rate limit record (absent: `null`). */
 const inlinePath = (l: MultiTokenPoolLaneKey) =>
   `inline.rateLimit.${laneKey(l.tokenAddress, l.remoteChainSelector)}`
@@ -187,7 +189,7 @@ export class StopMultiTokenPoolLanes extends LaneStopWriteOperation<StopMultiTok
   protected async encode(
     _chain: EVMChain,
     { lanes, direction }: StopMultiTokenPoolLanesParams,
-    { version, state }: PoolConfigManagerWriteContext,
+    { address, version, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
     const resolved = resolveMultiTokenPoolLanes(state, lanes)
     const set = lanes.map((lane, i) => {
@@ -209,13 +211,17 @@ export class StopMultiTokenPoolLanes extends LaneStopWriteOperation<StopMultiTok
         )
       return { lane, rateLimits: stoppedRateLimits(rateLimits, direction), before: rateLimits }
     })
-    // the record each stop replaces (absent: `null`) and the buckets it copied: what a lift restores
-    const expected = Object.fromEntries(
-      set.flatMap(({ lane, before }) => [
-        [inlinePath(lane), inlineRecordOf(state, 'rateLimit', lane) ?? null],
-        [resolvedPath(lane), before],
-      ]),
-    )
+    // the record each stop replaces (absent: `null`) and the buckets it copied: what a lift restores;
+    // the PCM binds the snapshot to this pool's records (another pool may name the same token)
+    const expected = {
+      [STOP_PCM_PATH]: getAddress(address),
+      ...Object.fromEntries(
+        set.flatMap(({ lane, before }) => [
+          [inlinePath(lane), inlineRecordOf(state, 'rateLimit', lane) ?? null],
+          [resolvedPath(lane), before],
+        ]),
+      ),
+    }
     return { data: this.calldata(version, [], set), expected }
   }
 }
@@ -270,7 +276,12 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
         `lanes[${i}]`,
         'is not in the restore snapshot: lift only the lanes that stop covered, or give rateLimits',
       )
-    const prior = expected[inlinePath(lane)] as { rateLimits?: unknown } | null
+    const prior = expected[inlinePath(lane)]
+    if (prior !== null && (typeof prior !== 'object' || Array.isArray(prior)))
+      throw this.refuse(
+        `restore.${inlinePath(lane)}`,
+        'must be the inline rate limit record the stop replaced, or null',
+      )
     return {
       prior:
         prior === null
@@ -278,7 +289,7 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
           : parseMultiTokenPoolRateLimits(
               this.name,
               `restore.${inlinePath(lane)}`,
-              prior.rateLimits,
+              (prior as { rateLimits?: unknown }).rateLimits,
             ),
       copied: parseMultiTokenPoolRateLimits(
         this.name,
@@ -296,8 +307,14 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
   protected async encode(
     _chain: EVMChain,
     { lanes, direction, restore, rateLimits }: LiftMultiTokenPoolLaneStopsParams,
-    { version, state }: PoolConfigManagerWriteContext,
+    { address, version, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
+    // a restore is this pool's stop: the same token on another pool has other records
+    if (restore && restore.expected[STOP_PCM_PATH] !== getAddress(address))
+      throw this.refuse(
+        'restore',
+        `is a stop on PoolConfigManager ${String(restore.expected[STOP_PCM_PATH])}, not ${getAddress(address)}: pass this pool's stop snapshot`,
+      )
     const remove: MultiTokenPoolLaneKey[] = []
     const set: { lane: MultiTokenPoolLaneKey; rateLimits: MultiTokenPoolRateLimits }[] = []
     lanes.forEach((lane, i) => {
