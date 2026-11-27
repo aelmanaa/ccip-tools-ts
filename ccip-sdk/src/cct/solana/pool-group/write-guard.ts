@@ -24,9 +24,11 @@ import {
 } from '@solana/web3.js'
 import { keccak256 } from 'ethers'
 
+import { CCIPError } from '../../../errors/index.ts'
 import type { SolanaChain } from '../../../solana/index.ts'
 import { deriveTokenPoolChainConfigV2Pda } from '../../../solana/token-pool.ts'
 import { MAX_COMPUTE_UNIT_LIMIT } from '../../../solana/utils.ts'
+import { jsonStringify } from '../../../utils.ts'
 import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
 import {
@@ -36,16 +38,18 @@ import {
 } from '../../multi-token-pool-drops.ts'
 import type {
   MultiTokenPoolInlineRemotePoolDrop,
+  MultiTokenPoolLaneCheckResult,
   MultiTokenPoolLaneFinding,
   MultiTokenPoolSnapshot,
 } from '../../multi-token-pool.ts'
 import { deriveTokenPoolChainConfigPda } from '../programs/token-pool.ts'
 import { parsePublicKey } from '../validate.ts'
-import { poolGroupPdas } from './accounts.ts'
+import { decodePoolGroupIdlAccount, poolGroupPdas } from './accounts.ts'
 import {
   type LaneFailsClosed,
   type PoolGroupLaneState,
   type Unread,
+  decodeLaneChainConfig,
   isUnread,
   laneCcvSync,
   laneFailsClosed,
@@ -54,13 +58,14 @@ import {
   lanePauses,
   laneSectionsFor,
 } from './lane.ts'
+import { checkSolanaMultiTokenPoolLane } from './multi-token-pool-check.ts'
 import { listPoolGroupLaneRequests } from './operations/get-pool-group-lane.ts'
-import { readPoolGroupLaneStates } from './operations/lane.ts'
+import { type PoolGroupPostState, readPoolGroupLaneStates } from './operations/lane.ts'
 import { POOL_GROUPS_PROGRAM_IDL } from './program.ts'
 import { laneRemotePools } from './remote-lane.ts'
-import { rateLimitsOf as sectionRateLimits } from './sections.ts'
+import { rateLimitsOf as sectionRateLimits, sectionValue } from './sections.ts'
 import type { PoolGroupLaneKey } from './types.ts'
-import type { PoolGroupGuardOptions } from './write-types.ts'
+import type { PoolGroupGuardOptions, PoolGroupLiveCheckOptions } from './write-types.ts'
 
 /** The accounts whose state a lane's transfers read: a change to one of them affects lanes. */
 const LANE_ACCOUNTS = ['ChainConfig', 'ChainConfigV2', 'GroupChainPolicy', 'PolicyChainRecord'].map(
@@ -125,6 +130,95 @@ function viewOf(state: PoolGroupLaneState | null | Unread): LaneView | null | Un
   }
 }
 
+/** The directions a lane view is open in. */
+const openOf = (v: LaneView): ('outbound' | 'inbound')[] => [
+  ...(v.outbound ? (['outbound'] as const) : []),
+  ...(v.inbound ? (['inbound'] as const) : []),
+]
+
+/**
+ * The lane's effective configuration of one class, as a stable hash: the record section it resolves
+ * (decoded), or its own inline fields; `'unread'` when the record cannot be read.
+ */
+function classFingerprint(state: PoolGroupLaneState, cls: 'connection' | 'fee'): string {
+  const sections = laneSectionsFor(state, cls)
+  if (isUnread(sections)) return 'unread'
+  if (sections) return canonicalHash({ [cls]: sectionValue(sections, cls, state.selector) })
+  if (cls === 'fee') return 'inline'
+  const { remote } = state.chainConfig.base
+  return canonicalHash({
+    token: Buffer.from(remote.tokenAddress.address).toString('hex'),
+    decimals: remote.decimals,
+    pools: remote.poolAddresses.map((p) => Buffer.from(p.address).toString('hex')),
+    format: state.ext?.poolDataFormat ?? 'legacy',
+    uid: state.ext?.uid ?? null,
+  })
+}
+
+/** Where a lane takes SECURITY from (kind, and the named record). */
+function securitySource(state: PoolGroupLaneState): string {
+  const source = state.ext?.poolGroupAddress ? state.ext.classSource.security : undefined
+  if (!source || source.kind !== 'policy') return source?.kind ?? 'inline'
+  return `policy:${state.named.get(source.slot)?.address.toBase58() ?? source.slot}`
+}
+
+/** The CCV lists a lane applies (its body copy and a pending copy). */
+const effectiveCcvs = (state: PoolGroupLaneState) => ({
+  current: state.v2?.lane.ccvs ?? null,
+  pending: state.ext?.ccvPending ?? null,
+})
+
+/**
+ * The remote chain of a changed group or named record: `undefined` when the account is not one,
+ * `null` when it is one whose chain cannot be decoded.
+ */
+function recordSelector(
+  program: PublicKey,
+  account: AccountInfo<Buffer>,
+): bigint | null | undefined {
+  if (!account.owner.equals(program)) return
+  const disc = account.data.subarray(0, 8)
+  const name = disc.equals(LANE_ACCOUNTS[2]!)
+    ? 'groupChainPolicy'
+    : disc.equals(LANE_ACCOUNTS[3]!)
+      ? 'policyChainRecord'
+      : undefined
+  if (!name) return
+  try {
+    return BigInt(
+      decodePoolGroupIdlAccount(
+        name,
+        account.data,
+        'a changed record',
+      ).remoteChainSelector.toString(),
+    )
+  } catch {
+    // a record that does not decode names no chain
+    return null
+  }
+}
+
+/**
+ * A lane account's configuration hash: a `ChainConfig` without its bucket state (`tokens`,
+ * `lastUpdated`), which transfers rewrite; any other account (or one that does not decode) by its
+ * bytes.
+ */
+function laneAccountConfigHash(account: AccountInfo<Buffer>, address: PublicKey): string {
+  if (!account.data.subarray(0, 8).equals(LANE_ACCOUNTS[0]!)) return keccak256(account.data)
+  const base = decodeLaneChainConfig(account.data, address)
+  if (isUnread(base)) return keccak256(account.data)
+  const strip = (b: { cfg: unknown }) => ({ cfg: b.cfg })
+  return canonicalHash({
+    base: {
+      ...base,
+      inboundRateLimit: strip(base.inboundRateLimit),
+      outboundRateLimit: strip(base.outboundRateLimit),
+    },
+    length: account.data.length,
+    tail: keccak256(account.data.subarray(Math.max(0, account.data.length - 8))),
+  })
+}
+
 /** Input of {@link judgePoolGroupWrite}. @internal */
 export type JudgePoolGroupWriteInput = PoolGroupGuardOptions & {
   /** The op, for errors. */
@@ -144,10 +238,17 @@ export type JudgePoolGroupWriteInput = PoolGroupGuardOptions & {
   /** Severity of a lane the write leaves failing closed; defaults to `'error'` (refused). */
   failsClosedSeverity?: 'error' | 'warning'
   /**
-   * Lanes the write makes live: refused by default (`'error'`), or only reported in `goingLive`
-   * (`'warning'`, an ownership accept, which must never be blocked).
+   * Lanes the write makes live: by default (`'error'`) each runs the lane check as the write leaves
+   * it and an error finding refuses the write; `'warning'` only reports them in `goingLive` (an
+   * ownership accept, which must never be blocked).
    */
   goingLiveSeverity?: 'error' | 'warning'
+  /** The lane check's remote reader and concurrency. */
+  liveCheck?: PoolGroupLiveCheckOptions
+  /** The lane check (tests inject one). */
+  checkLane?: (
+    ...args: Parameters<typeof checkSolanaMultiTokenPoolLane>
+  ) => Promise<Pick<MultiTokenPoolLaneCheckResult, 'findings'>>
   /** Report error findings instead of refusing (the snapshot check). */
   reportFindings?: boolean
   /**
@@ -276,17 +377,109 @@ function laneAddresses(
 }
 
 /**
+ * A lane the lane check judges as the write leaves it, with the directions open after it:
+ * `'live'` (the write makes it live: any error refuses) or `'changed'` (live before and after, with
+ * its effective CONNECTION or FEE changed: only errors the lane did not have before refuse, A23).
+ */
+type CheckedLane = {
+  key: PoolGroupLaneKey
+  mint: PublicKey
+  selector: bigint
+  open: ('outbound' | 'inbound')[]
+  mode: 'live' | 'changed'
+}
+
+/** Findings that a fact could not be read: never waived as an error the lane already had. */
+const UNREAD_CHECKS: readonly MultiTokenPoolLaneFinding['check'][] = [
+  'REMOTE_UNREADABLE',
+  'LANE_UNREADABLE',
+]
+
+/** Lane checks in flight at once, by default (as the shared planners' `concurrency`). */
+const LIVE_CHECK_CONCURRENCY = 4
+
+/**
+ * The lane check after a write (the make-live check, and A23): `checkMultiTokenPoolLane` on each
+ * lane as the write leaves it (`post`), with the directions open after it as `expectOpen`,
+ * `getChain` and no attestations, at most `concurrency` at a time. A `'changed'` lane is checked
+ * before the write too, and only its new errors stay errors. A lane the check cannot read (a non-transient SDK
+ * error) fails closed as `LANE_UNREADABLE`; transport errors propagate.
+ */
+async function checkLanesAfter(
+  input: JudgePoolGroupWriteInput,
+  lanes: readonly CheckedLane[],
+  post: PoolGroupPostState,
+): Promise<MultiTokenPoolLaneFinding[]> {
+  const { operation, chain, program } = input
+  const getChain = input.liveCheck?.getChain
+  const concurrency = input.liveCheck?.concurrency ?? LIVE_CHECK_CONCURRENCY
+  const check = input.checkLane ?? checkSolanaMultiTokenPoolLane
+  const findings: MultiTokenPoolLaneFinding[] = []
+  for (let i = 0; i < lanes.length; i += concurrency) {
+    const chunk = lanes.slice(i, i + concurrency)
+    const results = await Promise.all(
+      chunk.map(async ({ key, mint, selector, open, mode }) => {
+        const params = {
+          ...key,
+          poolAddress: program.toBase58(),
+          expectOpen: open,
+          ...(getChain && { getChain }),
+        }
+        try {
+          const { findings: found } = await check(
+            operation,
+            chain,
+            params,
+            { program, mint, selector },
+            post,
+          )
+          if (mode === 'live' || !found.some((f) => f.severity === 'error')) return found
+          // a lane live before and after: only the errors the write brings refuse (A23)
+          const had = new Set(
+            (await check(operation, chain, params, { program, mint, selector })).findings
+              .filter((f) => f.severity === 'error')
+              .map((f) => f.check),
+          )
+          // a fact that cannot be read is never "the same as before": it fails closed
+          return found.map((f) =>
+            f.severity === 'error' && had.has(f.check) && !UNREAD_CHECKS.includes(f.check)
+              ? {
+                  ...f,
+                  severity: 'warning' as const,
+                  reason: `${f.reason} (already so before the write)`,
+                }
+              : f,
+          )
+        } catch (err) {
+          if (!(err instanceof CCIPError) || err.isTransient) throw err
+          return [
+            {
+              check: 'LANE_UNREADABLE' as const,
+              severity: 'error' as const,
+              ...key,
+              reason: `the lane could not be checked as the write leaves it (${err.message}): the write is refused`,
+            },
+          ]
+        }
+      }),
+    )
+    findings.push(...results.flat())
+  }
+  return findings
+}
+
+/**
  * Runs the post-state guard of one pool-group write: simulates it, reads back the accounts it
  * writes, and judges every lane whose state one of them carries (its `ChainConfig`, `ChainConfigV2`,
  * group chain record or named policy records): A21 dropped trusted remote pools (refused unless in
- * `confirmDropped`), lanes going live (refused unless `goingLiveSeverity: 'warning'`: no S3 write
- * checks lanes it opens), lanes left failing closed now or from a later time (refused, or a warning
+ * `confirmDropped`), lanes going live (the make-live check: the lane check on each as the write
+ * leaves it, whose error findings refuse; only reported with `goingLiveSeverity: 'warning'`), lanes left failing closed now or from a later time (refused, or a warning
  * with `failsClosedSeverity: 'warning'`), and affected lanes that cannot be read
  * (`LANE_UNREADABLE` at the same severity: never passed silently; an accept warns and lists them). Lanes are listed only when
  * the write changes a lane account; that listing needs `getProgramAccounts` and fails closed
  * without it. Fails closed compares the program error, not its text.
  * @throws {@link CCTParamsInvalidError} if the simulation refuses the write, a drop is unconfirmed,
- *   a lane would go live, or an error finding remains (unless `reportFindings`)
+ *   a lane it makes live fails the lane check, or an error finding remains (unless `reportFindings`)
  * @internal
  */
 export async function judgePoolGroupWrite(
@@ -310,10 +503,42 @@ export async function judgePoolGroupWrite(
     if (!same && (isLaneAccount(program, b) || isLaneAccount(program, a)))
       changed.set(key.toBase58(), a ?? null)
   })
+  // a lane's ChainConfig carries its bucket state, which every transfer rewrites: the snapshot
+  // keeps its configuration only, so a transfer never marks a proposal changed (A23)
   const changedInputs = [...changed.keys()].sort().map((k) => {
     const b = before[writable.findIndex((w) => w.toBase58() === k)]
-    return [k, b ? keccak256(b.data) : null]
+    return [k, b ? laneAccountConfigHash(b, new PublicKey(k)) : null]
   })
+  if (input.scope === 'none') {
+    // a write judged as touching no lane only creates or closes lane accounts, never edits one
+    // a closed account reads back without lamports (or no longer the program's)
+    const edited = writable.find(
+      (k, i) =>
+        changed.has(k.toBase58()) &&
+        isLaneAccount(program, before[i]) &&
+        isLaneAccount(program, after[i]) &&
+        after[i]!.lamports > 0,
+    )
+    if (edited)
+      throw new CCTParamsInvalidError(
+        operation,
+        'guards',
+        `the write edits the lane account ${edited.toBase58()} in place, which a write that no lane reads must not: report this as an SDK bug`,
+      )
+  }
+  // the chains of the changed group and named records: a lane on one that cannot be read is
+  // touched (its named records are unknown), so it is judged failing closed, never skipped (A23)
+  const changedSelectors = new Set<bigint>()
+  // a changed record whose chain cannot be decoded may be any unreadable lane's
+  let changedRecordUnknown = false
+  for (const [k, a] of changed) {
+    const b = before[writable.findIndex((w) => w.toBase58() === k)]
+    for (const acc of [b, a]) {
+      const sel = acc ? recordSelector(program, acc) : undefined
+      if (sel === null) changedRecordUnknown = true
+      else if (sel !== undefined) changedSelectors.add(sel)
+    }
+  }
   if (!changed.size || input.scope === 'none')
     return {
       affectedLanes: [],
@@ -347,12 +572,17 @@ export async function judgePoolGroupWrite(
     const sections = laneSectionsFor(s, 'rateLimit')
     return sections && !isUnread(sections) ? sectionRateLimits(sections) : null
   }
+  // a RATE_LIMIT section that cannot be read after the write is judged, never taken as a clamp
+  const rateLimitUnread = (s: PoolGroupLaneState | null | Unread) =>
+    !!s && !isUnread(s) && isUnread(laneSectionsFor(s, 'rateLimit'))
   const findings: MultiTokenPoolLaneFinding[] = []
   const affectedLanes: PoolGroupLaneKey[] = []
   const goingLive: PoolGroupLaneKey[] = []
   const failingClosed: PoolGroupJudgement['failingClosed'] = []
   const unreadable: PoolGroupLaneKey[] = []
   const dropped: MultiTokenPoolInlineRemotePoolDrop[] = []
+  const checkedLanes: CheckedLane[] = []
+  const ccvChanges: { lane: PoolGroupLaneKey; before: unknown; after: unknown }[] = []
   const inputs: unknown[] = []
   const nothing: LaneView = { pools: [], outbound: false, inbound: false }
   requests.forEach(({ mint, selector }, i) => {
@@ -361,13 +591,18 @@ export async function judgePoolGroupWrite(
     const s1 = statesAfter[i] ?? null
     // a listed lane is linked to this group: its PDAs and chain record are known even when its
     // state cannot be read, so an unreadable lane is never skipped (it fails closed below)
-    const touches = laneAddresses(program, group, mint, selector, [s0, s1]).some((a) =>
-      changed.has(a),
-    )
+    const touches =
+      laneAddresses(program, group, mint, selector, [s0, s1]).some((a) => changed.has(a)) ||
+      (isUnread(s1) && (changedRecordUnknown || changedSelectors.has(selector)))
     if (!touches) return
     affectedLanes.push(key)
     // a RATE_LIMIT write judges only the lanes it loosens: a clamp always builds
-    if (loosens && !isUnread(s1) && !loosens(rateLimitsOf(s0), rateLimitsOf(s1))) {
+    if (
+      loosens &&
+      !isUnread(s1) &&
+      !rateLimitUnread(s1) &&
+      !loosens(rateLimitsOf(s0), rateLimitsOf(s1))
+    ) {
       inputs.push({ lane: laneKey(key), clamped: true })
       return
     }
@@ -389,8 +624,34 @@ export async function judgePoolGroupWrite(
     // a lane unreadable before the write is judged as nothing trusted and nothing live
     const before0 = v0 && !isUnread(v0) ? v0 : nothing
     const after1 = v1 ?? nothing
-    if ((after1.outbound && !before0.outbound) || (after1.inbound && !before0.inbound))
+    if ((after1.outbound && !before0.outbound) || (after1.inbound && !before0.inbound)) {
       goingLive.push(key)
+      checkedLanes.push({ key, mint, selector, open: openOf(after1), mode: 'live' })
+    } else if (
+      (after1.outbound || after1.inbound) &&
+      s0 &&
+      !isUnread(s0) &&
+      s1 &&
+      !isUnread(s1) &&
+      (classFingerprint(s0, 'connection') !== classFingerprint(s1, 'connection') ||
+        classFingerprint(s0, 'fee') !== classFingerprint(s1, 'fee'))
+    )
+      checkedLanes.push({ key, mint, selector, open: openOf(after1), mode: 'changed' })
+    // a SECURITY source change swaps the lane's CCVs at once (no notice): refused on a lane live
+    // before and after unless its effective CCVs are unchanged or the caller confirms it (A23)
+    if (
+      s0 &&
+      !isUnread(s0) &&
+      s1 &&
+      !isUnread(s1) &&
+      (before0.outbound || before0.inbound) &&
+      (after1.outbound || after1.inbound) &&
+      securitySource(s0) !== securitySource(s1)
+    ) {
+      const ccvs = { before: effectiveCcvs(s0), after: effectiveCcvs(s1) }
+      if (canonicalHash(ccvs.before) !== canonicalHash(ccvs.after))
+        ccvChanges.push({ lane: key, ...ccvs })
+    }
     dropped.push(...droppedRemotePools([{ lane: key, before: before0.pools, after: after1.pools }]))
     const fails = v1?.failsClosed
     if (fails && fails.code !== before0.failsClosed?.code) {
@@ -422,17 +683,48 @@ export async function judgePoolGroupWrite(
   })
 
   assertDropsConfirmed(operation, dropped, input.confirmDropped ?? [])
-  if (goingLive.length) {
-    const message = `the write makes ${goingLive.length} lane(s) live (${goingLive.map(laneKey).join(', ')}), which this op does not check`
-    if ((input.goingLiveSeverity ?? 'error') === 'error')
+  const confirmedCcvs = new Set((input.confirmCCVChanges ?? []).map(laneKey))
+  const unconfirmedCcvs = ccvChanges.filter((c) => !confirmedCcvs.has(laneKey(c.lane)))
+  if (unconfirmedCcvs.length)
+    throw new CCTParamsInvalidError(
+      operation,
+      'confirmCCVChanges',
+      `the write changes the SECURITY source of ${unconfirmedCcvs.length} live lane(s) (${unconfirmedCcvs.map((c) => laneKey(c.lane)).join(', ')}), which swaps their CCVs at once, without the notice a schedule gives: in-flight messages may need verifiers that never attested them. Pause the lanes first, or list them in confirmCCVChanges`,
+      { context: { ccvChanges: unconfirmedCcvs } },
+    )
+  for (const c of ccvChanges)
+    chain.logger.warn(
+      `${operation}: the CCVs of ${laneKey(c.lane)} change at once (confirmed): ${jsonStringify(c.before)} → ${jsonStringify(c.after)}`,
+    )
+  if (ccvChanges.length) inputs.push({ ccvChanges })
+  const lanesToCheck =
+    (input.goingLiveSeverity ?? 'error') === 'error'
+      ? checkedLanes
+      : checkedLanes.filter((l) => l.mode === 'changed')
+  if (lanesToCheck.length) {
+    const checked = await checkLanesAfter(input, lanesToCheck, {
+      overlay: changed,
+      instructions: input.instructions,
+      payer: input.payer,
+      ...(input.lookupTables && { lookupTables: input.lookupTables }),
+    })
+    findings.push(...checked)
+    inputs.push({ live: checked.map((f) => [laneKey(f), f.check, f.severity]) })
+    const failing = checked.filter((f) => f.severity === 'error')
+    if (failing.length && !input.reportFindings)
       throw new CCTParamsInvalidError(
         operation,
         'guards',
-        `${message}: make lanes live with the pause ops, which run the lane check`,
-        { context: { goingLive } },
+        `the lane check fails on ${failing.length} problem(s) as the write leaves the lanes it makes live or whose CONNECTION or FEE it changes: ${failing
+          .map((f) => `${f.check} on ${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
+          .join('; ')}`,
+        { context: { goingLive, findings: failing } },
       )
-    chain.logger.warn(`${operation}: ${message}; check them with checkMultiTokenPoolLane`)
   }
+  if (goingLive.length && (input.goingLiveSeverity ?? 'error') === 'warning')
+    chain.logger.warn(
+      `${operation}: the write makes ${goingLive.length} lane(s) live (${goingLive.map(laneKey).join(', ')}); check them with checkMultiTokenPoolLane`,
+    )
   const errors = findings.filter((f) => f.severity === 'error')
   if (errors.length && !input.reportFindings)
     throw new CCTParamsInvalidError(
@@ -455,22 +747,52 @@ export async function judgePoolGroupWrite(
 }
 
 /**
- * The guard options in a stable shape (defaults dropped, lanes and pools sorted, mints canonical),
+ * The guard options in a stable shape (defaults dropped, lanes and pools sorted, mints canonical,
+ * lanes each once),
  * sealed into the snapshot so a re-check judges with the same confirmations.
- * @throws {@link CCTParamsInvalidError} if `confirmDropped` is malformed
+ * @throws {@link CCTParamsInvalidError} if `confirmDropped` or `confirmCCVChanges` is malformed
  * @internal
  */
 export function poolGroupGuardOptionsOf(
   operation: string,
   o: PoolGroupGuardOptions,
 ): PoolGroupGuardOptions {
-  if (o.confirmDropped === undefined) return {}
-  if (!Array.isArray(o.confirmDropped))
-    throw new CCTParamsInvalidError(operation, 'confirmDropped', 'must be an array')
-  const confirmDropped = sealConfirmDropped(operation, o.confirmDropped, (t, param) =>
-    parsePublicKey(operation, param, t).toBase58(),
-  )
-  return confirmDropped ? { confirmDropped } : {}
+  const out: PoolGroupGuardOptions = {}
+  if (o.confirmDropped !== undefined) {
+    if (!Array.isArray(o.confirmDropped))
+      throw new CCTParamsInvalidError(operation, 'confirmDropped', 'must be an array')
+    const confirmDropped = sealConfirmDropped(operation, o.confirmDropped, (t, param) =>
+      parsePublicKey(operation, param, t).toBase58(),
+    )
+    if (confirmDropped) out.confirmDropped = confirmDropped
+  }
+  if (o.confirmCCVChanges !== undefined) {
+    if (!Array.isArray(o.confirmCCVChanges))
+      throw new CCTParamsInvalidError(operation, 'confirmCCVChanges', 'must be an array')
+    const lanes = o.confirmCCVChanges.map((l, i) => {
+      const param = `confirmCCVChanges[${i}]`
+      const selector: unknown = Reflect.get(Object(l), 'remoteChainSelector')
+      if (typeof selector !== 'bigint' || selector < 0n)
+        throw new CCTParamsInvalidError(
+          operation,
+          `${param}.remoteChainSelector`,
+          'must be a bigint selector',
+        )
+      return {
+        tokenAddress: parsePublicKey(
+          operation,
+          `${param}.tokenAddress`,
+          Reflect.get(Object(l), 'tokenAddress'),
+        ).toBase58(),
+        remoteChainSelector: selector,
+      }
+    })
+    const unique = [...new Map(lanes.map((l) => [laneKey(l), l])).values()].sort((a, b) =>
+      laneKey(a).localeCompare(laneKey(b)),
+    )
+    if (unique.length) out.confirmCCVChanges = unique
+  }
+  return out
 }
 
 /**

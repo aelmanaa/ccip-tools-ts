@@ -17,16 +17,18 @@ import type { SolanaChain } from '../../../../solana/index.ts'
 import { getMultipleAccountsInfoPaged } from '../../../../solana/utils.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import type { SolanaGenerateParams } from '../../operation.ts'
-import { poolGroupPdas } from '../accounts.ts'
+import { MAX_POOL_GROUP_CHAINS, poolGroupPdas } from '../accounts.ts'
 import { decodeClassBits, toBigInt } from '../decode.ts'
 import { createPoolGroupProgram } from '../program.ts'
 import {
   type SectionWrite,
+  assertDefaultPoolsFit,
   classBit,
   exactSection,
   parseSectionUpdate,
   sectionArg,
   sectionClass,
+  sectionJudge,
   sectionValue,
 } from '../sections.ts'
 import { type PoolGroupPolicyClass, POOL_GROUP_POLICY_CLASSES } from '../types.ts'
@@ -55,15 +57,6 @@ import {
   requirePolicyManager,
   signerRole,
 } from './write-common.ts'
-
-/** `MAX_GROUP_CHAINS` (base-token-pool `groups.rs:40`). */
-const MAX_POOL_GROUP_CHAINS = 24
-
-/** The judge of a section write: RATE_LIMIT judges only the lanes it loosens. */
-const sectionJudge = (write: SectionWrite) =>
-  sectionClass(write) === 'rateLimit'
-    ? ({ scope: 'loosened', failsClosedSeverity: 'error' } as const)
-    : ({ failsClosedSeverity: 'error' } as const)
 
 /** A proposal's chain selector (`params.remoteChainSelector`). */
 const selectorOf = (data: unknown) => bigField(field(data, 'params', 'remoteChainSelector')) ?? 0n
@@ -551,6 +544,7 @@ export class SetPoolGroupDefault extends PoolGroupWriteOperation<
           0
       )
     })
+    assertDefaultPoolsFit(this.name, section, following)
     const ix = await createPoolGroupProgram(chain, ref.program, parsed.payer)
       .methods.setGroupDefault({
         section: sectionArg(this.name, section, group.defaultPolicy, group.maxBpsFee),

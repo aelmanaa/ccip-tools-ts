@@ -12,11 +12,13 @@ import bs58 from 'bs58'
 
 import '../../../index.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
+import type { MultiTokenPoolLaneFinding } from '../../multi-token-pool.ts'
 import { LANE_LINKED_MARKER } from './accounts.ts'
 import {
   type Accounts,
   type Tail,
   CCV,
+  CC_ADDR,
   EVM_POOL,
   GCP,
   GROUP,
@@ -27,6 +29,7 @@ import {
   PROGRAM,
   RECORD,
   SEPOLIA,
+  V2_ADDR as V2,
   account,
   chainConfigData,
   chainConfigV2Data,
@@ -37,6 +40,33 @@ import {
   policyChainData,
 } from './fixtures.test.helpers.ts'
 import { judgePoolGroupWrite } from './write-guard.ts'
+
+/** A lane check that answers `findings` after the write and `before` without a post-state. */
+function checker(
+  findings: MultiTokenPoolLaneFinding['check'][] = [],
+  before: MultiTokenPoolLaneFinding['check'][] = [],
+) {
+  const calls: { post: boolean; expectOpen: unknown }[] = []
+  const of = (codes: MultiTokenPoolLaneFinding['check'][]) =>
+    codes.map((check) => ({
+      check,
+      severity: 'error' as const,
+      tokenAddress: MINT.toBase58(),
+      remoteChainSelector: SEPOLIA,
+      reason: `${check} found`,
+    }))
+  return {
+    calls,
+    checkLane: async (
+      ...[, , params, , post]: Parameters<
+        NonNullable<Parameters<typeof judgePoolGroupWrite>[0]['checkLane']>
+      >
+    ) => {
+      calls.push({ post: !!post, expectOpen: params.expectOpen })
+      return { findings: of(post ? findings : before) }
+    },
+  }
+}
 
 const PAYER = Keypair.generate().publicKey
 const POLICY_ACCOUNT = account(
@@ -183,25 +213,155 @@ describe('judgePoolGroupWrite', () => {
     )
   })
 
-  it("scope 'none' lists no lanes", async () => {
+  it("scope 'none' lists no lanes for a created record, and refuses an edit in place", async () => {
     const before = feeLane(1_000)
-    const r = await judge(chainFor(before, new Map([[GCP, groupChainData({ maxBpsFee: 100 })]])), {
+    const created = Keypair.generate().publicKey
+    const r = await judge(chainFor(before, new Map([[created, policyChainData(2, 0)]])), {
       scope: 'none',
+      instructions: [writeOf(created)],
     })
     assert.deepEqual(r.affectedLanes, [])
+    await assert.rejects(
+      judge(chainFor(before, new Map([[GCP, groupChainData({ maxBpsFee: 100 })]])), {
+        scope: 'none',
+      }),
+      /edits the lane account/,
+    )
   })
 
-  it('a write that makes a lane live is refused, naming the lanes; reported with goingLiveSeverity warning', async () => {
+  it('a write that makes a lane live runs the lane check on the post-state; its errors refuse', async () => {
     const before = linked({ sources: [0, 0, 0, 0] }, groupChainData({ groupPaused: true }))
     const after = new Map([[GCP, groupChainData()]])
-    await assert.rejects(judge(chainFor(before, after)), (e: unknown) => {
+    const failing = checker(['POOL_DATA_FORMAT_MISMATCH'])
+    await assert.rejects(judge(chainFor(before, after), failing), (e: unknown) => {
       assert.ok(e instanceof CCTParamsInvalidError)
       assert.deepEqual(e.context.goingLive, [laneKey])
-      assert.match(e.message, /makes 1 lane\(s\) live/)
+      assert.match(e.message, /POOL_DATA_FORMAT_MISMATCH/)
       return true
     })
-    const r = await judge(chainFor(before, after), { goingLiveSeverity: 'warning' })
+    // one call, after the write, with both directions expected open
+    assert.deepEqual(failing.calls, [{ post: true, expectOpen: ['outbound', 'inbound'] }])
+    const clean = checker()
+    const r = await judge(chainFor(before, after), clean)
     assert.deepEqual(r.goingLive, [laneKey])
+    // a lane that already failed the rule before the write still refuses when it goes live
+    await assert.rejects(
+      judge(chainFor(before, after), checker(['NO_REMOTE_POOL'], ['NO_REMOTE_POOL'])),
+      /NO_REMOTE_POOL/,
+    )
+    // an accept only reports
+    const accept = checker(['NO_REMOTE_POOL'])
+    const w = await judge(chainFor(before, after), { goingLiveSeverity: 'warning', ...accept })
+    assert.deepEqual(w.goingLive, [laneKey])
+    assert.deepEqual(accept.calls, [])
+  })
+
+  it('A23: a CONNECTION change on a lane live before and after runs the lane check; new errors refuse', async () => {
+    // CONNECTION from the group default: a format flip to long on the shared record
+    const before = linked({ sources: [1, 0, 0, 0] }, groupChainData())
+    const after = new Map([[GCP, groupChainData({ format: 1 })]])
+    // the flip also drops the legacy allowance on the record's pool: confirmed here
+    const confirmDropped: unknown = await judge(chainFor(before, after), checker()).catch(
+      (e: unknown) => (e instanceof CCTParamsInvalidError ? e.context.dropped : undefined),
+    )
+    assert.ok(Array.isArray(confirmDropped))
+    const opts = { confirmDropped }
+    await assert.rejects(
+      judge(chainFor(before, after), { ...opts, ...checker(['POOL_DATA_FORMAT_MISMATCH']) }),
+      /POOL_DATA_FORMAT_MISMATCH/,
+    )
+    // an error the lane already had is reported, not refused
+    const had = checker(['REMOTE_LANE_MISMATCH'], ['REMOTE_LANE_MISMATCH'])
+    const r = await judge(chainFor(before, after), { ...opts, ...had })
+    assert.deepEqual(
+      r.findings.map((f) => [f.check, f.severity]),
+      [['REMOTE_LANE_MISMATCH', 'warning']],
+    )
+    assert.deepEqual(
+      had.calls.map((c) => c.post),
+      [true, false],
+    )
+    // an unreadable remote is never waived, even when it was unreadable before too
+    await assert.rejects(
+      judge(chainFor(before, after), {
+        ...opts,
+        ...checker(['REMOTE_UNREADABLE'], ['REMOTE_UNREADABLE']),
+      }),
+      /REMOTE_UNREADABLE/,
+    )
+    // a write that leaves CONNECTION and FEE as they are runs no check
+    const none = checker(['POOL_DATA_FORMAT_MISMATCH'])
+    await judge(chainFor(before, new Map([[GCP, groupChainData({ maxBpsFee: 900 })]])), none)
+    assert.deepEqual(none.calls, [])
+  })
+
+  it('A23: an unreadable lane is touched when a named record on its chain changes', async () => {
+    const broken = Buffer.concat([policyChainData(2, 0).subarray(0, 8), Buffer.alloc(3)])
+    const before = linked({ sources: [0, 2, 0, 0] }, groupChainData(), broken)
+    // another policy's record on the same chain changes; the lane's own record cannot be read
+    const other = Keypair.generate().publicKey
+    before.set(other.toBase58(), { data: policyChainData(2, 0), owner: PROGRAM })
+    const after = new Map([[other, policyChainData(2, 1)]])
+    await assert.rejects(
+      judge(chainFor(before, after), { instructions: [writeOf(other)] }),
+      refusedWith('LANE_UNREADABLE'),
+    )
+  })
+
+  it('A23: a SECURITY source change on a live lane is refused unless the CCVs stay or it is confirmed', async () => {
+    const pending = { outbound: [CCV], inbound: [], epoch: 2n, activatesAt: NOW + 3_600n }
+    const before = linked({ sources: [0, 0, 0, 0] }, groupChainData())
+    // the write moves SECURITY to the group default, and the lane's CCV copy changes
+    const after = new Map([
+      [
+        V2,
+        chainConfigV2Data({
+          group: GROUP,
+          slots: [POLICY],
+          sources: [0, 0, 0, 1],
+          ccvPending: pending,
+        }),
+      ],
+    ])
+    const ix = [writeOf(V2)]
+    await assert.rejects(judge(chainFor(before, after), { instructions: ix }), (e: unknown) => {
+      assert.ok(e instanceof CCTParamsInvalidError)
+      assert.equal(e.context.param, 'confirmCCVChanges')
+      return true
+    })
+    const r = await judge(chainFor(before, after), {
+      instructions: ix,
+      confirmCCVChanges: [laneKey],
+      failsClosedSeverity: 'warning',
+    })
+    assert.deepEqual(r.affectedLanes, [laneKey])
+    // the same lists under the new source: nothing to confirm
+    const same = new Map([
+      [V2, chainConfigV2Data({ group: GROUP, slots: [POLICY], sources: [0, 0, 0, 1] })],
+    ])
+    await judge(chainFor(before, same), { instructions: ix, failsClosedSeverity: 'warning' })
+  })
+
+  it('A23: the snapshot hashes a ChainConfig without its bucket state', async () => {
+    const at = (tokens: number) =>
+      linked({ sources: [0, 0, 0, 0] }, groupChainData()).set(CC_ADDR.toBase58(), {
+        data: chainConfigData(LANE_LINKED_MARKER, undefined, undefined, {
+          tokens,
+          lastUpdated: tokens,
+        }),
+        owner: PROGRAM,
+      })
+    const write = new Map([
+      [CC_ADDR, chainConfigData(LANE_LINKED_MARKER, [], undefined, { tokens: 1, lastUpdated: 1 })],
+    ])
+    const ix = {
+      instructions: [writeOf(CC_ADDR)],
+      ...checker(),
+      confirmDropped: [{ lane: laneKey, remotePools: [EVM_POOL] }],
+    }
+    const a = await judge(chainFor(at(10), write), ix)
+    const b = await judge(chainFor(at(20), write), ix)
+    assert.equal(a.guardInputsHash, b.guardInputsHash)
   })
 
   it('a lane unreadable before and after is never skipped: LANE_UNREADABLE fails closed', async () => {
@@ -266,6 +426,7 @@ describe('judgePoolGroupWrite', () => {
     })
     const r = await judge(chainFor(before, after), {
       confirmDropped: [{ lane: laneKey, remotePools: [POLICY_POOL] }],
+      ...checker(),
     })
     assert.deepEqual(r.affectedLanes, [laneKey])
     // the lane's own pool stays trusted: inbound is still live, nothing goes live

@@ -511,14 +511,38 @@ export async function firstTransactionItemCount(input: PackPoolGroupInput): Prom
 }
 
 /**
- * Whether all of `input.items` fit one transaction by bytes, locks, trace and heap (no
- * simulation): for sizing a batched instruction before it becomes an item.
+ * One-transaction checks for sizing batched instructions, with the limits resolved once (S3b m7):
+ * `fits` by bytes, locks, trace and heap (no simulation); `tooHeavy` simulates the items as one
+ * transaction and answers whether compute, heap or the instruction trace runs out (S3b M6).
  * @throws {@link CCTParamsInvalidError} if a limit is invalid
  * @internal
  */
-export async function fitsOneTransaction(input: PackPoolGroupInput): Promise<boolean> {
+export async function oneTransactionChecks(input: PackPoolGroupInput): Promise<{
+  fits: (items: PoolGroupPackItem[]) => Promise<boolean>
+  tooHeavy: (items: PoolGroupPackItem[]) => Promise<boolean>
+}> {
   const limits = await resolveLimits(input)
-  return !misfit(input, limits, input.items, await prefundedPdas(input))
+  return {
+    fits: async (items) =>
+      !misfit({ ...input, items }, limits, items, await prefundedPdas({ ...input, items })),
+    tooHeavy: async (items) => {
+      try {
+        await simulateTransaction(input.chain, {
+          payerKey: input.payer,
+          instructions: [
+            ...prefix(limits, MAX_COMPUTE_UNIT_LIMIT, 0, input.durableNonces?.[0]),
+            ...items.flatMap((i) => i.instructions),
+          ],
+          addressLookupTableAccounts: limits.tables,
+          allowV1: false,
+        })
+        return false
+      } catch (err) {
+        if (!isBatchTooHeavy(err)) throw err
+        return true
+      }
+    },
+  }
 }
 
 /**

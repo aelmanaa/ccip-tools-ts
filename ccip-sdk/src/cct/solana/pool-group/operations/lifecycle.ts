@@ -34,7 +34,7 @@ import {
   validateInteger,
   validateUniqueChainSelectors,
 } from '../../validate.ts'
-import { poolGroupPdas, poolGroupsCoder } from '../accounts.ts'
+import { MAX_POOL_GROUP_CHAINS, poolGroupPdas, poolGroupsCoder } from '../accounts.ts'
 import { decodeRoles, keyOrNull, toBigInt } from '../decode.ts'
 import { clockUnixTimestamp } from '../lane.ts'
 import { type PoolGroupPackItem, firstTransactionItemCount } from '../packer.ts'
@@ -92,8 +92,6 @@ const SET_GROUP_SETTINGS = Buffer.from(
   }),
 ).subarray(0, 8)
 
-/** `MAX_GROUP_CHAINS` (base-token-pool `groups.rs:40`). */
-const MAX_POOL_GROUP_CHAINS = 24
 /** `MAX_TOKEN_TRANSFER_FEE_BPS`. */
 const MAX_FEE_BPS = 10_000
 /** `DEFAULT_GROUP_MAX_BPS_FEE` (`groups.rs:37`). */

@@ -7,7 +7,7 @@
 
 import type { AddressLookupTableAccount, TransactionInstruction } from '@solana/web3.js'
 
-import type { TokenTransferFeeConfig } from '../../../chain.ts'
+import type { ChainGetter, TokenTransferFeeConfig } from '../../../chain.ts'
 import type { UnsignedSolanaTx } from '../../../solana/types.ts'
 import type {
   MultiTokenPoolExpectedSnapshot,
@@ -280,9 +280,9 @@ export type ToPoolGroupSquadsBatchResult = {
 }
 
 /**
- * The guard options of every pool-group write (A21): a write that drops remote pools a lane trusts
- * (or turns off `allowLegacyPoolData` on a pool it keeps) is refused unless each drop is listed
- * here, keyed by lane. They are sealed into the snapshot.
+ * The guard options of every pool-group write (A21, A23): a write that drops remote pools a lane
+ * trusts (or turns off `allowLegacyPoolData` on a pool it keeps), or swaps a live lane's CCVs at once,
+ * is refused unless each lane is listed here. They are sealed into the snapshot.
  */
 export type PoolGroupGuardOptions = {
   /**
@@ -290,12 +290,33 @@ export type PoolGroupGuardOptions = {
    * The error's `context.dropped` has this shape.
    */
   confirmDropped?: MultiTokenPoolInlineRemotePoolDrop[]
+  /**
+   * Live lanes whose SECURITY source the write changes, and whose CCVs therefore change at once
+   * (no notice). Without its entry such a lane is refused unless its effective CCVs stay the same
+   * or it is paused (A23).
+   */
+  confirmCCVChanges?: PoolGroupLaneKey[]
+}
+
+/**
+ * Options of every write that can make lanes live or change a live lane's CONNECTION or FEE. The
+ * write runs `checkMultiTokenPoolLane` on each such lane as the write leaves it (A23), chunked, and
+ * refuses on a new error finding (any error on a lane it makes live). No attestations are accepted
+ * here: every remote chain must be readable through `getChain`, or the lane fails closed
+ * (`REMOTE_UNREADABLE`).
+ */
+export type PoolGroupLiveCheckOptions = {
+  /** Resolves each lane's remote chain for the lane check (core `ChainGetter`). */
+  getChain?: ChainGetter
+  /** Lane checks in flight at once; defaults to 4. */
+  concurrency?: number
 }
 
 /** Fields every write on an existing pool group takes. */
 export type PoolGroupWriteParams = PoolGroupRef &
   PoolGroupBatchOptions &
   PoolGroupGuardOptions &
+  PoolGroupLiveCheckOptions &
   MultiTokenPoolExpectedSnapshot & {
     /** The signer the instruction checks; defaults to `payer`. Pre-flighted against the decoded roles. */
     authority?: string

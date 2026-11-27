@@ -13,7 +13,7 @@ import { CCIPWalletInvalidError } from '../../../errors/index.ts'
 import type { SolanaChain } from '../../../solana/index.ts'
 import { isWallet } from '../../../solana/types.ts'
 import { canonicalHash } from '../../canonical.ts'
-import { CCTParamsInvalidError } from '../../errors.ts'
+import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
 import type { MultiTokenPoolSnapshot, MultiTokenPoolSnapshotCheck } from '../../multi-token-pool.ts'
 import { Operation } from '../../operation.ts'
 import {
@@ -44,6 +44,7 @@ import type {
   PoolGroupExecuteResult,
   PoolGroupFollowUp,
   PoolGroupGuardOptions,
+  PoolGroupLiveCheckOptions,
   PoolGroupUnsignedResult,
   SolanaTxBudget,
 } from './write-types.ts'
@@ -62,6 +63,8 @@ export type ParsedPoolGroupWrite = {
   durableNonces?: SolanaDurableNonce[]
   /** The guard options, in their sealed shape. */
   guardOptions: PoolGroupGuardOptions
+  /** The make-live check's options (never sealed: `getChain` is a function). */
+  liveCheck?: PoolGroupLiveCheckOptions
   /** The snapshot a previous build returned. */
   expectedSnapshot?: MultiTokenPoolSnapshot
 }
@@ -158,7 +161,29 @@ type RawWriteParams = {
   budget?: SolanaTxBudget
   durableNonces?: { accounts: SolanaDurableNonce[] }
   confirmDropped?: PoolGroupGuardOptions['confirmDropped']
+  confirmCCVChanges?: PoolGroupGuardOptions['confirmCCVChanges']
   expectedSnapshot?: MultiTokenPoolSnapshot
+} & PoolGroupLiveCheckOptions
+
+/**
+ * Parses the make-live check's options (`getChain` a function, `concurrency` a positive integer).
+ * @throws {@link CCTParamsInvalidError} if one is invalid
+ * @internal
+ */
+export function parseLiveCheck(
+  operation: string,
+  params: PoolGroupLiveCheckOptions,
+): PoolGroupLiveCheckOptions | undefined {
+  const { getChain, concurrency } = params
+  if (getChain !== undefined && typeof getChain !== 'function')
+    throw new CCTParamsInvalidError(operation, 'getChain', 'must be a function')
+  if (
+    concurrency !== undefined &&
+    (typeof concurrency !== 'number' || !Number.isInteger(concurrency) || concurrency < 1)
+  )
+    throw new CCTParamsInvalidError(operation, 'concurrency', 'must be a positive integer')
+  if (getChain === undefined && concurrency === undefined) return undefined
+  return { ...(getChain && { getChain }), ...(concurrency !== undefined && { concurrency }) }
 }
 
 /**
@@ -192,10 +217,12 @@ export function parseWriteBase(
       Reflect.get(Object(n), 'nonceAuthority'),
     )
   })
+  const liveCheck = parseLiveCheck(operation, params)
   return {
     payer,
     authority,
     program,
+    ...(liveCheck && { liveCheck }),
     ...(params.budget && { budget: params.budget }),
     ...(nonces && { durableNonces: nonces }),
     guardOptions: poolGroupGuardOptionsOf(operation, params),
@@ -244,6 +271,11 @@ export abstract class PoolGroupWriteOperation<
     guardOptions: PoolGroupGuardOptions,
   ): Parsed
 
+  /** The pool group an instruction of this op names: its first account (overridden where not). */
+  protected proposalGroup(ix: TransactionInstruction): PublicKey | undefined {
+    return ix.keys[0]?.pubkey
+  }
+
   /** Builds the unsigned transactions; no signing. */
   async generate(
     chain: SolanaChain,
@@ -278,6 +310,7 @@ export abstract class PoolGroupWriteOperation<
             payer: parsed.payer,
             ...plan.judge,
             ...parsed.guardOptions,
+            ...(parsed.liveCheck && { liveCheck: parsed.liveCheck }),
           },
           judgedGroups(
             plan,
@@ -369,7 +402,8 @@ export abstract class PoolGroupWriteOperation<
   /**
    * The snapshot check of this op: re-plans against current state from the params the proposal's
    * instructions encode, judges those exact instructions (with the sealed guard options), and
-   * reports what moved and every finding.
+   * reports what moved and every finding. Lanes the proposal makes live run the make-live check
+   * with `liveCheck` (without `getChain` their remote side fails closed).
    * @throws {@link CCTParamsInvalidError} if the instructions are not this op's, or the program
    *   now refuses them
    * @internal
@@ -379,25 +413,33 @@ export abstract class PoolGroupWriteOperation<
     ref: ParsedPoolGroupRef,
     snapshot: MultiTokenPoolSnapshot,
     transactions: readonly { instructions: readonly TransactionInstruction[] }[],
+    liveCheck?: PoolGroupLiveCheckOptions,
   ): Promise<MultiTokenPoolSnapshotCheck> {
     const instructions = proposalInstructions(ref.program, transactions)
-    // every instruction of these ops names the pool group first: it must be the one checked
-    const foreign = instructions.findIndex((ix) => !ix.keys[0]?.pubkey.equals(ref.group))
+    // every instruction of these ops names its pool group: it must be the one checked
+    const foreign = instructions.findIndex((ix) => !this.proposalGroup(ix)?.equals(ref.group))
     if (foreign >= 0)
       throw new CCTParamsInvalidError(
         this.name,
         'transactions',
-        `instruction ${foreign} of the proposal writes the pool group ${instructions[foreign]!.keys[0]?.pubkey.toBase58() ?? '(none)'}, not ${ref.group.toBase58()}: pass the pool group the proposal targets`,
+        `instruction ${foreign} of the proposal writes the pool group ${this.proposalGroup(instructions[foreign]!)?.toBase58() ?? '(none)'}, not ${ref.group.toBase58()}: pass the pool group the proposal targets`,
       )
     const sealed: unknown = snapshot.expected[POOL_GROUP_GUARD_OPTIONS_PATH]
+    const options = typeof sealed === 'object' && sealed !== null ? sealed : {}
     const guardOptions = poolGroupGuardOptionsOf(this.name, {
-      confirmDropped:
-        typeof sealed === 'object' && sealed !== null
-          ? Reflect.get(sealed, 'confirmDropped')
-          : undefined,
+      confirmDropped: Reflect.get(options, 'confirmDropped'),
+      confirmCCVChanges: Reflect.get(options, 'confirmCCVChanges'),
     })
     const parsed = this.fromInstructions(ref, instructions, guardOptions)
-    const plan = await this.plan(chain, parsed)
+    let plan: PoolGroupWritePlan<X>
+    try {
+      plan = await this.plan(chain, parsed)
+    } catch (err) {
+      // a re-plan that finds moved state reports it as moved (S3b m4)
+      const changed: unknown = err instanceof CCTStateChangedError ? err.context.changed : undefined
+      if (!Array.isArray(changed)) throw err
+      return { ok: false, changed, findings: [] }
+    }
     const judgement = plan.judge
       ? await judgeGroups(
           {
@@ -408,6 +450,7 @@ export abstract class PoolGroupWriteOperation<
             payer: parsed.payer,
             ...plan.judge,
             ...guardOptions,
+            ...(liveCheck && { liveCheck }),
             reportFindings: true,
           },
           judgedGroups(

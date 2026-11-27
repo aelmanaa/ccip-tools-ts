@@ -42,6 +42,8 @@ import {
 } from '../multi-token-pool-lane.ts'
 import { poolGroupTransactionsHash } from '../snapshot.ts'
 import type { CheckPoolGroupSnapshotParams } from '../types.ts'
+import { parseLiveCheck } from '../write-operation.ts'
+import type { PoolGroupLiveCheckOptions } from '../write-types.ts'
 import { type ParsedPoolGroupRef, parsePoolGroupRef, validateSelector } from './common.ts'
 
 const DIRECTIONS: readonly unknown[] = ['outbound', 'inbound']
@@ -185,68 +187,55 @@ export class GetMultiTokenPoolTransferQuote extends SolanaQuery<
 /** The instructions of one proposal transaction, as the snapshot check takes them. @internal */
 export type PoolGroupProposalTx = Pick<UnsignedSolanaTx, 'instructions'>
 
+/** One op's snapshot re-check (`PoolGroupWriteOperation.recheck`). */
+type PoolGroupRecheck = (
+  chain: SolanaChain,
+  ref: ParsedPoolGroupRef,
+  snapshot: MultiTokenPoolSnapshot,
+  transactions: readonly PoolGroupProposalTx[],
+  liveCheck?: PoolGroupLiveCheckOptions,
+) => Promise<MultiTokenPoolSnapshotCheck>
+
+/** A module's write ops, by name, each with its re-check. */
+type RecheckTable = Record<string, { recheck: PoolGroupRecheck }>
+
+/**
+ * The re-checks of `names`, from the module `load` imports on first use (the write ops import this
+ * module's neighbours).
+ */
+const lazyRechecks = (names: readonly string[], load: () => Promise<RecheckTable>) =>
+  names.map((name) => {
+    const recheck: PoolGroupRecheck = async (...args) => (await load())[name]!.recheck(...args)
+    return [name, recheck] as const
+  })
+
 /**
  * The re-checks of the Solana ops that build snapshots, by operation name: each re-reads what its
  * snapshot recorded and re-runs its guard on the exact transactions, in order.
  * @internal
  */
-export const POOL_GROUP_SNAPSHOT_RECHECKS: ReadonlyMap<
-  string,
-  (
-    chain: SolanaChain,
-    ref: ParsedPoolGroupRef,
-    snapshot: MultiTokenPoolSnapshot,
-    transactions: readonly PoolGroupProposalTx[],
-  ) => Promise<MultiTokenPoolSnapshotCheck>
-> = new Map([
-  ...(
+export const POOL_GROUP_SNAPSHOT_RECHECKS: ReadonlyMap<string, PoolGroupRecheck> = new Map([
+  ...lazyRechecks(
     [
       'createPoolGroup',
       'setPoolGroupRoles',
       'setPoolGroupSettings',
       'transferPoolGroupOwnership',
       'acceptPoolGroupOwnership',
-    ] as const
-  ).map(
-    (name) =>
-      [
-        name,
-        async (
-          chain: SolanaChain,
-          ref: ParsedPoolGroupRef,
-          snapshot: MultiTokenPoolSnapshot,
-          transactions: readonly PoolGroupProposalTx[],
-        ) => {
-          // loaded on first use: the write ops import this module's neighbours
-          const { POOL_GROUP_LIFECYCLE_OPERATIONS } = await import('./lifecycle.ts')
-          return POOL_GROUP_LIFECYCLE_OPERATIONS[name].recheck(chain, ref, snapshot, transactions)
-        },
-      ] as const,
+    ],
+    async () => (await import('./lifecycle.ts')).POOL_GROUP_LIFECYCLE_OPERATIONS,
   ),
-  ...(
+  ...lazyRechecks(
     [
       'addPoolGroupChain',
       'removePoolGroupChain',
       'setPoolGroupChainPolicy',
       'inheritPoolGroupDefault',
       'setPoolGroupDefault',
-    ] as const
-  ).map(
-    (name) =>
-      [
-        name,
-        async (
-          chain: SolanaChain,
-          ref: ParsedPoolGroupRef,
-          snapshot: MultiTokenPoolSnapshot,
-          transactions: readonly PoolGroupProposalTx[],
-        ) => {
-          const { POOL_GROUP_CHAIN_OPERATIONS } = await import('./chains.ts')
-          return POOL_GROUP_CHAIN_OPERATIONS[name].recheck(chain, ref, snapshot, transactions)
-        },
-      ] as const,
+    ],
+    async () => (await import('./chains.ts')).POOL_GROUP_CHAIN_OPERATIONS,
   ),
-  ...(
+  ...lazyRechecks(
     [
       'createPoolGroupPolicy',
       'closePoolGroupPolicy',
@@ -256,21 +245,8 @@ export const POOL_GROUP_SNAPSHOT_RECHECKS: ReadonlyMap<
       'setPoolGroupPolicyDefault',
       'assignPoolGroupLanePolicies',
       'resetPoolGroupLaneBuckets',
-    ] as const
-  ).map(
-    (name) =>
-      [
-        name,
-        async (
-          chain: SolanaChain,
-          ref: ParsedPoolGroupRef,
-          snapshot: MultiTokenPoolSnapshot,
-          transactions: readonly PoolGroupProposalTx[],
-        ) => {
-          const { POOL_GROUP_POLICY_OPERATIONS } = await import('./policies.ts')
-          return POOL_GROUP_POLICY_OPERATIONS[name].recheck(chain, ref, snapshot, transactions)
-        },
-      ] as const,
+    ],
+    async () => (await import('./policies.ts')).POOL_GROUP_POLICY_OPERATIONS,
   ),
 ])
 
@@ -312,6 +288,7 @@ function proposalTransactions(
 type ParsedSnapshot = ParsedPoolGroupRef & {
   snapshot: MultiTokenPoolSnapshot
   transactions: PoolGroupProposalTx[]
+  liveCheck?: PoolGroupLiveCheckOptions
 }
 
 /** Re-reads the values a snapshot recorded and reports which moved. */
@@ -354,7 +331,13 @@ export class CheckPoolGroupSnapshot extends SolanaQuery<
         'snapshot',
         `was built by ${snapshot.operation}, which is not a Solana pool-group op that builds snapshots, so the state it recorded cannot be re-read`,
       )
-    return { ...parsePoolGroupRef(this.name, params), snapshot, transactions }
+    const liveCheck = parseLiveCheck(this.name, params)
+    return {
+      ...parsePoolGroupRef(this.name, params),
+      snapshot,
+      transactions,
+      ...(liveCheck && { liveCheck }),
+    }
   }
 
   /** Reads the pool group, then runs the building op's re-check. */
@@ -368,6 +351,7 @@ export class CheckPoolGroupSnapshot extends SolanaQuery<
       ref,
       ref.snapshot,
       ref.transactions,
+      ref.liveCheck,
     )
   }
 }

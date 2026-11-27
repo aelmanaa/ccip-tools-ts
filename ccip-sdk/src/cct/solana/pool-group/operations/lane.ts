@@ -1,7 +1,13 @@
 import { Buffer } from 'buffer'
 
 import { type IdlTypes, BN } from '@coral-xyz/anchor'
-import { type AccountInfo, type PublicKey, SYSVAR_CLOCK_PUBKEY } from '@solana/web3.js'
+import {
+  type AccountInfo,
+  type AddressLookupTableAccount,
+  type PublicKey,
+  type TransactionInstruction,
+  SYSVAR_CLOCK_PUBKEY,
+} from '@solana/web3.js'
 
 import type { BurnmintTokenPoolGroups } from '../../../../solana/idl/pool-groups-7558722/BURN_MINT_TOKEN_POOL.ts'
 import type { SolanaChain } from '../../../../solana/index.ts'
@@ -9,7 +15,7 @@ import {
   deriveTokenPoolChainConfigOverridePda,
   deriveTokenPoolChainConfigV2Pda,
 } from '../../../../solana/token-pool.ts'
-import { getMultipleAccountsInfoPaged } from '../../../../solana/utils.ts'
+import { getMultipleAccountsInfoPaged, simulateTransaction } from '../../../../solana/utils.ts'
 import { CCTDataDecodeError, CCTParamsInvalidError } from '../../../errors.ts'
 import { decodeRemoteAddress } from '../../../remote-address.ts'
 import { deriveTokenPoolChainConfigPda } from '../../programs/token-pool.ts'
@@ -107,6 +113,28 @@ export function classSources(
 export type LaneGroupObservation = IdlTypes<BurnmintTokenPoolGroups>['LaneGroupObservation']
 
 /**
+ * A write's simulated post-state, to read a lane as the write leaves it: the accounts it changes
+ * (read in place of the chain's) and the write itself (run before a view in one simulation).
+ * @internal
+ */
+export type PoolGroupPostState = {
+  /** Accounts as the simulated write leaves them, by address. */
+  overlay: ReadonlyMap<string, AccountInfo<Buffer> | null>
+  /** The write's instructions, in order. */
+  instructions: readonly TransactionInstruction[]
+  /** The write's fee payer. */
+  payer: PublicKey
+  /** Lookup tables the write compiles with. */
+  lookupTables?: AddressLookupTableAccount[]
+}
+
+/**
+ * Room for the trailing zero bytes the runtime drops from return data: the observation is decoded
+ * from its prefix, so zeros past its end are never read.
+ */
+const RETURN_DATA_PADDING = 2048
+
+/**
  * Simulates `observe_lane_group` with the lane's group and named records: the effective fee config,
  * pauses and buckets as of now under the configs the lane applies.
  * @returns The observation; `undefined` when the program refuses the view on a standard lane (a
@@ -120,30 +148,51 @@ export async function observeLane(
   operation: string,
   chain: SolanaChain,
   state: PoolGroupLaneState,
+  post?: PoolGroupPostState,
 ): Promise<LaneGroupObservation | undefined> {
   const program = createPoolGroupProgram(chain, state.program)
   const remaining = [
     ...(state.groupChain ? [state.groupChain.address] : []),
     ...[...state.named.values()].map((n) => n.address),
   ].map((pubkey) => ({ pubkey, isSigner: false, isWritable: false }))
+  const view = program.methods
+    .observeLaneGroup({
+      remoteChainSelector: new BN(state.selector.toString()),
+      mint: state.mint,
+    })
+    .accountsStrict({
+      chainConfig: state.chainConfig.address,
+      chainConfigV2: state.v2?.address ?? deriveV2(state),
+      chainConfigOverride: deriveTokenPoolChainConfigOverridePda(
+        state.program,
+        state.selector,
+        state.mint,
+      ),
+    })
+    .remainingAccounts(remaining)
   try {
-    return await program.methods
-      .observeLaneGroup({
-        remoteChainSelector: new BN(state.selector.toString()),
-        mint: state.mint,
+    if (!post) return await view.view()
+    // after the write: the write's instructions, then the view, in one simulation; the return
+    // data is the last instruction's (the view)
+    const result = await simulateTransaction(chain, {
+      payerKey: post.payer,
+      instructions: [...post.instructions, await view.instruction()],
+      ...(post.lookupTables && { addressLookupTableAccounts: post.lookupTables }),
+    })
+    const ret = result.returnData
+    if (ret?.programId !== state.program.toBase58())
+      throw new CCTDataDecodeError(state.program.toBase58(), {
+        context: {
+          reason: `observe_lane_group after the write returned ${ret ? `data from ${ret.programId}` : 'no data'}`,
+        },
       })
-      .accountsStrict({
-        chainConfig: state.chainConfig.address,
-        chainConfigV2: state.v2?.address ?? deriveV2(state),
-        chainConfigOverride: deriveTokenPoolChainConfigOverridePda(
-          state.program,
-          state.selector,
-          state.mint,
-        ),
-      })
-      .remainingAccounts(remaining)
-      .view()
+    const raw = Buffer.from(ret.data[0], 'base64')
+    return program.coder.types.decode<LaneGroupObservation>(
+      'LaneGroupObservation',
+      Buffer.concat([raw, Buffer.alloc(RETURN_DATA_PADDING)]),
+    )
   } catch (err) {
+    if (err instanceof CCTDataDecodeError) throw err
     if (state.kind === 'standard' && isViewRefusal(err)) return undefined
     return simulationRefused(operation, err, 'observe_lane_group')
   }

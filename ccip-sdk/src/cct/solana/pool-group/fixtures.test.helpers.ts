@@ -120,6 +120,10 @@ export function chainConfigData(
   marker?: Buffer,
   pools: Buffer[] = [hex(EVM_POOL)],
   token: Buffer = pad32(EVM_TOKEN),
+  bucket: { tokens: number; lastUpdated: number } = {
+    tokens: 500,
+    lastUpdated: Math.floor(Date.now() / 1000),
+  },
 ): Buffer {
   const body = encodeType('ChainConfig', (v) => {
     const base = v.base as {
@@ -127,8 +131,8 @@ export function chainConfigData(
       outboundRateLimit: Record<string, unknown>
     }
     // a stored bucket of 500 tokens, under a disabled stored config
-    base.outboundRateLimit.tokens = bn(500)
-    base.outboundRateLimit.lastUpdated = bn(Math.floor(Date.now() / 1000))
+    base.outboundRateLimit.tokens = bn(bucket.tokens)
+    base.outboundRateLimit.lastUpdated = bn(bucket.lastUpdated)
     base.remote.poolAddresses = pools.map((address) => ({ address }))
     base.remote.tokenAddress = { address: token }
     base.remote.decimals = 18

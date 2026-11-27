@@ -81,7 +81,11 @@ describe('A21: dropped trusted remote pools', () => {
       ],
     })
     const keys = sealed.confirmDropped!.map((d) => d.lane.tokenAddress)
-    assert.deepEqual(keys, [...keys].sort())
+    // the shared sealer orders lanes by localeCompare (base58 is mixed case)
+    assert.deepEqual(
+      keys,
+      [...keys].sort((x, y) => x.localeCompare(y)),
+    )
     const withPools = sealed.confirmDropped!.find((d) => d.lane.tokenAddress === b)!
     assert.deepEqual(withPools.remotePools, [POOL_A, POOL_B])
     assert.deepEqual(sealed.confirmDropped!.find((d) => d.lane.tokenAddress === MINT)!.flags, [
