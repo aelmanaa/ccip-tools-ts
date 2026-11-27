@@ -557,7 +557,7 @@ describe('judgePoolGroupWrite: S4 review fixes', () => {
 })
 
 describe('PoolGroupWriteOperation partition (S4 review M5)', () => {
-  it('a lane the judge refuses is left out and reported; the write builds without it', async () => {
+  it('a crank whose every lane the judge refuses throws the refusal (N3)', async () => {
     const { PoolGroupWriteOperation, parseWriteBase } = await import('./write-operation.ts')
     type Parsed = ReturnType<typeof parseWriteBase>
     const before = linked({ sources: [0, 0, 0, 0] }, groupChainData({ groupPaused: true }))
@@ -588,20 +588,20 @@ describe('PoolGroupWriteOperation partition (S4 review M5)', () => {
         throw new Error('not used')
       }
     }
-    const r = await new Crank().generate(chainFor(before, after), { payer: PAYER.toBase58() })
-    assert.deepEqual(r.transactions, [])
-    assert.deepEqual(
-      r.findings.map((f) => [f.check, f.severity]),
-      [['NO_REMOTE_POOL', 'warning']],
-    )
-    assert.deepEqual(r.followUps, [
-      {
-        operation: 'crank',
-        reason:
-          '1 lane(s) were left out because the lane check refused them: fix the findings, then run it again for them',
-        inputs: { tokenAddresses: [MINT.toBase58()] },
+    // the only lane is refused: that is the refusal, never an empty success (re-check N3)
+    await assert.rejects(
+      new Crank().generate(chainFor(before, after), { payer: PAYER.toBase58() }),
+      (e: unknown) => {
+        assert.ok(e instanceof CCTParamsInvalidError)
+        assert.equal(e.context.param, 'guards')
+        assert.match(e.message, /every lane was refused/)
+        assert.deepEqual(
+          (e.context.findings as { check: string }[]).map((f) => f.check),
+          ['NO_REMOTE_POOL'],
+        )
+        return true
       },
-    ])
+    )
   })
 })
 
@@ -673,6 +673,20 @@ describe('S4 review: hook rules (M1) and Squads pauses (M3)', () => {
         pausedInbound: true,
       }),
       (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'pausedOutbound',
+    )
+    // durable nonces execute later too (re-check N1); the facade types carry them
+    const { budget: _, ...wallet } = base
+    const deferred = {
+      ...wallet,
+      remoteChainSelector: SEPOLIA,
+      pausedOutbound: true,
+      durableNonces: {
+        accounts: [{ nonceAccount: PAYER.toBase58(), nonceAuthority: PAYER.toBase58() }],
+      },
+    }
+    await assert.rejects(
+      POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupChainPause.generate(chain, deferred),
+      (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'pausedInbound',
     )
   })
 })

@@ -64,8 +64,9 @@ type Flags = readonly [boolean, boolean]
  * `Group::can_set_pause`: setting a flag needs the owner or the pauser, clearing one the owner or the
  * unpauser; an unchanged flag needs neither.
  * @throws {@link CCTParamsInvalidError} (param `authority`) otherwise
+ * @internal
  */
-function requirePauseGate(
+export function requirePauseGate(
   operation: string,
   group: PauseGate,
   authority: PublicKey,
@@ -94,22 +95,25 @@ function requirePauseGate(
 
 /**
  * The instruction writes both direction flags, so an omitted direction is merged from chain state
- * when the proposal is built. Under Squads the proposal executes later, and could rewrite a flag
- * someone set meanwhile: both directions must be given explicitly there (the program cannot keep a
- * flag it is not told; the snapshot check reports a moved flag before execution). S4 review M3.
- * @throws {@link CCTParamsInvalidError} (param of the omitted direction) under `squads-v4`
+ * when the transaction is built. A Squads proposal, or a transaction on durable nonces, executes
+ * later and could rewrite a flag someone set meanwhile: both directions must be given explicitly
+ * there (the program cannot keep a flag it is not told; the snapshot check reports a moved flag
+ * before execution). S4 review M3, N1.
+ * @throws {@link CCTParamsInvalidError} (param of the omitted direction) under `squads-v4` or with
+ *   `durableNonces`
  */
-function requireBothUnderSquads(
+function requireBothWhenDeferred(
   operation: string,
-  budget: { executor?: string } | undefined,
+  params: { budget?: { executor?: string }; durableNonces?: unknown },
   outbound: boolean | undefined,
   inbound: boolean | undefined,
 ): void {
-  if (budget?.executor !== 'squads-v4' || (outbound !== undefined && inbound !== undefined)) return
+  const deferred = params.budget?.executor === 'squads-v4' || params.durableNonces !== undefined
+  if (!deferred || (outbound !== undefined && inbound !== undefined)) return
   throw new CCTParamsInvalidError(
     operation,
     outbound === undefined ? 'pausedOutbound' : 'pausedInbound',
-    'the instruction writes both directions, and a Squads proposal executes later: give both pausedOutbound and pausedInbound, so it never rewrites a flag set after it was built (run checkPoolGroupSnapshot before executing)',
+    'the instruction writes both directions, and a Squads proposal or a durable-nonce transaction executes later: give both pausedOutbound and pausedInbound, so it never rewrites a flag set after it was built (run checkPoolGroupSnapshot before executing)',
   )
 }
 
@@ -269,7 +273,7 @@ export class SetPoolGroupChainPause extends PoolGroupWriteOperation<
         'pausedOutbound',
         'give pausedOutbound, pausedInbound or both',
       )
-    requireBothUnderSquads(this.name, params.budget, pausedOutbound, pausedInbound)
+    requireBothWhenDeferred(this.name, params, pausedOutbound, pausedInbound)
     return {
       ...parseGroupWrite(this.name, params),
       selector: validateSelector(this.name, 'remoteChainSelector', params.remoteChainSelector),
@@ -416,7 +420,7 @@ export class SetPoolGroupLanePause extends PoolGroupWriteOperation<
         'remoteChainSelectors',
         'must be a non-empty array',
       )
-    requireBothUnderSquads(this.name, params.budget, pausedOutbound, pausedInbound)
+    requireBothWhenDeferred(this.name, params, pausedOutbound, pausedInbound)
     const selectors = params.remoteChainSelectors.map((c, i) =>
       validateSelector(this.name, `remoteChainSelectors[${i}]`, c),
     )

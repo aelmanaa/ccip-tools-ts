@@ -135,9 +135,6 @@ const uniqueLanes = <T extends PoolGroupLaneKey>(lanes: readonly T[]): T[] =>
       ) === i,
   )
 
-/** Re-plans of a partitioned op before it gives up (each round leaves more lanes out). */
-const MAX_PARTITION_ROUNDS = 4
-
 /** The lanes and error findings a judge refusal names (lane rules, never a simulation refusal). */
 function refusedLanes(err: unknown): MultiTokenPoolLaneFinding[] {
   if (!(err instanceof CCTParamsInvalidError) || err.context.param !== 'guards') return []
@@ -388,14 +385,23 @@ export abstract class PoolGroupWriteOperation<
         break
       } catch (err) {
         // one refused lane of a crank never blocks the others (S4 review M5)
+        // each round leaves at least one more lane out, so it ends within the plan's lane count
+        // (S4 re-check N2: no fixed round cap)
         const refused = plan.partition ? refusedLanes(err) : []
-        if (!refused.length || round >= MAX_PARTITION_ROUNDS) throw err
-        left.push(...refused)
+        const lanes = new Set(plan.items.flatMap((i) => i.tokenAddresses)).size
+        const known = new Set(
+          (current.excludedLanes ?? []).map((l) => `${l.tokenAddress}:${l.remoteChainSelector}`),
+        )
+        const fresh = refused.filter(
+          (f) => !known.has(`${f.tokenAddress}:${f.remoteChainSelector}`),
+        )
+        if (!fresh.length || round > lanes) throw err
+        left.push(...fresh)
         current = {
           ...current,
           excludedLanes: uniqueLanes([
             ...(current.excludedLanes ?? []),
-            ...refused.map((f) => ({
+            ...fresh.map((f) => ({
               tokenAddress: f.tokenAddress,
               remoteChainSelector: f.remoteChainSelector,
             })),
@@ -430,6 +436,16 @@ export abstract class PoolGroupWriteOperation<
             ]
           : [],
     }
+    // every lane was refused: that is the refusal, never a silent success (S4 re-check N3)
+    if (!plan.items.length && left.length)
+      throw new CCTParamsInvalidError(
+        this.name,
+        'guards',
+        `every lane was refused, so nothing is built: ${left
+          .map((f) => `${f.check} on ${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
+          .join('; ')}`,
+        { context: { findings: left } },
+      )
     if (!plan.items.length)
       return {
         result: {
