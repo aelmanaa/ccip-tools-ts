@@ -37,6 +37,7 @@ import {
   SetMultiTokenPoolHooksPolicyEngine,
 } from '../../multi-token-pool-hooks/operations/hooks-config-writes.ts'
 import { UpdateMultiTokenPoolHooksAuthorizedCallers } from '../../multi-token-pool-hooks/operations/update-multi-token-pool-hooks-authorized-callers.ts'
+import { UpdatePolicyStoreAuthorizedCallers } from '../../policy-store/operations/update-policy-store-authorized-callers.ts'
 import { mined as minedOn } from '../../pool-config-manager/operations/fork.test.helpers.ts'
 import { readOwnership } from '../contracts.ts'
 import { GetMultiTokenPoolStack } from './get-multi-token-pool-stack.ts'
@@ -403,5 +404,47 @@ describe('MTTP owner-gated writes (Sepolia and Fuji forks)', { skip, timeout: 90
       stale.changed.map((c) => c.path),
       [`removed.${pool}.lanes`],
     )
+  })
+  it('refuses a store caller that is not its PCM, and removing the PCM a pool still serves through', async () => {
+    const stack = await withForkRetry(() =>
+      new GetMultiTokenPoolStack().query(sepolia.chain, { poolAddress: CORE_POOL }),
+    )
+    const pcm = stack.pool.poolConfigManager
+    const op = new UpdatePolicyStoreAuthorizedCallers()
+    const eoa = await withForkRetry(() =>
+      rejectionOf(
+        op.generate(sepolia.chain, {
+          policyStore: store,
+          addedCallers: [Wallet.createRandom().address],
+        }),
+        'expected a refusal',
+      ),
+    )
+    assert.ok(eoa instanceof CCTParamsInvalidError)
+    assert.equal(eoa.context.param, 'addedCallers[0]')
+    const serving = await withForkRetry(() =>
+      rejectionOf(
+        op.generate(sepolia.chain, { policyStore: store, removedCallers: [pcm] }),
+        'expected a refusal',
+      ),
+    )
+    assert.ok(serving instanceof CCTParamsInvalidError)
+    assert.equal(serving.context.param, 'removedCallers[0]')
+    assert.match(String(serving.context.reason), new RegExp(getAddress(CORE_POOL)))
+    const { owner } = await withForkRetry(() => readOwnership(sepolia.chain, store))
+    const proposal = await op.generate(sepolia.chain, {
+      policyStore: store,
+      removedCallers: [pcm],
+      confirmRemovingServingCallers: [pcm],
+      sender: owner,
+    })
+    const check = await withForkRetry(() =>
+      EVMTokenManager.fromChain(sepolia.chain).checkMultiTokenPoolSnapshot({
+        snapshot: proposal.snapshot,
+        transaction: proposal,
+        sender: owner,
+      }),
+    )
+    assert.deepEqual([check.ok, check.changed], [true, []])
   })
 })
