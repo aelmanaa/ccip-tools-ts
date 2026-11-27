@@ -330,3 +330,30 @@ export function validateOneOf<const T extends readonly string[]>(
   if (!allowed.some((a) => a === value))
     throw new CCTParamsInvalidError(operation, param, `must be one of ${allowed.join(', ')}`)
 }
+
+/**
+ * Refuses an entry whose key repeats an earlier one in the same list, naming both as
+ * `${param}[i]` (`repeats ${param}[j]: give each <noun> once`): a repeated entry would make the result
+ * depend on order.
+ * @throws {@link CCTParamsInvalidError} at the first repeat
+ */
+export function assertUnique<T>(
+  operation: string,
+  param: string,
+  values: readonly T[],
+  keyOf: (value: T, i: number) => string,
+  noun: string,
+): void {
+  const seen = new Map<string, number>()
+  values.forEach((v, i) => {
+    const key = keyOf(v, i)
+    const first = seen.get(key)
+    if (first !== undefined)
+      throw new CCTParamsInvalidError(
+        operation,
+        `${param}[${i}]`,
+        `repeats ${param}[${first}]: give each ${noun} once`,
+      )
+    seen.set(key, i)
+  })
+}

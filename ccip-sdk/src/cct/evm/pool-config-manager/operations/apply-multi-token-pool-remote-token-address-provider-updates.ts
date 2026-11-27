@@ -18,7 +18,7 @@ import {
   poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
 import { isNotCcipContract } from '../../query.ts'
-import { validateAddress, validateArray } from '../../validate.ts'
+import { assertUnique, validateAddress, validateArray } from '../../validate.ts'
 import { type PolicyName, encodePolicyName } from '../contracts.ts'
 import { policyKey } from '../projection.ts'
 import { readMultiTokenPoolRecordState } from '../record-state.ts'
@@ -65,8 +65,7 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
   ): ApplyMultiTokenPoolRemoteTokenAddressProviderUpdatesParams {
     super.prepare(params)
     validateArray(this.name, 'updates', params.updates, 1)
-    const seen = new Map<string, string>()
-    Array.from(params.updates as readonly unknown[], (u, i) => {
+    const words = Array.from(params.updates as readonly unknown[], (u, i) => {
       const at = `updates[${i}]`
       const { policyName, remoteTokenAddressProvider } = (u ?? {}) as Record<string, unknown>
       const word = encodePolicyName(this.name, `${at}.policyName`, policyName).toLowerCase()
@@ -79,15 +78,9 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
             'is the zero address: pass remoteTokenAddressProvider: null to clear the provider',
           )
       }
-      const first = seen.get(word)
-      if (first !== undefined)
-        throw new CCTParamsInvalidError(
-          this.name,
-          `${at}.policyName`,
-          `repeats ${first}: give each policy once`,
-        )
-      seen.set(word, at)
+      return word
     })
+    assertUnique(this.name, 'updates', words, (w) => w, 'policy')
     return params
   }
 

@@ -42,11 +42,11 @@ export class ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates extends PolicyReco
   protected readonly typeRole = 'REMOTE_POOL_ROLE'
   protected readonly allowDefault = false
 
-  protected validateRecord(
+  protected parseRecord(
     _params: ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams,
     record: RemotePoolPolicyRecord,
     at: string,
-  ): void {
+  ): RemotePoolPolicyRecord {
     validateArray(this.name, `${at}.remotePoolAddresses`, record.remotePoolAddresses)
     if (!record.remotePoolAddresses.length)
       throw new CCTParamsInvalidError(
@@ -54,21 +54,22 @@ export class ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates extends PolicyReco
         `${at}.remotePoolAddresses`,
         'is empty: a remote pool policy record without pools trusts nothing (PolicyRecordHasNoPools); give at least one pool, or remove the record with recordsToRemove',
       )
-    parseUniqueRemoteAddresses(
-      this.name,
-      `${at}.remotePoolAddresses`,
-      record.remotePoolAddresses,
-      record.remoteChainSelector,
-    )
+    return {
+      ...record,
+      remotePoolAddresses: parseUniqueRemoteAddresses(
+        this.name,
+        `${at}.remotePoolAddresses`,
+        record.remotePoolAddresses,
+        record.remoteChainSelector,
+      ),
+    }
   }
 
   protected encodeRecord(record: RemotePoolPolicyRecord, word: string): unknown {
-    const pools = parseUniqueRemoteAddresses(
-      this.name,
-      'remotePoolAddresses',
-      record.remotePoolAddresses,
+    return [
+      word,
       record.remoteChainSelector,
-    )
-    return [word, record.remoteChainSelector, pools.map((p) => hexlify(encodeAddressToAny(p)))]
+      record.remotePoolAddresses.map((p) => hexlify(encodeAddressToAny(p))),
+    ]
   }
 }

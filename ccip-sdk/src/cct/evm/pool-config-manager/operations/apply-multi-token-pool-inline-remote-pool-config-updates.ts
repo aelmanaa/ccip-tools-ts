@@ -7,8 +7,8 @@
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { parseRemoteAddress, parseUniqueRemoteAddresses } from '../../../remote-address.ts'
-import { validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
+import { parseRemoteAddress } from '../../../remote-address.ts'
+import { assertUnique, validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
 import type { MultiTokenPoolLaneKey } from '../contracts.ts'
 import { encodeInlineRemotePoolConfig } from '../decode.ts'
 import type { InlineRemotePoolConfig } from '../records.ts'
@@ -46,44 +46,34 @@ export class ApplyMultiTokenPoolInlineRemotePoolConfigUpdates extends InlineReco
   protected readonly functionName = 'applyInlineRemotePoolConfigUpdates'
   protected readonly typeRole = 'REMOTE_POOL_ROLE'
 
-  protected validateRecord(
+  protected parseRecord(
     _params: ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams,
     c: InlineRemotePoolConfig,
     at: string,
-  ): void {
+  ): InlineRemotePoolConfig {
     validateBoolean(this.name, `${at}.trustPolicyRemotePools`, c.trustPolicyRemotePools)
     validateOneOf(this.name, `${at}.poolDataFormat`, c.poolDataFormat, ['legacy', 'long'] as const)
     validateArray(this.name, `${at}.remotePools`, c.remotePools)
     // each pool at its own path, then the list unique
-    Array.from(c.remotePools as readonly unknown[], (p, j) => {
+    const remotePools = Array.from(c.remotePools as readonly unknown[], (p, j) => {
       const { address, allowLegacyPoolData } = (p ?? {}) as Record<string, unknown>
-      parseRemoteAddress(
-        this.name,
-        `${at}.remotePools[${j}].address`,
-        address,
-        c.remoteChainSelector,
-      )
       validateBoolean(this.name, `${at}.remotePools[${j}].allowLegacyPoolData`, allowLegacyPoolData)
+      return {
+        address: parseRemoteAddress(
+          this.name,
+          `${at}.remotePools[${j}].address`,
+          address,
+          c.remoteChainSelector,
+        ),
+        allowLegacyPoolData,
+      }
     })
-    parseUniqueRemoteAddresses(
-      this.name,
-      `${at}.remotePools`,
-      c.remotePools.map((p) => p.address),
-      c.remoteChainSelector,
-    )
+    assertUnique(this.name, `${at}.remotePools`, remotePools, (p) => p.address, 'remote pool')
+    return { ...c, remotePools }
   }
 
-  protected encodeRecord(c: InlineRemotePoolConfig, at: string): unknown {
-    const pools = parseUniqueRemoteAddresses(
-      this.name,
-      `${at}.remotePools`,
-      c.remotePools.map((p) => p.address),
-      c.remoteChainSelector,
-    )
-    return encodeInlineRemotePoolConfig({
-      ...c,
-      remotePools: c.remotePools.map((p, j) => ({ ...p, address: pools[j]! })),
-    })
+  protected encodeRecord(c: InlineRemotePoolConfig): unknown {
+    return encodeInlineRemotePoolConfig(c)
   }
 
   /**

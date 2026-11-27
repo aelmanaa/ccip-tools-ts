@@ -127,7 +127,7 @@ describe('E5 writes refuse before any RPC (cct/evm pool-config-manager)', () => 
             { policyName: 'p', remoteTokenAddressProvider: null },
           ],
         },
-        'updates[1].policyName',
+        'updates[1]',
       ],
     ]))
 

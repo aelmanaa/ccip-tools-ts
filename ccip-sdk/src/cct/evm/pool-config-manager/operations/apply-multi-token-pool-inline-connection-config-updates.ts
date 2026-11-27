@@ -42,33 +42,28 @@ export class ApplyMultiTokenPoolInlineConnectionConfigUpdates extends InlineReco
   protected readonly functionName = 'applyInlineConnectionConfigUpdates'
   protected readonly typeRole = 'CONNECTION_ROLE'
 
-  protected validateRecord(
+  protected parseRecord(
     _params: ApplyMultiTokenPoolInlineConnectionConfigUpdatesParams,
     record: InlineConnectionConfig,
     at: string,
-  ): void {
-    parseRemoteAddress(
-      this.name,
-      `${at}.remoteToken`,
-      record.remoteToken,
-      record.remoteChainSelector,
-    )
+  ): InlineConnectionConfig {
+    return {
+      ...record,
+      tokenAddress: getAddress(record.tokenAddress),
+      remoteToken: parseRemoteAddress(
+        this.name,
+        `${at}.remoteToken`,
+        record.remoteToken,
+        record.remoteChainSelector,
+      ),
+    }
   }
 
-  protected encodeRecord(record: InlineConnectionConfig, at: string): unknown {
+  protected encodeRecord(record: InlineConnectionConfig): unknown {
     return {
-      localToken: getAddress(record.tokenAddress),
+      localToken: record.tokenAddress,
       remoteChainSelector: record.remoteChainSelector,
-      remoteToken: hexlify(
-        encodeAddressToAny(
-          parseRemoteAddress(
-            this.name,
-            `${at}.remoteToken`,
-            record.remoteToken,
-            record.remoteChainSelector,
-          ),
-        ),
-      ),
+      remoteToken: hexlify(encodeAddressToAny(record.remoteToken)),
     }
   }
 

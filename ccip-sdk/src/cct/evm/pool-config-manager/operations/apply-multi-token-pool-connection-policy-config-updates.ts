@@ -48,11 +48,11 @@ export class ApplyMultiTokenPoolConnectionPolicyConfigUpdates extends PolicyReco
   protected readonly typeRole = 'CONNECTION_ROLE'
   protected readonly allowDefault = false
 
-  protected validateRecord(
+  protected parseRecord(
     params: ApplyMultiTokenPoolConnectionPolicyConfigUpdatesParams,
     record: ConnectionPolicyRecord,
     at: string,
-  ): void {
+  ): ConnectionPolicyRecord {
     validateBoolean(this.name, `${at}.onlySubsetTokens`, record.onlySubsetTokens)
     if (!record.onlySubsetTokens && params.openToAllPolicyTokens !== true)
       throw new CCTParamsInvalidError(
@@ -61,6 +61,7 @@ export class ApplyMultiTokenPoolConnectionPolicyConfigUpdates extends PolicyReco
         `is false, which opens chain ${record.remoteChainSelector} to every current and future token of policy ${record.policyName}: pass openToAllPolicyTokens: true to confirm, or list the tokens with applyMultiTokenPoolSubsetTokenUpdates`,
         { context: { recordType: 'connection' } },
       )
+    return record
   }
 
   /** Validates `openToAllPolicyTokens` once, then the record lists. */

@@ -18,7 +18,7 @@ import {
   getMultiTokenPoolInterface,
   poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
-import { validateArray, validateUint64 } from '../../validate.ts'
+import { assertUnique, validateArray, validateUint64 } from '../../validate.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PolicyName,
@@ -71,8 +71,7 @@ export function validatePolicyRecordWrite(
 ): void {
   const keys = (list: unknown, param: string) => {
     validateArray(operation, param, list)
-    const seen = new Map<string, string>()
-    Array.from(list, (k, i) => {
+    const words = Array.from(list, (k, i) => {
       const { policyName, remoteChainSelector } = (k ?? {}) as Record<string, unknown>
       const word = encodePolicyName(operation, `${param}[${i}].policyName`, policyName)
       validateUint64(operation, `${param}[${i}].remoteChainSelector`, remoteChainSelector)
@@ -82,33 +81,18 @@ export function validatePolicyRecordWrite(
           `${param}[${i}].remoteChainSelector`,
           'is 0: this record type has no default record; give a remote chain (ZeroChainSelectorNotAllowed)',
         )
-      const key = `${word.toLowerCase()}:${String(remoteChainSelector)}`
-      const first = seen.get(key)
-      if (first !== undefined)
-        throw new CCTParamsInvalidError(
-          operation,
-          `${param}[${i}]`,
-          `repeats ${first}: give each record once`,
-        )
-      seen.set(key, `${param}[${i}]`)
+      return `${word.toLowerCase()}:${String(remoteChainSelector)}`
     })
+    assertUnique(operation, param, words, (w) => w, 'record')
   }
   if (recordsToRemove !== undefined) keys(recordsToRemove, 'recordsToRemove')
   if (recordsToSet !== undefined) keys(recordsToSet, 'recordsToSet')
   if (policiesToRemove !== undefined) {
     validateArray(operation, 'policiesToRemove', policiesToRemove)
-    const seen = new Map<string, string>()
-    Array.from(policiesToRemove, (n, i) => {
-      const word = encodePolicyName(operation, `policiesToRemove[${i}]`, n).toLowerCase()
-      const first = seen.get(word)
-      if (first !== undefined)
-        throw new CCTParamsInvalidError(
-          operation,
-          `policiesToRemove[${i}]`,
-          `repeats ${first}: give each policy once`,
-        )
-      seen.set(word, `policiesToRemove[${i}]`)
-    })
+    const words = Array.from(policiesToRemove, (n, i) =>
+      encodePolicyName(operation, `policiesToRemove[${i}]`, n).toLowerCase(),
+    )
+    assertUnique(operation, 'policiesToRemove', words, (w) => w, 'policy')
   }
   if (!recordsToRemove?.length && !policiesToRemove?.length && !recordsToSet?.length)
     throw new CCTParamsInvalidError(
@@ -207,7 +191,6 @@ export function validateInlineRecordWrite(
   ] as const) {
     if (list === undefined) continue
     validateLaneKeys(operation, param, list, 0)
-    const seen = new Map<string, string>()
     list.forEach((l, i) => {
       if (param === 'set' && l.remoteChainSelector === 0n)
         throw new CCTParamsInvalidError(
@@ -215,16 +198,14 @@ export function validateInlineRecordWrite(
           `set[${i}].remoteChainSelector`,
           'is 0: an inline record is for one remote chain (ZeroChainSelectorNotAllowed)',
         )
-      const k = `${getAddress(l.tokenAddress)}:${l.remoteChainSelector}`
-      const first = seen.get(k)
-      if (first !== undefined)
-        throw new CCTParamsInvalidError(
-          operation,
-          `${param}[${i}]`,
-          `repeats ${first}: give each lane once`,
-        )
-      seen.set(k, `${param}[${i}]`)
     })
+    assertUnique(
+      operation,
+      param,
+      list,
+      (l) => `${getAddress(l.tokenAddress)}:${l.remoteChainSelector}`,
+      'lane',
+    )
   }
   if (!remove?.length && !set?.length)
     throw new CCTParamsInvalidError(operation, 'set', 'nothing to do: give remove or set')
@@ -300,10 +281,10 @@ export abstract class PolicyRecordWriteOperation<
   /** Whether the type has a default record (chain `0n`). */
   protected abstract readonly allowDefault: boolean
 
-  /** Validates one record to set, before any RPC. */
-  protected abstract validateRecord(params: P, record: R, at: string): void
+  /** Validates one record to set before any RPC, and returns it canonical (what `encodeRecord` gets). */
+  protected abstract parseRecord(params: P, record: R, at: string): R
 
-  /** Encodes one record to set as the ABI struct. */
+  /** Encodes one parsed record to set as the ABI struct. */
   protected abstract encodeRecord(record: R, word: string): unknown
 
   /** Further refusals from the state (or other reads), for a type with its own rules. */
@@ -316,8 +297,14 @@ export abstract class PolicyRecordWriteOperation<
   protected override prepare(params: P): P {
     super.prepare(params)
     validatePolicyRecordWrite(this.name, params, { allowDefault: this.allowDefault })
-    params.recordsToSet?.forEach((r, i) => this.validateRecord(params, r, `recordsToSet[${i}]`))
-    return params
+    return params.recordsToSet
+      ? {
+          ...params,
+          recordsToSet: params.recordsToSet.map((r, i) =>
+            this.parseRecord(params, r, `recordsToSet[${i}]`),
+          ),
+        }
+      : params
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
@@ -394,11 +381,11 @@ export abstract class InlineRecordWriteOperation<
   /** The type's own role (with `CONFIG_ROLE` and `TOKEN_MANAGER_ROLE`, `_checkTokenRoles`). */
   protected abstract readonly typeRole: PoolConfigManagerRole
 
-  /** Validates one record to set, before any RPC. */
-  protected abstract validateRecord(params: P, record: R, at: string): void
+  /** Validates one record to set before any RPC, and returns it canonical (what `encodeRecord` gets). */
+  protected abstract parseRecord(params: P, record: R, at: string): R
 
-  /** Encodes one record to set as the ABI struct. */
-  protected abstract encodeRecord(record: R, at: string): unknown
+  /** Encodes one parsed record to set as the ABI struct. */
+  protected abstract encodeRecord(record: R): unknown
 
   /** Further refusals from the state (or other reads), for a type with its own rules. */
   protected async checkState(
@@ -410,8 +397,9 @@ export abstract class InlineRecordWriteOperation<
   protected override prepare(params: P): P {
     super.prepare(params)
     validateInlineRecordWrite(this.name, params)
-    params.set?.forEach((r, i) => this.validateRecord(params, r, `set[${i}]`))
-    return params
+    return params.set
+      ? { ...params, set: params.set.map((r, i) => this.parseRecord(params, r, `set[${i}]`)) }
+      : params
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
@@ -434,7 +422,7 @@ export abstract class InlineRecordWriteOperation<
       this.functionName,
       [
         (params.remove ?? []).map(toAbiLaneKey),
-        (params.set ?? []).map((r, i) => this.encodeRecord(r, `set[${i}]`)),
+        (params.set ?? []).map((r) => this.encodeRecord(r)),
       ],
     )
     // the values the write replaces: each touched lane's inline record (absent: `null`)

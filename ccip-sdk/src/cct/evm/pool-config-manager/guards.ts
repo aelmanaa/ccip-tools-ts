@@ -27,6 +27,7 @@ import {
 } from '../../multi-token-pool.ts'
 import { parseUniqueRemoteAddresses } from '../../remote-address.ts'
 import {
+  assertUnique,
   validateAddress,
   validateArray,
   validateBoolean,
@@ -719,7 +720,6 @@ export function validateMultiTokenPoolGuardOptions(
   }
   if (o.confirmDropped !== undefined) {
     validateArray(operation, at('confirmDropped'), o.confirmDropped)
-    const seen = new Map<string, string>()
     Array.from(o.confirmDropped, (d, i) => {
       const entry = at(`confirmDropped[${i}]`)
       const { lane, remotePools, flags } = (d ?? {}) as Record<string, unknown>
@@ -732,11 +732,6 @@ export function validateMultiTokenPoolGuardOptions(
       const { tokenAddress, remoteChainSelector } = lane as Record<string, unknown>
       validateAddress(operation, `${entry}.lane.tokenAddress`, tokenAddress)
       validateUint64(operation, `${entry}.lane.remoteChainSelector`, remoteChainSelector)
-      const key = guardLaneKey(lane as MultiTokenPoolLaneKey)
-      const first = seen.get(key)
-      if (first !== undefined)
-        throw new CCTParamsInvalidError(operation, entry, `repeats ${first}: give each lane once`)
-      seen.set(key, entry)
       if (remotePools !== undefined) {
         validateArray(operation, `${entry}.remotePools`, remotePools)
         parseUniqueRemoteAddresses(
@@ -753,6 +748,13 @@ export function validateMultiTokenPoolGuardOptions(
         )
       }
     })
+    assertUnique(
+      operation,
+      at('confirmDropped'),
+      o.confirmDropped as readonly MultiTokenPoolInlineRemotePoolDrop[],
+      (d) => guardLaneKey(d.lane),
+      'lane',
+    )
   }
   if (o.migrationWindowChains !== undefined) {
     validateArray(operation, at('migrationWindowChains'), o.migrationWindowChains)

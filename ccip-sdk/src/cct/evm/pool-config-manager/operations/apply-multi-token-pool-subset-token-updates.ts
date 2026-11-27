@@ -14,7 +14,7 @@ import {
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
 } from '../../multi-token-pool/contracts.ts'
-import { validateAddress, validateArray, validateUint64 } from '../../validate.ts'
+import { assertUnique, validateAddress, validateArray, validateUint64 } from '../../validate.ts'
 import { encodePolicyName } from '../contracts.ts'
 import { policyKey } from '../projection.ts'
 import { readMultiTokenPoolRecordState } from '../record-state.ts'
@@ -60,8 +60,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
       const entries = params[list]
       if (entries === undefined) continue
       validateArray(this.name, list, entries)
-      const seen = new Map<string, string>()
-      Array.from(entries as readonly unknown[], (e, i) => {
+      const keys = Array.from(entries as readonly unknown[], (e, i) => {
         const at = `${list}[${i}]`
         const { policyName, remoteChainSelector, tokenAddress } = (e ?? {}) as Record<
           string,
@@ -70,16 +69,9 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
         const word = encodePolicyName(this.name, `${at}.policyName`, policyName)
         validateUint64(this.name, `${at}.remoteChainSelector`, remoteChainSelector)
         validateAddress(this.name, `${at}.tokenAddress`, tokenAddress)
-        const key = `${word.toLowerCase()}:${String(remoteChainSelector)}:${getAddress(String(tokenAddress))}`
-        const first = seen.get(key)
-        if (first !== undefined)
-          throw new CCTParamsInvalidError(
-            this.name,
-            at,
-            `repeats ${first}: give each membership once`,
-          )
-        seen.set(key, at)
+        return `${word.toLowerCase()}:${String(remoteChainSelector)}:${getAddress(String(tokenAddress))}`
       })
+      assertUnique(this.name, list, keys, (k) => k, 'membership')
     }
     if (!params.remove?.length && !params.add?.length)
       throw new CCTParamsInvalidError(this.name, 'add', 'nothing to do: give remove or add')
