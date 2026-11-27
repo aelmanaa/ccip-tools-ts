@@ -183,6 +183,13 @@ describe('judgePoolGroupWrite', () => {
     const before = linked({ sources: [0, 2, 0, 0] }, groupChainData(), broken)
     const after = new Map([[GCP, groupChainData({ groupPaused: true })]])
     await assert.rejects(judge(chainFor(before, after)), refusedWith('REMOTE_UNREADABLE'))
+    // an accept judges at warning: a lane it cannot read never blocks the hand-over
+    const accept = await judge(chainFor(before, after), { failsClosedSeverity: 'warning' })
+    assert.deepEqual(accept.unreadable, [laneKey])
+    assert.deepEqual(
+      accept.findings.map((f) => [f.check, f.severity]),
+      [['REMOTE_UNREADABLE', 'warning']],
+    )
     const r = await judge(chainFor(before, after), { reportFindings: true })
     assert.deepEqual(r.affectedLanes, [laneKey])
     assert.deepEqual(

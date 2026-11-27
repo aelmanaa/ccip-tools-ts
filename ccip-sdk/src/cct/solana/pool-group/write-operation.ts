@@ -84,6 +84,8 @@ export type PoolGroupWritePlan<X extends object> = {
    * lanes and do not fit one transaction together); otherwise all items are simulated as one.
    */
   judgeEach?: boolean
+  /** Only these instructions are judged (the others provably change no lane, e.g. a new record). */
+  judgeFilter?: (ix: TransactionInstruction) => boolean
   /** Op-specific result fields. */
   extra: X
   /** Follow-ups, from the judgement (`null` when the plan skips the lane guard). */
@@ -98,6 +100,16 @@ const expectedOf = (plan: PoolGroupWritePlan<object>): Record<string, unknown> =
   'group.address': plan.group.toBase58(),
 })
 
+/** The instruction groups a plan's judge simulates: per item, or all as one; filtered. */
+function judgedGroups(
+  plan: PoolGroupWritePlan<object>,
+  items: readonly (readonly TransactionInstruction[])[],
+): TransactionInstruction[][] {
+  const keep = plan.judgeFilter ?? (() => true)
+  const groups = plan.judgeEach ? items.map((ixs) => ixs.filter(keep)) : [items.flat().filter(keep)]
+  return groups.filter((g) => g.length)
+}
+
 /**
  * Judges each group of instructions as its own simulated transaction, in order, and merges the
  * judgements (lanes de-duplicated; the inputs hash covers every group).
@@ -110,6 +122,16 @@ async function judgeGroups(
   for (const instructions of groups)
     parts.push(await judgePoolGroupWrite({ ...input, instructions }))
   if (parts.length === 1) return parts[0]!
+  if (!parts.length)
+    return {
+      affectedLanes: [],
+      goingLive: [],
+      findings: [],
+      failingClosed: [],
+      unreadable: [],
+      guardInputsHash: canonicalHash([]),
+      slot: BigInt(await input.chain.connection.getSlot('confirmed')),
+    }
   const unique = <T extends PoolGroupLaneKey>(lanes: T[]) =>
     lanes.filter(
       (l, i) =>
@@ -123,6 +145,7 @@ async function judgeGroups(
     goingLive: unique(parts.flatMap((p) => p.goingLive)),
     findings: parts.flatMap((p) => p.findings),
     failingClosed: parts.flatMap((p) => p.failingClosed),
+    unreadable: unique(parts.flatMap((p) => p.unreadable)),
     guardInputsHash: canonicalHash(parts.map((p) => p.guardInputsHash)),
     slot: parts.reduce((m, p) => (p.slot < m ? p.slot : m), parts[0]!.slot),
   }
@@ -256,9 +279,10 @@ export abstract class PoolGroupWriteOperation<
             ...plan.judge,
             ...parsed.guardOptions,
           },
-          plan.judgeEach
-            ? plan.items.map((i) => i.instructions)
-            : [plan.items.flatMap((i) => i.instructions)],
+          judgedGroups(
+            plan,
+            plan.items.map((i) => i.instructions),
+          ),
         )
       : null
     const packed = await packPoolGroupTransactions({
@@ -386,7 +410,10 @@ export abstract class PoolGroupWriteOperation<
             ...guardOptions,
             reportFindings: true,
           },
-          plan.judgeEach ? instructions.map((ix) => [ix]) : [instructions],
+          judgedGroups(
+            plan,
+            instructions.map((ix) => [ix]),
+          ),
         )
       : null
     const { snapshotChanges } = await import('../../evm/pool-config-manager/guard-run.ts')

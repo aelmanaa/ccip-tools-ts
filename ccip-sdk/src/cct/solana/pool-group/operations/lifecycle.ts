@@ -11,6 +11,8 @@
  * @packageDocumentation
  */
 
+import { Buffer } from 'buffer'
+
 import { BN, BorshAccountsCoder } from '@coral-xyz/anchor'
 import {
   type AccountMeta,
@@ -32,7 +34,7 @@ import {
   validateInteger,
   validateUniqueChainSelectors,
 } from '../../validate.ts'
-import { poolGroupPdas } from '../accounts.ts'
+import { poolGroupPdas, poolGroupsCoder } from '../accounts.ts'
 import { decodeRoles, keyOrNull, toBigInt } from '../decode.ts'
 import { clockUnixTimestamp } from '../lane.ts'
 import { type PoolGroupPackItem, firstTransactionItemCount } from '../packer.ts'
@@ -77,6 +79,18 @@ import {
   proposalBase,
   requireOwner,
 } from './write-common.ts'
+
+/** The `set_group_settings` instruction discriminator. */
+const SET_GROUP_SETTINGS = Buffer.from(
+  poolGroupsCoder.instruction.encode('setGroupSettings', {
+    params: {
+      maxBpsFee: 0,
+      openMembership: false,
+      minCcvActivationDelay: null,
+      hookLookupTable: null,
+    },
+  }),
+).subarray(0, 8)
 
 /** `MAX_GROUP_CHAINS` (base-token-pool `groups.rs:40`). */
 const MAX_POOL_GROUP_CHAINS = 24
@@ -323,6 +337,13 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
         minCCVActivationDelay: minCCVActivationDelayOf(decoded, now),
         roles: decodeRoles(decoded.roles),
       }
+      // a decrease already scheduled (an earlier run's) is satisfied: re-sending it would push its
+      // time back (`set_min_ccv_activation_delay` restarts the notice)
+      const pendingAt = toBigInt(decoded.pendingMinCcvActivationDelayAt)
+      const pendingDelay =
+        pendingAt !== 0n && now < pendingAt
+          ? toBigInt(decoded.pendingMinCcvActivationDelay)
+          : undefined
       if (requested.maxBpsFee !== undefined && requested.maxBpsFee > current.maxBpsFee)
         throw new CCTParamsInvalidError(
           this.name,
@@ -339,7 +360,8 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
         lowering ||
         settings.openMembership !== current.openMembership ||
         (settings.minCCVActivationDelay !== undefined &&
-          settings.minCCVActivationDelay !== current.minCCVActivationDelay)
+          settings.minCCVActivationDelay !== current.minCCVActivationDelay &&
+          settings.minCCVActivationDelay !== pendingDelay)
       ) {
         items.push({
           tokenAddresses: [],
@@ -429,6 +451,10 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
       // a new group has no lanes, and chain records start with lanes off; a resume that lowers the
       // cap changes the chain records its lanes read
       judge: judged ? { failsClosedSeverity: 'error' } : null,
+      // only set_group_settings changes what lanes read; judged alone (with every chain record it
+      // passes, it does not fit one simulated transaction with the chains)
+      judgeEach: true,
+      judgeFilter: (ix) => ix.data.subarray(0, 8).equals(SET_GROUP_SETTINGS),
       expected,
       extra,
       ...(deferred.length && {
@@ -942,6 +968,15 @@ export class AcceptPoolGroupOwnership extends PoolGroupWriteOperation<
           operation: 'resetPoolGroupPolicySecurity',
           reason: `named SECURITY policy ${policyId} carries the previous security generation: lanes taking SECURITY from it fail closed until it is reset`,
           inputs: { policyId },
+        })),
+        ...(judgement?.unreadable ?? []).map((lane) => ({
+          operation: 'checkMultiTokenPoolLane',
+          reason:
+            'the lane could not be read after the accept, so it was not judged: check it (its accounts may be of a layout this SDK does not decode)',
+          inputs: {
+            tokenAddress: lane.tokenAddress,
+            remoteChainSelector: lane.remoteChainSelector,
+          },
         })),
         ...[...bySelector].map(([remoteChainSelector, tokenAddresses]) => ({
           operation: 'syncPoolGroupCCVs',

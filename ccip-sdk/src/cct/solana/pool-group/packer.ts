@@ -495,16 +495,19 @@ async function prefundedPdas(input: PackPoolGroupInput): Promise<Set<string>> {
 }
 
 /**
- * How many leading items fit the first transaction by bytes, locks, trace and heap (no
- * simulation): for a write whose later items need the first transaction landed (they cannot be
- * simulated before it).
+ * How many leading items fit the first transaction: by bytes, locks, trace and heap, then by
+ * compute (the first chunk is simulated and halved as packing does). For a write whose later items
+ * need the first transaction landed (they cannot be simulated before it).
  * @throws {@link CCTParamsInvalidError} if a limit is invalid or the first item does not fit alone
+ * @throws the simulation's error when the first chunk fails for any other reason
  * @internal
  */
 export async function firstTransactionItemCount(input: PackPoolGroupInput): Promise<number> {
   if (!input.items.length) return 0
   const limits = await resolveLimits(input)
-  return chunk(input, limits, input.items, await prefundedPdas(input))[0]!.length
+  const first = chunk(input, limits, input.items, await prefundedPdas(input))[0]!
+  const sized = await sizeBySimulation(input, limits, first)
+  return sized[0]!.items.length
 }
 
 /**

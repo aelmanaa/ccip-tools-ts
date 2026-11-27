@@ -163,6 +163,8 @@ export type PoolGroupJudgement = {
   findings: MultiTokenPoolLaneFinding[]
   /** Lanes the write leaves failing closed, with why. */
   failingClosed: (PoolGroupLaneKey & { reason: string })[]
+  /** Affected lanes that cannot be read after the write (findings at `failsClosedSeverity`). */
+  unreadable: PoolGroupLaneKey[]
   /** keccak256 of every input the guard read for the affected lanes. */
   guardInputsHash: string
   /** The slot the simulation ran at. */
@@ -272,8 +274,8 @@ function laneAddresses(
  * group chain record or named policy records): A21 dropped trusted remote pools (refused unless in
  * `confirmDropped`), lanes going live (refused unless `goingLiveSeverity: 'warning'`: no S3 write
  * checks lanes it opens), lanes left failing closed now or from a later time (refused, or a warning
- * with `failsClosedSeverity: 'warning'`), and affected lanes that cannot be read (always an error,
- * `REMOTE_UNREADABLE`: the guard never passes a lane it cannot read). Lanes are listed only when
+ * with `failsClosedSeverity: 'warning'`), and affected lanes that cannot be read
+ * (`REMOTE_UNREADABLE` at the same severity: never passed silently; an accept warns and lists them). Lanes are listed only when
  * the write changes a lane account; that listing needs `getProgramAccounts` and fails closed
  * without it. Fails closed compares the program error, not its text.
  * @throws {@link CCTParamsInvalidError} if the simulation refuses the write, a drop is unconfirmed,
@@ -311,6 +313,7 @@ export async function judgePoolGroupWrite(
       goingLive: [],
       findings: [],
       failingClosed: [],
+      unreadable: [],
       guardInputsHash: canonicalHash({ lanes: [], changed: changedInputs }),
       slot,
     }
@@ -341,6 +344,7 @@ export async function judgePoolGroupWrite(
   const affectedLanes: PoolGroupLaneKey[] = []
   const goingLive: PoolGroupLaneKey[] = []
   const failingClosed: PoolGroupJudgement['failingClosed'] = []
+  const unreadable: PoolGroupLaneKey[] = []
   const dropped: MultiTokenPoolInlineRemotePoolDrop[] = []
   const inputs: unknown[] = []
   const nothing: LaneView = { pools: [], outbound: false, inbound: false }
@@ -363,12 +367,15 @@ export async function judgePoolGroupWrite(
     const v0 = viewOf(s0)
     const v1 = viewOf(s1)
     inputs.push({ lane: laneKey(key), before: isUnread(v0) ? { unread: v0.reason } : v0 })
+    // no local-lane "unreadable" code exists yet (LANE_UNREADABLE proposed): REMOTE_UNREADABLE, at
+    // the fails-closed severity, so an accept (warning) is never blocked by a lane it cannot read
     if (isUnread(v1)) {
+      unreadable.push(key)
       findings.push({
         check: 'REMOTE_UNREADABLE',
-        severity: 'error',
+        severity,
         ...key,
-        reason: `the lane this write changes cannot be read after it (${v1.reason}): it is not judged, so the write is refused`,
+        reason: `the local lane this write changes cannot be read after it (${v1.reason}), so it is not judged${severity === 'error' ? ': the write is refused' : ': check it with checkMultiTokenPoolLane'}`,
       })
       return
     }
@@ -446,6 +453,7 @@ export async function judgePoolGroupWrite(
     goingLive,
     findings,
     failingClosed,
+    unreadable,
     guardInputsHash: canonicalHash({ lanes: inputs, changed: changedInputs }),
     slot,
   }

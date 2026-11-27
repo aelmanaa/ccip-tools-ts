@@ -3540,9 +3540,10 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * @remarks The id defaults to a fresh random key (a known id can be front-run by anyone, since
    * `create_group` is permissionless). Refused when someone else owns a group at the id; on a group
    * `authority` owns (an earlier run landed), the op resumes (`resumed: true`) with the missing
-   * chains and the passed settings and roles that differ. Unset roles default to `authority`. More
-   * chains go into further transactions that land strictly after the first. Signer: anyone (becomes
-   * the owner).
+   * chains and the passed settings and roles that differ. Unset roles default to `authority`. Chains
+   * that do not fit the first transaction need the group it creates: the unsigned form returns that
+   * transaction and a `createPoolGroup` follow-up (same id, run once it has landed); the signed form
+   * runs the resume itself. Signer: anyone (becomes the owner).
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
    * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
    * fix

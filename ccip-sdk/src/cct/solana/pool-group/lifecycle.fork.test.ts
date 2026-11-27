@@ -331,6 +331,21 @@ describe(
       )
       assert.ok(landed.remoteChainSelectors.length < chains.length)
       assert.equal(g.roles.pauser, ops.publicKey.toBase58())
+      // N3: a lowered notice is scheduled once; a rerun with the same value builds nothing
+      const lower = await cct.createPoolGroup({
+        ...ref,
+        poolGroupId: unsigned.poolGroupId,
+        minCCVActivationDelay: 3_600,
+        wallet: new AnchorWallet(owner),
+      })
+      assert.equal(lower.transactions.length, 1)
+      const again = await cct.generateUnsignedCreatePoolGroup({
+        ...ref,
+        poolGroupId: unsigned.poolGroupId,
+        minCCVActivationDelay: 3_600,
+        payer: owner.publicKey.toBase58(),
+      })
+      assert.equal(again.transactions.length, 0)
       // a higher cap on resume is refused, naming the fix
       await assert.rejects(
         cct.generateUnsignedCreatePoolGroup({
