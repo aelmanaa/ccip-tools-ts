@@ -36,6 +36,7 @@ import {
   DEFAULT_MAX_TRANSFER_FEE_BPS,
   DEFAULT_MIN_DEST_GAS_OVERHEAD,
   HOOK_DEST_GAS_OVERHEAD,
+  abiWord,
   longPoolDataBytes,
   sortFindings,
 } from '../../multi-token-pool.ts'
@@ -60,9 +61,6 @@ import {
 const DIRECTIONS = ['outbound', 'inbound'] as const
 /** The account locks a Solana transaction may take. */
 export const SOLANA_ACCOUNT_LOCK_LIMIT = 64
-
-/** The 32-byte word the EVM OnRamp sends for an address (`abi.encode(address)`), lowercase hex. */
-const abiWord = (address: string) => zeroPadValue(getAddress(address), 32).toLowerCase()
 
 /** The remote lane back, as the remote side reads it toward this chain. @internal */
 export type SolanaLaneRemoteBack = {
@@ -348,8 +346,11 @@ export function evaluateSolanaLaneRemote(
     return 'known'
   }
   if (side.registryPool === null) {
-    // a token paused outbound whose remote side is not registered yet may wait (onboarding)
-    const waiting = lane.outboundStatus.status === 'paused' && lane.outboundStatus.scope === 'token'
+    // a token paused or stopped outbound whose remote side is not registered yet may wait
+    // (onboarding), as on EVM: remote stays `'missing'`, and `ok` may be true
+    const waiting =
+      (lane.outboundStatus.status === 'paused' && lane.outboundStatus.scope === 'token') ||
+      lane.stopped.outbound
     if (!waiting)
       add(
         'NO_REMOTE_POOL',

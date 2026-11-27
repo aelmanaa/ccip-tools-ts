@@ -38,6 +38,7 @@ import {
   type MultiTokenPoolLane,
   type MultiTokenPoolTransferQuote,
   type PoolDataFormat,
+  isStop,
   longPoolDataBytes,
 } from '../../multi-token-pool.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
@@ -90,8 +91,9 @@ function observedBucket(b: LaneGroupObservation['outboundRateLimit']): RateLimit
   }
 }
 
-/** An enabled bucket with no capacity and no rate holds the direction (a stop). */
-const isStop = (b: RateLimiterState | undefined) => !!b && b.capacity === 0n && b.rate === 0n
+/** A bucket as the shared stop rule reads it (`null`: disabled). */
+const stopped = (b: RateLimiterState | undefined) =>
+  isStop({ isEnabled: !!b, capacity: b?.capacity ?? 0n, rate: b?.rate ?? 0n })
 
 /**
  * The lane's status in one direction, with the shared scope mapping: pool-group pause → `'global'`;
@@ -302,7 +304,7 @@ export async function readSolanaMultiTokenPoolLane(
       poolDataFormat,
       sources: laneSources(state, policyIds),
       rateLimits,
-      stopped: { outbound: isStop(rateLimits.outbound), inbound: isStop(rateLimits.inbound) },
+      stopped: { outbound: stopped(rateLimits.outbound), inbound: stopped(rateLimits.inbound) },
       ...(fee?.isEnabled && { tokenTransferFeeConfig: fee }),
       ccvs: laneCcvs(state),
       hasHooks,

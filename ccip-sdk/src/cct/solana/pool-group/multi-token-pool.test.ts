@@ -504,7 +504,7 @@ describe('checkMultiTokenPoolLane (Solana): remote rules', () => {
     assert.deepEqual(judge(attested, LONG).errors, [])
   })
 
-  it('no remote pool is missing, waived only while the token is paused outbound', () => {
+  it('no remote pool is missing, waived only while the token is paused or stopped outbound', () => {
     const none = known({ registryPool: null })
     const r = judge(none)
     assert.equal(r.remote, 'missing')
@@ -517,6 +517,14 @@ describe('checkMultiTokenPoolLane (Solana): remote rules', () => {
       outboundStatus: { status: 'paused', scope: 'token', direction: 'outbound' },
     })
     assert.deepEqual(tokenPaused.errors, [])
+    assert.equal(tokenPaused.remote, 'missing')
+    const stopped = judge(none, { stopped: { outbound: true, inbound: false } })
+    assert.deepEqual(stopped.errors, [])
+    assert.equal(stopped.remote, 'missing')
+    // an inbound stop does not hold sends
+    assert.deepEqual(judge(none, { stopped: { outbound: false, inbound: true } }).errors, [
+      'NO_REMOTE_POOL',
+    ])
   })
 
   it('legacy data from a multi-token pool, and inbound below the remote outbound in local units', () => {
