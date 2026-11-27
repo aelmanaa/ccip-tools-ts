@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict'
 import { execSync } from 'node:child_process'
 import { Console } from 'node:console'
+import { type AddressInfo, createServer } from 'node:net'
 import { after, before, describe, it } from 'node:test'
 
 import {
@@ -27,6 +28,15 @@ import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { EVMTokenManager } from '../../index.ts'
 import { mined as minedOn } from './fork.test.helpers.ts'
+
+/** A port the OS reports free right now (the fork binds it immediately after). */
+async function freePort(): Promise<number> {
+  const server = createServer()
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as AddressInfo
+  await new Promise((resolve) => server.close(resolve))
+  return port
+}
 
 function isAnvilAvailable(): boolean {
   try {
@@ -59,7 +69,8 @@ describe('MTTP role, admin and fee writes (Sepolia fork)', { skip, timeout: 600_
       {
         forkUrl: rpcEndpoint('RPC_SEPOLIA'),
         chainId: 11155111,
-        port: 8663,
+        // a free port: several sessions run these forks on one machine, a fixed one collides
+        port: await freePort(),
         retries: 8,
         timeout: 15_000,
         forkRetryBackoff: 1_000,
