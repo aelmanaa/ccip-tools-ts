@@ -105,8 +105,8 @@ function parsePolicyWrite(
   return { ...parseGroupWrite(operation, params), policyId: params.policyId }
 }
 
-/** Reads the group and one policy; refuses a policy that does not exist. */
-async function readPolicy(
+/** Reads the group and one policy; refuses a policy that does not exist. @internal */
+export async function readPolicy(
   operation: string,
   chain: SolanaChain,
   ref: ParsedPoolGroupRef,
@@ -511,8 +511,13 @@ export class ClosePoolGroupPolicyChainRecord extends PoolGroupWriteOperation<
 
 type ParsedPolicySection = ParsedPolicyChain & { section: SectionWrite; detach: boolean }
 
-/** Requires the policy to carry the class of a section. */
-function requireCarried(operation: string, classes: number, cls: PoolGroupPolicyClass, id: number) {
+/** Requires the policy to carry the class of a section. @internal */
+export function requireCarried(
+  operation: string,
+  classes: number,
+  cls: PoolGroupPolicyClass,
+  id: number,
+) {
   if ((classes & classBit(cls)) === 0)
     throw new CCTParamsInvalidError(
       operation,

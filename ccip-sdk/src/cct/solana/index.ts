@@ -29,6 +29,7 @@ import {
   OnboardToken,
 } from './onboarding/onboard-token.ts'
 import { POOL_GROUP_CHAIN_OPERATIONS } from './pool-group/operations/chains.ts'
+import { POOL_GROUP_HOOK_OPERATIONS } from './pool-group/operations/hook-writes.ts'
 import {
   CheckMultiTokenPoolLane,
   CheckPoolGroupSnapshot,
@@ -49,7 +50,9 @@ import {
   HasPoolGroupListEntry,
 } from './pool-group/operations/index.ts'
 import { POOL_GROUP_LIFECYCLE_OPERATIONS } from './pool-group/operations/lifecycle.ts'
+import { POOL_GROUP_PAUSE_OPERATIONS } from './pool-group/operations/pauses.ts'
 import { POOL_GROUP_POLICY_OPERATIONS } from './pool-group/operations/policies.ts'
+import { POOL_GROUP_SECURITY_OPERATIONS } from './pool-group/operations/security.ts'
 import type {
   CheckPoolGroupSnapshotParams,
   GetPoolGroupChainParams,
@@ -150,6 +153,70 @@ import type {
   GenerateSetPoolGroupSettingsResult,
   GenerateTransferPoolGroupOwnershipParams,
   GenerateTransferPoolGroupOwnershipResult,
+  ExecuteAcceptPoolGroupListAdminParams,
+  ExecuteAcceptPoolGroupListAdminResult,
+  ExecuteActivatePoolGroupCCVsNowParams,
+  ExecuteActivatePoolGroupCCVsNowResult,
+  ExecuteApplyPoolGroupListUpdatesParams,
+  ExecuteApplyPoolGroupListUpdatesResult,
+  ExecuteCreatePoolGroupAllowlistParams,
+  ExecuteCreatePoolGroupAllowlistResult,
+  ExecuteCreatePoolGroupBlocklistParams,
+  ExecuteCreatePoolGroupBlocklistResult,
+  ExecuteResetPoolGroupPolicySecurityParams,
+  ExecuteResetPoolGroupPolicySecurityResult,
+  ExecuteSchedulePoolGroupCCVsParams,
+  ExecuteSchedulePoolGroupCCVsResult,
+  ExecuteSetPoolGroupAllowDroppingDefaultCCVsParams,
+  ExecuteSetPoolGroupAllowDroppingDefaultCCVsResult,
+  ExecuteSetPoolGroupChainPauseParams,
+  ExecuteSetPoolGroupChainPauseResult,
+  ExecuteSetPoolGroupHookConfigParams,
+  ExecuteSetPoolGroupHookConfigResult,
+  ExecuteSetPoolGroupLanePauseParams,
+  ExecuteSetPoolGroupLanePauseResult,
+  ExecuteSetPoolGroupPauseParams,
+  ExecuteSetPoolGroupPauseResult,
+  ExecuteSetPoolGroupPolicyEngineParams,
+  ExecuteSetPoolGroupPolicyEngineResult,
+  ExecuteSyncPoolGroupCCVsParams,
+  ExecuteSyncPoolGroupCCVsResult,
+  ExecuteSyncPoolGroupPolicyCCVsParams,
+  ExecuteSyncPoolGroupPolicyCCVsResult,
+  ExecuteTransferPoolGroupListAdminParams,
+  ExecuteTransferPoolGroupListAdminResult,
+  GenerateAcceptPoolGroupListAdminParams,
+  GenerateAcceptPoolGroupListAdminResult,
+  GenerateActivatePoolGroupCCVsNowParams,
+  GenerateActivatePoolGroupCCVsNowResult,
+  GenerateApplyPoolGroupListUpdatesParams,
+  GenerateApplyPoolGroupListUpdatesResult,
+  GenerateCreatePoolGroupAllowlistParams,
+  GenerateCreatePoolGroupAllowlistResult,
+  GenerateCreatePoolGroupBlocklistParams,
+  GenerateCreatePoolGroupBlocklistResult,
+  GenerateResetPoolGroupPolicySecurityParams,
+  GenerateResetPoolGroupPolicySecurityResult,
+  GenerateSchedulePoolGroupCCVsParams,
+  GenerateSchedulePoolGroupCCVsResult,
+  GenerateSetPoolGroupAllowDroppingDefaultCCVsParams,
+  GenerateSetPoolGroupAllowDroppingDefaultCCVsResult,
+  GenerateSetPoolGroupChainPauseParams,
+  GenerateSetPoolGroupChainPauseResult,
+  GenerateSetPoolGroupHookConfigParams,
+  GenerateSetPoolGroupHookConfigResult,
+  GenerateSetPoolGroupLanePauseParams,
+  GenerateSetPoolGroupLanePauseResult,
+  GenerateSetPoolGroupPauseParams,
+  GenerateSetPoolGroupPauseResult,
+  GenerateSetPoolGroupPolicyEngineParams,
+  GenerateSetPoolGroupPolicyEngineResult,
+  GenerateSyncPoolGroupCCVsParams,
+  GenerateSyncPoolGroupCCVsResult,
+  GenerateSyncPoolGroupPolicyCCVsParams,
+  GenerateSyncPoolGroupPolicyCCVsResult,
+  GenerateTransferPoolGroupListAdminParams,
+  GenerateTransferPoolGroupListAdminResult,
 } from './pool-group/write-types.ts'
 import {
   type SerializeUnsignedTxOptions,
@@ -199,6 +266,7 @@ import {
   type GetTokenAdminRegistryResult,
   AcceptAdmin,
   AppendToLookupTable,
+  FreezeLookupTable,
   CreateLookupTable,
   GetSupportedTokens,
   GetTokenAdminRegistry,
@@ -208,6 +276,10 @@ import {
   SetPoolInterfaceImplementation,
   TransferAdmin,
   UpgradeTokenAdminRegistry,
+  type ExecuteFreezeLookupTableParams,
+  type ExecuteFreezeLookupTableResult,
+  type GenerateFreezeLookupTableParams,
+  type GenerateFreezeLookupTableResult,
 } from './token-admin-registry/operations/index.ts'
 import {
   type ExecuteAcceptPoolOwnershipParams,
@@ -386,6 +458,7 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   // Token admin registry operations
   readonly #acceptAdmin = new AcceptAdmin()
   readonly #appendToLookupTable = new AppendToLookupTable()
+  readonly #freezeLookupTable = new FreezeLookupTable()
   readonly #createLookupTable = new CreateLookupTable()
   readonly #getSupportedTokens = new GetSupportedTokens()
   readonly #getTokenAdminRegistry = new GetTokenAdminRegistry()
@@ -4633,6 +4706,923 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
     opts: ExecuteResetPoolGroupLaneBucketsParams,
   ): Promise<ExecuteResetPoolGroupLaneBucketsResult> {
     return POOL_GROUP_POLICY_OPERATIONS.resetPoolGroupLaneBuckets.execute(this.chain, opts)
+  }
+
+  // Pool groups (S4: pauses, CCVs, hooks) and lookup-table freezing
+  /**
+   * Builds the unsigned `set_group_pause` transactions: sets or clears the pool group pause.
+   * @remarks Passes every chain record. Clearing a flag makes lanes live, so the op runs the lane
+   * check on every lane it makes live (needs `getChain`, no attestations) and refuses an error
+   * finding; `goingLive` and `findings` are returned. Signer: owner or pauser to set; owner or
+   * unpauser to clear. Each transaction lists `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSetPoolGroupPause({
+   *   poolGroupId, paused: true,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSetPoolGroupPause(
+    opts: GenerateSetPoolGroupPauseParams,
+  ): Promise<GenerateSetPoolGroupPauseResult> {
+    return POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupPause.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `set_group_pause` with `opts.wallet` as payer and default authority: sets or
+   * clears the pool group pause.
+   * @remarks Passes every chain record. Clearing a flag makes lanes live, so the op runs the lane
+   * check on every lane it makes live (needs `getChain`, no attestations) and refuses an error
+   * finding; `goingLive` and `findings` are returned. Re-reads merged and snapshotted state right
+   * before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.setPoolGroupPause({
+   *   poolGroupId, paused: true,
+   *   wallet,
+   * })
+   * ```
+   */
+  setPoolGroupPause(opts: ExecuteSetPoolGroupPauseParams): Promise<ExecuteSetPoolGroupPauseResult> {
+    return POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupPause.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `set_group_chain_pause` transactions: sets one or both direction flags of a
+   * chain record; an omitted direction keeps its flag.
+   * @remarks The snapshot protects a pause set by someone else meanwhile from being lifted by a
+   * stale proposal. Clearing a flag makes lanes live, so the op runs the lane check on every lane
+   * it makes live (needs `getChain`, no attestations) and refuses an error finding; `goingLive` and
+   * `findings` are returned. Signer: owner or pauser to set; owner or unpauser to clear. Each
+   * transaction lists `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
+   * executor every written field must be given explicitly instead of merged)
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSetPoolGroupChainPause({
+   *   poolGroupId, remoteChainSelector, pausedOutbound: true,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSetPoolGroupChainPause(
+    opts: GenerateSetPoolGroupChainPauseParams,
+  ): Promise<GenerateSetPoolGroupChainPauseResult> {
+    return POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupChainPause.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `set_group_chain_pause` with `opts.wallet` as payer and default authority: sets
+   * one or both direction flags of a chain record; an omitted direction keeps its flag.
+   * @remarks The snapshot protects a pause set by someone else meanwhile from being lifted by a
+   * stale proposal. Clearing a flag makes lanes live, so the op runs the lane check on every lane
+   * it makes live (needs `getChain`, no attestations) and refuses an error finding; `goingLive` and
+   * `findings` are returned. Re-reads merged and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
+   * executor every written field must be given explicitly instead of merged)
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.setPoolGroupChainPause({
+   *   poolGroupId, remoteChainSelector, pausedOutbound: true,
+   *   wallet,
+   * })
+   * ```
+   */
+  setPoolGroupChainPause(
+    opts: ExecuteSetPoolGroupChainPauseParams,
+  ): Promise<ExecuteSetPoolGroupChainPauseResult> {
+    return POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupChainPause.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `set_lane_pause` transactions: sets a mint's lane pause flags on some
+   * chains; omitted directions keep their flag.
+   * @remarks Clearing a flag makes lanes live, so the op runs the lane check on every lane it makes
+   * live (needs `getChain`, no attestations) and refuses an error finding; `goingLive` and
+   * `findings` are returned. Signer: the lane's pool owner or a pause role. Each transaction lists
+   * `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
+   * executor every written field must be given explicitly instead of merged)
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSetPoolGroupLanePause({
+   *   poolGroupId, tokenAddress: mint, remoteChainSelectors: [sepolia], pausedOutbound: true,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSetPoolGroupLanePause(
+    opts: GenerateSetPoolGroupLanePauseParams,
+  ): Promise<GenerateSetPoolGroupLanePauseResult> {
+    return POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupLanePause.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `set_lane_pause` with `opts.wallet` as payer and default authority: sets a
+   * mint's lane pause flags on some chains; omitted directions keep their flag.
+   * @remarks Clearing a flag makes lanes live, so the op runs the lane check on every lane it makes
+   * live (needs `getChain`, no attestations) and refuses an error finding; `goingLive` and
+   * `findings` are returned. Re-reads merged and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved (with the `'squads-v4'`
+   * executor every written field must be given explicitly instead of merged)
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.setPoolGroupLanePause({
+   *   poolGroupId, tokenAddress: mint, remoteChainSelectors: [sepolia], pausedOutbound: true,
+   *   wallet,
+   * })
+   * ```
+   */
+  setPoolGroupLanePause(
+    opts: ExecuteSetPoolGroupLanePauseParams,
+  ): Promise<ExecuteSetPoolGroupLanePauseResult> {
+    return POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupLanePause.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `schedule_group_ccvs` transactions: schedules a CCV set on a SECURITY
+   * target.
+   * @remarks Non-empty lists keep `'default'` unless dropping is allowed (F2). With the
+   * `'squads-v4'` executor, `activatesAt` or `approvalWindowSeconds` is required. A replaced
+   * pending set is reported in `followUps` (re-sync). Signer: owner or security admin. Each
+   * transaction lists `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSchedulePoolGroupCCVs({
+   *   poolGroupId, outbound: ['default'], inbound: ['default', verifier], approvalWindowSeconds: 86_400,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSchedulePoolGroupCCVs(
+    opts: GenerateSchedulePoolGroupCCVsParams,
+  ): Promise<GenerateSchedulePoolGroupCCVsResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.schedulePoolGroupCCVs.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `schedule_group_ccvs` with `opts.wallet` as payer and default authority:
+   * schedules a CCV set on a SECURITY target.
+   * @remarks Non-empty lists keep `'default'` unless dropping is allowed (F2). With the
+   * `'squads-v4'` executor, `activatesAt` or `approvalWindowSeconds` is required. A replaced
+   * pending set is reported in `followUps` (re-sync). Re-reads merged and snapshotted state right
+   * before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.schedulePoolGroupCCVs({
+   *   poolGroupId, outbound: ['default'], inbound: ['default', verifier], approvalWindowSeconds: 86_400,
+   *   wallet,
+   * })
+   * ```
+   */
+  schedulePoolGroupCCVs(
+    opts: ExecuteSchedulePoolGroupCCVsParams,
+  ): Promise<ExecuteSchedulePoolGroupCCVsResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.schedulePoolGroupCCVs.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `activate_group_ccvs_now` transactions: activates a CCV set at once
+   * (emergency).
+   * @remarks Unsynced lanes fail closed at once; `followUps` lists the syncs. Signer: the pool
+   * group owner. Each transaction lists `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedActivatePoolGroupCCVsNow({
+   *   poolGroupId, outbound: ['default'], inbound: ['default'],
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedActivatePoolGroupCCVsNow(
+    opts: GenerateActivatePoolGroupCCVsNowParams,
+  ): Promise<GenerateActivatePoolGroupCCVsNowResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.activatePoolGroupCCVsNow.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `activate_group_ccvs_now` with `opts.wallet` as payer and default authority:
+   * activates a CCV set at once (emergency).
+   * @remarks Unsynced lanes fail closed at once; `followUps` lists the syncs. Re-reads merged and
+   * snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.activatePoolGroupCCVsNow({
+   *   poolGroupId, outbound: ['default'], inbound: ['default'],
+   *   wallet,
+   * })
+   * ```
+   */
+  activatePoolGroupCCVsNow(
+    opts: ExecuteActivatePoolGroupCCVsNowParams,
+  ): Promise<ExecuteActivatePoolGroupCCVsNowResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.activatePoolGroupCCVsNow.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `set_allow_dropping_default_ccvs` transactions: allows or forbids dropping
+   * the default CCVs in later schedules.
+   * @remarks Refused on a record that still inherits SECURITY. Signer: the pool group owner. Each
+   * transaction lists `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSetPoolGroupAllowDroppingDefaultCCVs({
+   *   poolGroupId, remoteChainSelector, allow: false,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSetPoolGroupAllowDroppingDefaultCCVs(
+    opts: GenerateSetPoolGroupAllowDroppingDefaultCCVsParams,
+  ): Promise<GenerateSetPoolGroupAllowDroppingDefaultCCVsResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.setPoolGroupAllowDroppingDefaultCCVs.generate(
+      this.chain,
+      opts,
+    )
+  }
+  /**
+   * Signs and sends `set_allow_dropping_default_ccvs` with `opts.wallet` as payer and default
+   * authority: allows or forbids dropping the default CCVs in later schedules.
+   * @remarks Refused on a record that still inherits SECURITY. Re-reads merged and snapshotted
+   * state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.setPoolGroupAllowDroppingDefaultCCVs({
+   *   poolGroupId, remoteChainSelector, allow: false,
+   *   wallet,
+   * })
+   * ```
+   */
+  setPoolGroupAllowDroppingDefaultCCVs(
+    opts: ExecuteSetPoolGroupAllowDroppingDefaultCCVsParams,
+  ): Promise<ExecuteSetPoolGroupAllowDroppingDefaultCCVsResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.setPoolGroupAllowDroppingDefaultCCVs.execute(
+      this.chain,
+      opts,
+    )
+  }
+  /**
+   * Builds the unsigned `reset_policy_security` transactions: resets a named SECURITY policy after
+   * an ownership acceptance.
+   * @remarks  Signer: the pool group owner. Each transaction lists `requiredSigners` and carries
+   * its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedResetPoolGroupPolicySecurity({
+   *   poolGroupId, policyId: 0,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedResetPoolGroupPolicySecurity(
+    opts: GenerateResetPoolGroupPolicySecurityParams,
+  ): Promise<GenerateResetPoolGroupPolicySecurityResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.resetPoolGroupPolicySecurity.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `reset_policy_security` with `opts.wallet` as payer and default authority:
+   * resets a named SECURITY policy after an ownership acceptance.
+   * @remarks  Re-reads merged and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.resetPoolGroupPolicySecurity({
+   *   poolGroupId, policyId: 0,
+   *   wallet,
+   * })
+   * ```
+   */
+  resetPoolGroupPolicySecurity(
+    opts: ExecuteResetPoolGroupPolicySecurityParams,
+  ): Promise<ExecuteResetPoolGroupPolicySecurityResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.resetPoolGroupPolicySecurity.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `sync_group_ccvs` transactions: copies the record's CCV set into its lanes.
+   * @remarks Without mints, every unsynced lane on the record (`getPoolGroupLanes`). Signer:
+   * anyone. Each transaction lists `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSyncPoolGroupCCVs({
+   *   poolGroupId, remoteChainSelector,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSyncPoolGroupCCVs(
+    opts: GenerateSyncPoolGroupCCVsParams,
+  ): Promise<GenerateSyncPoolGroupCCVsResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.syncPoolGroupCCVs.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `sync_group_ccvs` with `opts.wallet` as payer and default authority: copies the
+   * record's CCV set into its lanes.
+   * @remarks Without mints, every unsynced lane on the record (`getPoolGroupLanes`). Re-reads
+   * merged and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.syncPoolGroupCCVs({
+   *   poolGroupId, remoteChainSelector,
+   *   wallet,
+   * })
+   * ```
+   */
+  syncPoolGroupCCVs(opts: ExecuteSyncPoolGroupCCVsParams): Promise<ExecuteSyncPoolGroupCCVsResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.syncPoolGroupCCVs.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `sync_policy_ccvs` transactions: copies a named policy chain record's CCV
+   * set into its lanes.
+   * @remarks  Signer: anyone. Each transaction lists `requiredSigners` and carries its compute
+   * estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSyncPoolGroupPolicyCCVs({
+   *   poolGroupId, policyId: 0, remoteChainSelector,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSyncPoolGroupPolicyCCVs(
+    opts: GenerateSyncPoolGroupPolicyCCVsParams,
+  ): Promise<GenerateSyncPoolGroupPolicyCCVsResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.syncPoolGroupPolicyCCVs.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `sync_policy_ccvs` with `opts.wallet` as payer and default authority: copies a
+   * named policy chain record's CCV set into its lanes.
+   * @remarks  Re-reads merged and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.syncPoolGroupPolicyCCVs({
+   *   poolGroupId, policyId: 0, remoteChainSelector,
+   *   wallet,
+   * })
+   * ```
+   */
+  syncPoolGroupPolicyCCVs(
+    opts: ExecuteSyncPoolGroupPolicyCCVsParams,
+  ): Promise<ExecuteSyncPoolGroupPolicyCCVsResult> {
+    return POOL_GROUP_SECURITY_OPERATIONS.syncPoolGroupPolicyCCVs.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `create_allowlist` transactions: creates an allowlist of this pool group.
+   * @remarks `enabled` is fixed for life; `listId` defaults to a random key. Signer: owner or
+   * security admin. Each transaction lists `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedCreatePoolGroupAllowlist({
+   *   poolGroupId, enabled: true, admin: ops,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedCreatePoolGroupAllowlist(
+    opts: GenerateCreatePoolGroupAllowlistParams,
+  ): Promise<GenerateCreatePoolGroupAllowlistResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.createPoolGroupAllowlist.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `create_allowlist` with `opts.wallet` as payer and default authority: creates
+   * an allowlist of this pool group.
+   * @remarks `enabled` is fixed for life; `listId` defaults to a random key. Re-reads merged and
+   * snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.createPoolGroupAllowlist({
+   *   poolGroupId, enabled: true, admin: ops,
+   *   wallet,
+   * })
+   * ```
+   */
+  createPoolGroupAllowlist(
+    opts: ExecuteCreatePoolGroupAllowlistParams,
+  ): Promise<ExecuteCreatePoolGroupAllowlistResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.createPoolGroupAllowlist.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `create_blocklist` transactions: creates a blocklist shared by every pool
+   * group of the program.
+   * @remarks  Signer: anyone (`creator`). Each transaction lists `requiredSigners` and carries its
+   * compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedCreatePoolGroupBlocklist({
+   *   admin: ops,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedCreatePoolGroupBlocklist(
+    opts: GenerateCreatePoolGroupBlocklistParams,
+  ): Promise<GenerateCreatePoolGroupBlocklistResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.createPoolGroupBlocklist.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `create_blocklist` with `opts.wallet` as payer and default authority: creates a
+   * blocklist shared by every pool group of the program.
+   * @remarks  Re-reads merged and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.createPoolGroupBlocklist({
+   *   admin: ops,
+   *   wallet,
+   * })
+   * ```
+   */
+  createPoolGroupBlocklist(
+    opts: ExecuteCreatePoolGroupBlocklistParams,
+  ): Promise<ExecuteCreatePoolGroupBlocklistResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.createPoolGroupBlocklist.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `apply_list_updates` transactions: adds and removes list entries.
+   * @remarks Existing adds and absent removes are dropped; blocklist keys are normalized. Signer:
+   * the list admin (pays entry rent). Each transaction lists `requiredSigners` and carries its
+   * compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedApplyPoolGroupListUpdates({
+   *   list, add: ['0xSender...'],
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedApplyPoolGroupListUpdates(
+    opts: GenerateApplyPoolGroupListUpdatesParams,
+  ): Promise<GenerateApplyPoolGroupListUpdatesResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.applyPoolGroupListUpdates.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `apply_list_updates` with `opts.wallet` as payer and default authority: adds
+   * and removes list entries.
+   * @remarks Existing adds and absent removes are dropped; blocklist keys are normalized. Re-reads
+   * merged and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.applyPoolGroupListUpdates({
+   *   list, add: ['0xSender...'],
+   *   wallet,
+   * })
+   * ```
+   */
+  applyPoolGroupListUpdates(
+    opts: ExecuteApplyPoolGroupListUpdatesParams,
+  ): Promise<ExecuteApplyPoolGroupListUpdatesResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.applyPoolGroupListUpdates.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `transfer_list_admin` transactions: proposes a new list admin.
+   * @remarks On a hand-over, land it with the accept in one transaction. Signer: the list admin, or
+   * the owner for an allowlist. Each transaction lists `requiredSigners` and carries its compute
+   * estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedTransferPoolGroupListAdmin({
+   *   list, proposedAdmin: newAdmin,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedTransferPoolGroupListAdmin(
+    opts: GenerateTransferPoolGroupListAdminParams,
+  ): Promise<GenerateTransferPoolGroupListAdminResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.transferPoolGroupListAdmin.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `transfer_list_admin` with `opts.wallet` as payer and default authority:
+   * proposes a new list admin.
+   * @remarks On a hand-over, land it with the accept in one transaction. Re-reads merged and
+   * snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.transferPoolGroupListAdmin({
+   *   list, proposedAdmin: newAdmin,
+   *   wallet,
+   * })
+   * ```
+   */
+  transferPoolGroupListAdmin(
+    opts: ExecuteTransferPoolGroupListAdminParams,
+  ): Promise<ExecuteTransferPoolGroupListAdminResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.transferPoolGroupListAdmin.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `accept_list_admin` transactions: accepts list administration.
+   * @remarks  Signer: the proposed admin. Each transaction lists `requiredSigners` and carries its
+   * compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedAcceptPoolGroupListAdmin({
+   *   list,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedAcceptPoolGroupListAdmin(
+    opts: GenerateAcceptPoolGroupListAdminParams,
+  ): Promise<GenerateAcceptPoolGroupListAdminResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.acceptPoolGroupListAdmin.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `accept_list_admin` with `opts.wallet` as payer and default authority: accepts
+   * list administration.
+   * @remarks  Re-reads merged and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.acceptPoolGroupListAdmin({
+   *   list,
+   *   wallet,
+   * })
+   * ```
+   */
+  acceptPoolGroupListAdmin(
+    opts: ExecuteAcceptPoolGroupListAdminParams,
+  ): Promise<ExecuteAcceptPoolGroupListAdminResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.acceptPoolGroupListAdmin.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `set_hook_config` transactions: sets a SECURITY target's allowlist and
+   * blocklist.
+   * @remarks Applies at once; the allowlist must be enabled and of this pool group. Signer: owner
+   * or security admin to add; owner to remove or replace. Each transaction lists `requiredSigners`
+   * and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSetPoolGroupHookConfig({
+   *   poolGroupId, remoteChainSelector, allowlist,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSetPoolGroupHookConfig(
+    opts: GenerateSetPoolGroupHookConfigParams,
+  ): Promise<GenerateSetPoolGroupHookConfigResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.setPoolGroupHookConfig.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `set_hook_config` with `opts.wallet` as payer and default authority: sets a
+   * SECURITY target's allowlist and blocklist.
+   * @remarks Applies at once; the allowlist must be enabled and of this pool group. Re-reads merged
+   * and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.setPoolGroupHookConfig({
+   *   poolGroupId, remoteChainSelector, allowlist,
+   *   wallet,
+   * })
+   * ```
+   */
+  setPoolGroupHookConfig(
+    opts: ExecuteSetPoolGroupHookConfigParams,
+  ): Promise<ExecuteSetPoolGroupHookConfigResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.setPoolGroupHookConfig.execute(this.chain, opts)
+  }
+  /**
+   * Builds the unsigned `set_policy_engine` transactions: attaches, replaces or removes a policy
+   * engine on a SECURITY target.
+   * @remarks CPIs `attach` on the new engine and `detach` on the old unless `skipDetach`;
+   * deny-listed programs refused. Signer: the pool group owner. Each transaction lists
+   * `requiredSigners` and carries its compute estimate.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @example
+   * ```ts
+   * const { transactions } = await sol.generateUnsignedSetPoolGroupPolicyEngine({
+   *   poolGroupId, engine,
+   *   payer: vault,
+   * })
+   * ```
+   */
+  generateUnsignedSetPoolGroupPolicyEngine(
+    opts: GenerateSetPoolGroupPolicyEngineParams,
+  ): Promise<GenerateSetPoolGroupPolicyEngineResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.setPoolGroupPolicyEngine.generate(this.chain, opts)
+  }
+  /**
+   * Signs and sends `set_policy_engine` with `opts.wallet` as payer and default authority:
+   * attaches, replaces or removes a policy engine on a SECURITY target.
+   * @remarks CPIs `attach` on the new engine and `detach` on the old unless `skipDetach`;
+   * deny-listed programs refused. Re-reads merged and snapshotted state right before sending.
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
+   * not hold the gate on the decoded pool group, or a guard refuses the state; `reason` names the
+   * fix
+   * @throws {@link CCTOperationUnsupportedError} if the pool program lacks the pool-group feature
+   * the op needs (probe result `missing`)
+   * @throws {@link CCTDataDecodeError} if an account cannot be decoded or its marker and tail
+   * disagree
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { transactions } = await sol.setPoolGroupPolicyEngine({
+   *   poolGroupId, engine,
+   *   wallet,
+   * })
+   * ```
+   */
+  setPoolGroupPolicyEngine(
+    opts: ExecuteSetPoolGroupPolicyEngineParams,
+  ): Promise<ExecuteSetPoolGroupPolicyEngineResult> {
+    return POOL_GROUP_HOOK_OPERATIONS.setPoolGroupPolicyEngine.execute(this.chain, opts)
+  }
+  /**
+   * Builds an unsigned `FreezeLookupTable` instruction (ALT program).
+   * @remarks Generic, not pool-group specific (CLI ADR §15 item 10). Refused on an empty table.
+   * Signer: the table authority.
+   * @throws {@link CCTParamsInvalidError} if the table is empty, frozen or not owned by `authority`
+   * @example
+   * ```ts
+   * const unsigned = await sol.generateUnsignedFreezeLookupTable({ lookupTableAddress, payer })
+   * ```
+   */
+  generateUnsignedFreezeLookupTable(
+    opts: GenerateFreezeLookupTableParams,
+  ): Promise<GenerateFreezeLookupTableResult> {
+    return this.#freezeLookupTable.generate(this.chain, opts)
+  }
+  /**
+   * Freezes a lookup table with `opts.wallet`.
+   * @remarks See `generateUnsignedFreezeLookupTable`.
+   * @throws {@link CCTParamsInvalidError} as above
+   * @throws {@link CCIPWalletInvalidError} if `wallet` cannot sign Solana transactions
+   * @throws {@link CCTTxFailedError} if a transaction fails; a partially applied batch carries
+   * `context.committedHashes`
+   * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
+   * @example
+   * ```ts
+   * const { hash } = await sol.freezeLookupTable({ lookupTableAddress, wallet })
+   * ```
+   */
+  freezeLookupTable(opts: ExecuteFreezeLookupTableParams): Promise<ExecuteFreezeLookupTableResult> {
+    return this.#freezeLookupTable.execute(this.chain, opts)
   }
 
   /**

@@ -423,6 +423,16 @@ export const poolGroupPdas = {
       [seed('ccip_tokenpool_policy'), group.toBuffer(), toLeArray(policyId, 4)],
       program,
     )[0],
+  allowlist: (program: PublicKey, group: PublicKey, listId: PublicKey) =>
+    PublicKey.findProgramAddressSync(
+      [seed('ccip_tokenpool_allowlist'), group.toBuffer(), listId.toBuffer()],
+      program,
+    )[0],
+  blocklist: (program: PublicKey, creator: PublicKey, blocklistId: PublicKey) =>
+    PublicKey.findProgramAddressSync(
+      [seed('ccip_tokenpool_blocklist'), creator.toBuffer(), blocklistId.toBuffer()],
+      program,
+    )[0],
   allowlistEntry: (program: PublicKey, allowlist: PublicKey, sender: PublicKey) =>
     PublicKey.findProgramAddressSync(
       [seed('ccip_tokenpool_allowed'), allowlist.toBuffer(), sender.toBuffer()],

@@ -12,13 +12,20 @@
  * @packageDocumentation
  */
 
-import { type AccountMeta, type TransactionInstruction, PublicKey, SystemProgram } from '@solana/web3.js'
+import { BN } from '@coral-xyz/anchor'
+import {
+  type AccountMeta,
+  type TransactionInstruction,
+  PublicKey,
+  SystemProgram,
+} from '@solana/web3.js'
 
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { deriveTokenPoolChainConfigV2Pda } from '../../../../solana/token-pool.ts'
+import { getMultipleAccountsInfoPaged } from '../../../../solana/utils.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import type { SolanaGenerateParams } from '../../operation.ts'
+import { deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { parsePublicKey } from '../../validate.ts'
 import { poolGroupPdas } from '../accounts.ts'
 import { decodeRoles, toBigInt } from '../decode.ts'
@@ -150,9 +157,15 @@ export class SetPoolGroupPause extends PoolGroupWriteOperation<
       ref,
       metas.map((m) => m.pubkey),
     )
-    const recordFlags = extras.map(
-      (info, i) => decodeOwned('groupChainPolicy', info, metas[i]!.pubkey, ref.program).groupPaused,
-    )
+    const recordFlags = extras.map((info, i) => {
+      if (!info)
+        throw new CCTParamsInvalidError(
+          this.name,
+          'poolGroupAddress',
+          `the pool group lists chain ${toBigInt(group.chainSelectors[i]!)} but has no record for it`,
+        )
+      return decodeOwned('groupChainPolicy', info, metas[i]!.pubkey, ref.program).groupPaused
+    })
     requirePauseGate(this.name, group, authority, [group.paused], [paused], 'set_group_pause')
     const expected = {
       'group.paused': group.paused,
@@ -314,9 +327,37 @@ export class SetPoolGroupChainPause extends PoolGroupWriteOperation<
 
 type ParsedLanePause = ParsedGroupWrite & {
   mint: PublicKey
-  selectors: bigint[]
+  /** The lanes, by chain (or, from a proposal, by their `ChainConfigV2` accounts). */
+  lanes: { selectors: bigint[] } | { v2s: PublicKey[] }
   pausedOutbound?: boolean
   pausedInbound?: boolean
+}
+
+/** The chains of lane `ChainConfigV2` accounts a proposal names (owner-checked). */
+async function selectorsOfV2s(
+  chain: SolanaChain,
+  program: PublicKey,
+  mint: PublicKey,
+  v2s: readonly PublicKey[],
+): Promise<bigint[]> {
+  const infos = await getMultipleAccountsInfoPaged(chain.connection, [...v2s])
+  return v2s.map((address, i) => {
+    const info = infos[i]
+    if (!info)
+      throw new CCTParamsInvalidError(
+        'setPoolGroupLanePause',
+        'transactions',
+        `no ChainConfigV2 at ${address.toBase58()}`,
+      )
+    const v2 = decodeOwned('chainConfigV2', info, address, program)
+    if (!v2.mint.equals(mint))
+      throw new CCTParamsInvalidError(
+        'setPoolGroupLanePause',
+        'transactions',
+        `${address.toBase58()} is a lane of ${v2.mint.toBase58()}, not ${mint.toBase58()}`,
+      )
+    return toBigInt(v2.remoteChainSelector)
+  })
 }
 
 /** Sets a mint's lane pause flags on some chains; omitted directions keep each lane's flag. */
@@ -339,16 +380,24 @@ export class SetPoolGroupLanePause extends PoolGroupWriteOperation<
         'give pausedOutbound, pausedInbound or both',
       )
     if (!Array.isArray(params.remoteChainSelectors) || !params.remoteChainSelectors.length)
-      throw new CCTParamsInvalidError(this.name, 'remoteChainSelectors', 'must be a non-empty array')
+      throw new CCTParamsInvalidError(
+        this.name,
+        'remoteChainSelectors',
+        'must be a non-empty array',
+      )
     const selectors = params.remoteChainSelectors.map((c, i) =>
       validateSelector(this.name, `remoteChainSelectors[${i}]`, c),
     )
     if (new Set(selectors).size !== selectors.length)
-      throw new CCTParamsInvalidError(this.name, 'remoteChainSelectors', 'must list each chain once')
+      throw new CCTParamsInvalidError(
+        this.name,
+        'remoteChainSelectors',
+        'must list each chain once',
+      )
     return {
       ...parseGroupWrite(this.name, params),
       mint: parsePublicKey(this.name, 'tokenAddress', params.tokenAddress),
-      selectors,
+      lanes: { selectors },
       ...(pausedOutbound !== undefined && { pausedOutbound }),
       ...(pausedInbound !== undefined && { pausedInbound }),
     }
@@ -370,7 +419,11 @@ export class SetPoolGroupLanePause extends PoolGroupWriteOperation<
     chain: SolanaChain,
     parsed: ParsedLanePause,
   ): Promise<PoolGroupWritePlan<object>> {
-    const { ref, authority, mint, selectors } = parsed
+    const { ref, authority, mint } = parsed
+    const selectors =
+      'selectors' in parsed.lanes
+        ? parsed.lanes.selectors
+        : await selectorsOfV2s(chain, ref.program, mint, parsed.lanes.v2s)
     const [{ group }, pool, states] = await Promise.all([
       readPoolGroup(this.name, chain, ref),
       readPoolState(this.name, chain, ref.program, mint),
@@ -381,6 +434,18 @@ export class SetPoolGroupLanePause extends PoolGroupWriteOperation<
       ),
     ])
     const laneOwner = pool.state.owner.equals(authority)
+    // `holds_pause_role`: the lane owner, or the group owner, pauser or unpauser, signs at all
+    const roles = decodeRoles(group.roles)
+    if (
+      !laneOwner &&
+      !group.owner.equals(authority) &&
+      ![roles.pauser, roles.unpauser].includes(authority.toBase58())
+    )
+      throw new CCTParamsInvalidError(
+        this.name,
+        'authority',
+        `${authority.toBase58()} is neither the lanes' pool owner (${pool.state.owner.toBase58()}) nor the pool group owner, pauser or unpauser, who sign set_lane_pause`,
+      )
     const byFlags = new Map<string, { flags: Flags; selectors: bigint[] }>()
     const current: Record<string, Flags> = {}
     const cleared: boolean[] = []
@@ -396,8 +461,7 @@ export class SetPoolGroupLanePause extends PoolGroupWriteOperation<
       const was: Flags = [ext.pausedOutbound, ext.pausedInbound]
       const next: Flags = [parsed.pausedOutbound ?? was[0], parsed.pausedInbound ?? was[1]]
       current[String(selector)] = was
-      if (!laneOwner)
-        requirePauseGate(this.name, group, authority, was, next, 'set_lane_pause')
+      if (!laneOwner) requirePauseGate(this.name, group, authority, was, next, 'set_lane_pause')
       if (was[0] === next[0] && was[1] === next[1]) return
       cleared.push(clears(was, next))
       const key = next.join()
@@ -406,8 +470,6 @@ export class SetPoolGroupLanePause extends PoolGroupWriteOperation<
         selectors: [...(byFlags.get(key)?.selectors ?? []), selector],
       })
     })
-    if (!laneOwner)
-      requirePauseGate(this.name, group, authority, [], [], 'set_lane_pause')
     const expected = { [`lanes.${mint.toBase58()}.paused`]: current }
     if (!byFlags.size) return { group: ref.group, items: [], judge: null, expected, extra: {} }
     const program = createPoolGroupProgram(chain, ref.program, parsed.payer)
@@ -481,36 +543,17 @@ export class SetPoolGroupLanePause extends PoolGroupWriteOperation<
     return {
       ...proposalBase(ref, first.ix.keys[2]!.pubkey, guardOptions),
       mint,
-      selectors: decoded.flatMap((d) =>
-        d.ix.keys.slice(6).map((k) => {
-          const i = decoded.indexOf(d)
-          return selectorOfLane(ref, mint, k.pubkey, i)
-        }),
-      ),
+      // after the 6 fixed accounts: each lane's ChainConfigV2
+      lanes: { v2s: decoded.flatMap((d) => d.ix.keys.slice(6).map((k) => k.pubkey)) },
       pausedOutbound: flagOf(first.data, 'pausedOutbound'),
       pausedInbound: flagOf(first.data, 'pausedInbound'),
     }
   }
 }
 
-/**
- * The chain of a lane account a proposal names: the `ChainConfigV2` PDAs of the group's chains are
- * matched by derivation (the instruction carries no selector).
- */
-function selectorOfLane(
-  ref: ParsedPoolGroupRef,
-  mint: PublicKey,
-  account: PublicKey,
-  index: number,
-): bigint {
-  const known = laneSelectorCache.get(account.toBase58())
-  if (known !== undefined) return known
-  throw new CCTParamsInvalidError(
-    'setPoolGroupLanePause',
-    `transactions.instructions[${index}]`,
-    `names ${account.toBase58()}, which is not a lane of ${mint.toBase58()} under ${ref.program.toBase58()} on a known chain`,
-  )
-}
-
-/** Lane `ChainConfigV2` address → selector, filled as lanes are derived. */
-const laneSelectorCache = new Map<string, bigint>()
+/** The pause ops, by name: the snapshot check runs their re-checks. @internal */
+export const POOL_GROUP_PAUSE_OPERATIONS = {
+  setPoolGroupPause: new SetPoolGroupPause(),
+  setPoolGroupChainPause: new SetPoolGroupChainPause(),
+  setPoolGroupLanePause: new SetPoolGroupLanePause(),
+} as const

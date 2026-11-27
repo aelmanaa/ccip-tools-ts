@@ -1,6 +1,7 @@
 export * from './accept-admin.ts'
 export * from './append-to-lookup-table.ts'
 export * from './create-lookup-table.ts'
+export * from './freeze-lookup-table.ts'
 export * from './get-supported-tokens.ts'
 export * from './get-token-admin-registry.ts'
 export * from './owner-override-pending-administrator.ts'
