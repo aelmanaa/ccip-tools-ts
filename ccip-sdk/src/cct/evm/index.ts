@@ -4597,6 +4597,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   sender: '0xPoolOwner...',
    * })
    * ```
+   * @throws {@link CCTContractTypeInvalidError} if the pool is a multi-token pool: the reason names
+   * `applyMultiTokenPoolInlineRemotePoolConfigUpdates` (or the remote pool policy op)
    */
   generateUnsignedAddRemotePool(opts: AddRemotePoolParams): Promise<UnsignedEVMTx> {
     return this.#addRemotePool.generate(this.chain, opts)
@@ -4626,6 +4628,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   wallet, // the pool owner
    * })
    * ```
+   * @throws {@link CCTContractTypeInvalidError} if the pool is a multi-token pool: the reason names
+   * `applyMultiTokenPoolInlineRemotePoolConfigUpdates` (or the remote pool policy op)
    */
   addRemotePool(opts: EVMExecuteParams<AddRemotePoolParams>): Promise<TransactionResult> {
     return this.#addRemotePool.execute(this.chain, opts)
@@ -4659,6 +4663,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   sender: '0xPoolOwner...',
    * })
    * ```
+   * @throws {@link CCTContractTypeInvalidError} if the pool is a multi-token pool: the reason names
+   * `applyMultiTokenPoolInlineRemotePoolConfigUpdates` (or the remote pool policy op)
    */
   generateUnsignedRemoveRemotePool(opts: RemoveRemotePoolParams): Promise<UnsignedEVMTx> {
     return this.#removeRemotePool.generate(this.chain, opts)
@@ -4688,6 +4694,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   wallet, // the pool owner
    * })
    * ```
+   * @throws {@link CCTContractTypeInvalidError} if the pool is a multi-token pool: the reason names
+   * `applyMultiTokenPoolInlineRemotePoolConfigUpdates` (or the remote pool policy op)
    */
   removeRemotePool(opts: EVMExecuteParams<RemoveRemotePoolParams>): Promise<TransactionResult> {
     return this.#removeRemotePool.execute(this.chain, opts)
@@ -5327,7 +5335,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `applyInlineConnectionConfigUpdates` transaction: sets and removes inline connection records: the remote token of one lane.
+   * Builds an unsigned `applyInlineConnectionConfigUpdates` transaction, which sets and removes
+   * inline connection records (the remote token of one lane).
    *
    * @remarks
    * Removals run first. A set opens its lane once the lane's other records resolve, so write
@@ -5346,7 +5355,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5358,8 +5367,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolInlineConnectionConfigUpdates({
    *   poolAddress: '0xMultiTokenPool...',
    *   set: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, remoteToken: '0xRemoteToken...' }],
+   *   sender: '0xSafe...',
    *   getChain,
    * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
    * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
    * ```
    */
@@ -5370,7 +5381,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `applyInlineConnectionConfigUpdates` with `opts.wallet`: sets and removes inline connection records: the remote token of one lane. `sender` defaults to the wallet
+   * Signs and submits `applyInlineConnectionConfigUpdates` with `opts.wallet`, which sets and
+   * removes inline connection records (the remote token of one lane). `sender` defaults to the
+   * wallet
    * and, when supplied, must equal it, so the gate always runs; the state is re-read right before
    * sending. Use {@link generateUnsignedApplyMultiTokenPoolInlineConnectionConfigUpdates} for multisig or offline signing.
    *
@@ -5387,7 +5400,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5400,6 +5413,15 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
    * before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolInlineConnectionConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   set: [{ tokenAddress: '0xToken...', remoteChainSelector: 16015286601757825753n, remoteToken: '0xRemoteToken...' }],
+   *   getChain,
+   *   wallet,
+   * })
+   * ```
    */
   applyMultiTokenPoolInlineConnectionConfigUpdates(
     opts: EVMExecuteParams<ApplyMultiTokenPoolInlineConnectionConfigUpdatesParams>,
@@ -5408,7 +5430,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `applyConnectionPolicyConfigUpdates` transaction: sets and removes connection policy records, and removes whole connection policies.
+   * Builds an unsigned `applyConnectionPolicyConfigUpdates` transaction, which sets and removes
+   * connection policy records, and removes whole connection policies.
    *
    * @remarks
    * Records are removed, then policies, then records set, as on chain. A record changes every
@@ -5428,7 +5451,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5440,8 +5463,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolConnectionPolicyConfigUpdates({
    *   poolAddress: '0xMultiTokenPool...',
    *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, onlySubsetTokens: true }],
+   *   sender: '0xSafe...',
    *   getChain,
    * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
    * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
    * ```
    */
@@ -5452,7 +5477,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `applyConnectionPolicyConfigUpdates` with `opts.wallet`: sets and removes connection policy records, and removes whole connection policies. `sender` defaults to the wallet
+   * Signs and submits `applyConnectionPolicyConfigUpdates` with `opts.wallet`, which sets and
+   * removes connection policy records, and removes whole connection policies. `sender` defaults to
+   * the wallet
    * and, when supplied, must equal it, so the gate always runs; the state is re-read right before
    * sending. Use {@link generateUnsignedApplyMultiTokenPoolConnectionPolicyConfigUpdates} for multisig or offline signing.
    *
@@ -5470,7 +5497,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5483,6 +5510,15 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
    * before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolConnectionPolicyConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, onlySubsetTokens: true }],
+   *   getChain,
+   *   wallet,
+   * })
+   * ```
    */
   applyMultiTokenPoolConnectionPolicyConfigUpdates(
     opts: EVMExecuteParams<ApplyMultiTokenPoolConnectionPolicyConfigUpdatesParams>,
@@ -5491,7 +5527,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `applySubsetTokenUpdates` transaction: adds tokens to, and removes them from, the subset lists of connection policy records with `onlySubsetTokens`.
+   * Builds an unsigned `applySubsetTokenUpdates` transaction, which adds tokens to, and removes
+   * them from, the subset lists of connection policy records with `onlySubsetTokens`.
    *
    * @remarks
    * Removals run first. An add opens the token's lane on that chain: the record must exist and
@@ -5508,7 +5545,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5520,8 +5557,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolSubsetTokenUpdates({
    *   poolAddress: '0xMultiTokenPool...',
    *   add: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, tokenAddress: '0xToken...' }],
+   *   sender: '0xSafe...',
    *   getChain,
    * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
    * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
    * ```
    */
@@ -5532,7 +5571,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `applySubsetTokenUpdates` with `opts.wallet`: adds tokens to, and removes them from, the subset lists of connection policy records with `onlySubsetTokens`. `sender` defaults to the wallet
+   * Signs and submits `applySubsetTokenUpdates` with `opts.wallet`, which adds tokens to, and
+   * removes them from, the subset lists of connection policy records with `onlySubsetTokens`.
+   * `sender` defaults to the wallet
    * and, when supplied, must equal it, so the gate always runs; the state is re-read right before
    * sending. Use {@link generateUnsignedApplyMultiTokenPoolSubsetTokenUpdates} for multisig or offline signing.
    *
@@ -5547,7 +5588,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5560,6 +5601,15 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
    * before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolSubsetTokenUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   add: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, tokenAddress: '0xToken...' }],
+   *   getChain,
+   *   wallet,
+   * })
+   * ```
    */
   applyMultiTokenPoolSubsetTokenUpdates(
     opts: EVMExecuteParams<ApplyMultiTokenPoolSubsetTokenUpdatesParams>,
@@ -5568,7 +5618,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `applyRemoteTokenAddressProviderUpdates` transaction: sets or clears the remote token address provider of connection policies.
+   * Builds an unsigned `applyRemoteTokenAddressProviderUpdates` transaction, which sets or clears
+   * the remote token address provider of connection policies.
    *
    * @remarks
    * A provider answers the remote token of every policy lane at once, so every lane of the
@@ -5587,7 +5638,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5599,8 +5650,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolRemoteTokenAddressProviderUpdates({
    *   poolAddress: '0xMultiTokenPool...',
    *   updates: [{ policyName: 'hub', remoteTokenAddressProvider: '0xSameAddressProvider...' }],
+   *   sender: '0xSafe...',
    *   getChain,
    * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
    * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
    * ```
    */
@@ -5611,7 +5664,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `applyRemoteTokenAddressProviderUpdates` with `opts.wallet`: sets or clears the remote token address provider of connection policies. `sender` defaults to the wallet
+   * Signs and submits `applyRemoteTokenAddressProviderUpdates` with `opts.wallet`, which sets or
+   * clears the remote token address provider of connection policies. `sender` defaults to the
+   * wallet
    * and, when supplied, must equal it, so the gate always runs; the state is re-read right before
    * sending. Use {@link generateUnsignedApplyMultiTokenPoolRemoteTokenAddressProviderUpdates} for multisig or offline signing.
    *
@@ -5628,7 +5683,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5641,6 +5696,15 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
    * before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolRemoteTokenAddressProviderUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   updates: [{ policyName: 'hub', remoteTokenAddressProvider: '0xSameAddressProvider...' }],
+   *   getChain,
+   *   wallet,
+   * })
+   * ```
    */
   applyMultiTokenPoolRemoteTokenAddressProviderUpdates(
     opts: EVMExecuteParams<ApplyMultiTokenPoolRemoteTokenAddressProviderUpdatesParams>,
@@ -5649,7 +5713,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `applyInlineRemotePoolConfigUpdates` transaction: sets and removes inline remote pool records: the pools a lane trusts, the data format it sends, and whether it also trusts its policy's pools.
+   * Builds an unsigned `applyInlineRemotePoolConfigUpdates` transaction, which sets and removes
+   * inline remote pool records (the pools a lane trusts, the data format it sends, and whether it
+   * also trusts its policy's pools).
    *
    * @remarks
    * Removals run first. A set replaces the whole record: every pool or flag it drops from the
@@ -5669,7 +5735,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5687,8 +5753,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *     poolDataFormat: 'long',
    *     remotePools: [{ address: '0xRemotePool...', allowLegacyPoolData: false }],
    *   }],
+   *   sender: '0xSafe...',
    *   getChain,
    * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
    * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
    * ```
    */
@@ -5699,7 +5767,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `applyInlineRemotePoolConfigUpdates` with `opts.wallet`: sets and removes inline remote pool records: the pools a lane trusts, the data format it sends, and whether it also trusts its policy's pools. `sender` defaults to the wallet
+   * Signs and submits `applyInlineRemotePoolConfigUpdates` with `opts.wallet`, which sets and
+   * removes inline remote pool records (the pools a lane trusts, the data format it sends, and
+   * whether it also trusts its policy's pools). `sender` defaults to the wallet
    * and, when supplied, must equal it, so the gate always runs; the state is re-read right before
    * sending. Use {@link generateUnsignedApplyMultiTokenPoolInlineRemotePoolConfigUpdates} for multisig or offline signing.
    *
@@ -5717,7 +5787,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5730,6 +5800,21 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
    * before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolInlineRemotePoolConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   set: [{
+   *     tokenAddress: '0xToken...',
+   *     remoteChainSelector: 16015286601757825753n,
+   *     trustPolicyRemotePools: false,
+   *     poolDataFormat: 'long',
+   *     remotePools: [{ address: '0xRemotePool...', allowLegacyPoolData: false }],
+   *   }],
+   *   getChain,
+   *   wallet,
+   * })
+   * ```
    */
   applyMultiTokenPoolInlineRemotePoolConfigUpdates(
     opts: EVMExecuteParams<ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams>,
@@ -5738,7 +5823,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Builds an unsigned `applyRemotePoolPolicyConfigUpdates` transaction: sets and removes remote pool policy records, and removes whole remote pool policies.
+   * Builds an unsigned `applyRemotePoolPolicyConfigUpdates` transaction, which sets and removes
+   * remote pool policy records, and removes whole remote pool policies.
    *
    * @remarks
    * Records are removed, then policies, then records set, as on chain. Policy pools never send
@@ -5755,7 +5841,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5767,8 +5853,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolRemotePoolPolicyConfigUpdates({
    *   poolAddress: '0xMultiTokenPool...',
    *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, remotePoolAddresses: ['0xRemotePool...'] }],
+   *   sender: '0xSafe...',
    *   getChain,
    * })
+   * // for the proposal reviewer: what it changes, and the state it was judged on
    * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
    * ```
    */
@@ -5779,7 +5867,9 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   }
 
   /**
-   * Signs and submits `applyRemotePoolPolicyConfigUpdates` with `opts.wallet`: sets and removes remote pool policy records, and removes whole remote pool policies. `sender` defaults to the wallet
+   * Signs and submits `applyRemotePoolPolicyConfigUpdates` with `opts.wallet`, which sets and
+   * removes remote pool policy records, and removes whole remote pool policies. `sender` defaults
+   * to the wallet
    * and, when supplied, must equal it, so the gate always runs; the state is re-read right before
    * sending. Use {@link generateUnsignedApplyMultiTokenPoolRemotePoolPolicyConfigUpdates} for multisig or offline signing.
    *
@@ -5794,7 +5884,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it, `sender` holds none of the gate's roles, a guard refuses the state after the write, or the
    * write reverts when simulated; `context.param` names the field, or for a lane-guard refusal is
    * `guards` (with `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`),
-   * and `context.recordType` is set
+   * and, for a refusal from the state, the gate or the guards, `context.recordType` is set
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
    * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
@@ -5807,6 +5897,15 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTTxNotConfirmedError} if it is broadcast but not confirmed in time (do not resubmit
    * before checking the hash)
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * const { hash, affectedLanes } = await cct.applyMultiTokenPoolRemotePoolPolicyConfigUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   recordsToSet: [{ policyName: 'hub', remoteChainSelector: 16015286601757825753n, remotePoolAddresses: ['0xRemotePool...'] }],
+   *   getChain,
+   *   wallet,
+   * })
+   * ```
    */
   applyMultiTokenPoolRemotePoolPolicyConfigUpdates(
     opts: EVMExecuteParams<ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams>,
@@ -5956,7 +6055,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
    * and holds none of the gate's roles, the write opens a lane `confirmOpening` does not list, or a
    * guard refuses the state after the write, or the write reverts when simulated; `reason` names the
-   * fix and `context.recordType` is set; a lane-guard refusal's param is `guards` (with
+   * fix and, for a refusal from the state, the gate or the guards, `context.recordType` is set; a
+   * lane-guard refusal's param is `guards` (with
    * `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`)
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)
@@ -6012,7 +6112,8 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `sender` is given
    * and holds none of the gate's roles, the write opens a lane `confirmOpening` does not list, or a
    * guard refuses the state after the write, or the write reverts when simulated; `reason` names the
-   * fix and `context.recordType` is set; a lane-guard refusal's param is `guards` (with
+   * fix and, for a refusal from the state, the gate or the guards, `context.recordType` is set; a
+   * lane-guard refusal's param is `guards` (with
    * `context.findings`) or `getChain` / `remoteSide` (with `context.factFailures`)
    * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
    * multi-token pool with one)

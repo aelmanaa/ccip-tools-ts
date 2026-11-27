@@ -38,6 +38,17 @@ import {
   PoolConfigManagerWriteOperation,
 } from '../write-operation.ts'
 
+/**
+ * The policy names of one record type from a `getPolicyNames` result (one list per type, in
+ * `LANE_RECORD_TYPES` order), as lower-case words.
+ * @internal
+ */
+export function policyNamesOf(lists: readonly unknown[], type: LaneRecordType): Set<string> {
+  return new Set(
+    ((lists[LANE_RECORD_TYPES.indexOf(type)] ?? []) as string[]).map((w) => w.toLowerCase()),
+  )
+}
+
 /** The removal and set lists of a policy record write. @internal */
 export type PolicyRecordWrite = {
   /** Records to remove (first, as on chain). */
@@ -86,7 +97,18 @@ export function validatePolicyRecordWrite(
   if (recordsToSet !== undefined) keys(recordsToSet, 'recordsToSet')
   if (policiesToRemove !== undefined) {
     validateArray(operation, 'policiesToRemove', policiesToRemove)
-    Array.from(policiesToRemove, (n, i) => encodePolicyName(operation, `policiesToRemove[${i}]`, n))
+    const seen = new Map<string, string>()
+    Array.from(policiesToRemove, (n, i) => {
+      const word = encodePolicyName(operation, `policiesToRemove[${i}]`, n).toLowerCase()
+      const first = seen.get(word)
+      if (first !== undefined)
+        throw new CCTParamsInvalidError(
+          operation,
+          `policiesToRemove[${i}]`,
+          `repeats ${first}: give each policy once`,
+        )
+      seen.set(word, `policiesToRemove[${i}]`)
+    })
   }
   if (!recordsToRemove?.length && !policiesToRemove?.length && !recordsToSet?.length)
     throw new CCTParamsInvalidError(
@@ -119,15 +141,12 @@ export async function checkPolicyRecordWrite(
       throw new CCTParamsInvalidError(
         operation,
         `recordsToRemove[${i}]`,
-        `${type} policy ${k.policyName} has no record for chain ${k.remoteChainSelector} (PolicyRecordNotFound)`,
+        `${type} policy ${k.policyName} has no record for chain ${k.remoteChainSelector} (PolicyRecordNotFound): drop it from recordsToRemove (getMultiTokenPool${type[0]!.toUpperCase()}${type.slice(1)}Policy lists the records)`,
         { context: { recordType: type } },
       )
   })
   if (!policiesToRemove.length) return
-  const lists = await pcm.getPolicyNames({ blockTag })
-  const names = new Set(
-    ((lists[LANE_RECORD_TYPES.indexOf(type)] ?? []) as string[]).map((w) => w.toLowerCase()),
-  )
+  const names = policyNamesOf(await pcm.getPolicyNames({ blockTag }), type)
   const removed = new Set(recordsToRemove.map(key))
   policiesToRemove.forEach((name, i) => {
     const word = policyKey(name, `policiesToRemove[${i}]`)
@@ -136,7 +155,7 @@ export async function checkPolicyRecordWrite(
       throw new CCTParamsInvalidError(
         operation,
         param,
-        `no ${type} policy ${name} exists (PolicyNotFound)`,
+        `no ${type} policy ${name} exists (PolicyNotFound): check the name (getMultiTokenPoolPolicyNames)`,
         {
           context: { recordType: type },
         },
@@ -230,7 +249,7 @@ export function checkInlineRecordWrite(
       throw new CCTParamsInvalidError(
         operation,
         `remove[${i}]`,
-        `${getAddress(l.tokenAddress)} has no inline ${type} record for chain ${l.remoteChainSelector} (InlineRecordNotFound)`,
+        `${getAddress(l.tokenAddress)} has no inline ${type} record for chain ${l.remoteChainSelector} (InlineRecordNotFound): drop it from remove (getMultiTokenPoolInlineConfigs lists the records)`,
         { context: { recordType: type } },
       )
   })

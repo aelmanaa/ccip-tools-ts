@@ -15,9 +15,10 @@ import {
   getMultiTokenPoolInterface,
 } from '../../multi-token-pool/contracts.ts'
 import { validateAddress, validateArray, validateUint64 } from '../../validate.ts'
-import { type PolicyName, encodePolicyName } from '../contracts.ts'
+import { encodePolicyName } from '../contracts.ts'
 import { policyKey } from '../projection.ts'
 import { readMultiTokenPoolRecordState } from '../record-state.ts'
+import type { PolicyRecordKey } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
   type PoolConfigManagerWrite,
@@ -27,11 +28,7 @@ import {
 } from '../write-operation.ts'
 
 /** One subset membership: a token in a connection policy record's subset list. */
-export type MultiTokenPoolSubsetToken = {
-  /** The connection policy. */
-  policyName: PolicyName
-  /** The record's remote chain. */
-  remoteChainSelector: bigint
+export type MultiTokenPoolSubsetToken = PolicyRecordKey & {
   /** The token. */
   tokenAddress: string
 }
@@ -118,7 +115,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
         throw new CCTParamsInvalidError(
           this.name,
           `remove[${i}]`,
-          `${getAddress(e.tokenAddress)} is not in the subset of connection policy ${e.policyName} for chain ${e.remoteChainSelector} (SubsetTokenNotFound)`,
+          `${getAddress(e.tokenAddress)} is not in the subset of connection policy ${e.policyName} for chain ${e.remoteChainSelector} (SubsetTokenNotFound): drop it from remove (getMultiTokenPoolSubsetTokens lists the subset)`,
           { context },
         )
     })
@@ -152,7 +149,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
         throw new CCTParamsInvalidError(
           this.name,
           at,
-          `${token} is already in the subset of connection policy ${e.policyName} for chain ${e.remoteChainSelector} (SubsetTokenAlreadyAdded)`,
+          `${token} is already in the subset of connection policy ${e.policyName} for chain ${e.remoteChainSelector} (SubsetTokenAlreadyAdded): it is already a member; drop it from add`,
           { context },
         )
     })

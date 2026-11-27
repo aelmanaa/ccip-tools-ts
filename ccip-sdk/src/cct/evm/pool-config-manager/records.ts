@@ -59,7 +59,10 @@ export type InlineRemotePoolConfig = MultiTokenPoolLaneKey & {
   trustPolicyRemotePools: boolean
   /** Pool data the lane sends (the contract's `useLegacyPoolDataOnSend` is `poolDataFormat === 'legacy'`). */
   poolDataFormat: PoolDataFormat
-  /** Unique; may be empty (outbound only). */
+  /**
+   * Unique. An empty list is allowed on chain, but the SDK's guards refuse a lane that then trusts no
+   * remote pool (`NO_REMOTE_POOL`), unless `trustPolicyRemotePools` brings in policy pools.
+   */
   remotePools: InlineRemotePool[]
 }
 

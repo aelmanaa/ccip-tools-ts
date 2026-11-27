@@ -29,6 +29,7 @@ import {
   type PoolConfigManagerWriteParams,
   PoolConfigManagerWriteOperation,
 } from '../write-operation.ts'
+import { policyNamesOf } from './record-writes.ts'
 
 /** A remote token address provider assignment. */
 export type MultiTokenPoolRemoteTokenAddressProviderUpdate = {
@@ -46,8 +47,8 @@ export type ApplyMultiTokenPoolRemoteTokenAddressProviderUpdatesParams =
       updates: MultiTokenPoolRemoteTokenAddressProviderUpdate[]
     }
 
-/** The provider that answers the local token's own address (chainlink-ccip c950d9bc). */
-const SAME_ADDRESS_PROVIDER_TYPE = 'SameAddressRemoteTokenAddressProvider'
+/** The provider that answers the local token's own address (chainlink-ccip c950d9bc). @internal */
+export const SAME_ADDRESS_PROVIDER_TYPE = 'SameAddressRemoteTokenAddressProvider'
 
 /**
  * Sets connection policies' remote token address providers. A provider answers the remote token of
@@ -69,8 +70,15 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
       const at = `updates[${i}]`
       const { policyName, remoteTokenAddressProvider } = (u ?? {}) as Record<string, unknown>
       const word = encodePolicyName(this.name, `${at}.policyName`, policyName).toLowerCase()
-      if (remoteTokenAddressProvider !== null)
+      if (remoteTokenAddressProvider !== null) {
         validateAddress(this.name, `${at}.remoteTokenAddressProvider`, remoteTokenAddressProvider)
+        if (getAddress(remoteTokenAddressProvider as string) === ZeroAddress)
+          throw new CCTParamsInvalidError(
+            this.name,
+            `${at}.remoteTokenAddressProvider`,
+            'is the zero address: pass remoteTokenAddressProvider: null to clear the provider',
+          )
+      }
       const first = seen.get(word)
       if (first !== undefined)
         throw new CCTParamsInvalidError(
@@ -101,8 +109,7 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
       readMultiTokenPoolRecordState(chain, address, version, { blockTag }),
       pcm.getPolicyNames({ blockTag }),
     ])
-    // the connection type's names come first, in `LANE_RECORD_TYPES` order
-    const names = new Set((lists[0] as string[]).map((w) => w.toLowerCase()))
+    const names = policyNamesOf(lists, 'connection')
     const context = { recordType: 'connection' }
     for (const [i, u] of updates.entries()) {
       const at = `updates[${i}]`
@@ -111,7 +118,7 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
         throw new CCTParamsInvalidError(
           this.name,
           `${at}.policyName`,
-          `no connection policy ${u.policyName} exists (PolicyNotFound)`,
+          `no connection policy ${u.policyName} exists (PolicyNotFound): check the name (getMultiTokenPoolPolicyNames)`,
           { context },
         )
       const provider = u.remoteTokenAddressProvider
@@ -120,7 +127,7 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
         throw new CCTParamsInvalidError(
           this.name,
           `${at}.remoteTokenAddressProvider`,
-          `${provider} has no code: the store refuses it (ProviderHasNoCode)`,
+          `${provider} has no code, so the PoolConfigManager refuses it (ProviderHasNoCode): deploy the provider first, or pass null to clear it`,
           { context },
         )
       const [type] = await chain.typeAndVersion(provider).catch((err: unknown) => {

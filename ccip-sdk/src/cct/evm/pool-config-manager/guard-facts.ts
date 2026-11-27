@@ -8,7 +8,10 @@
 import { dataLength, getAddress, hexlify, isError, zeroPadValue } from 'ethers'
 
 import type { Chain, ChainGetter } from '../../../chain.ts'
-import { CCIPTokenPoolChainConfigNotFoundError } from '../../../errors/index.ts'
+import {
+  CCIPContractNotRouterError,
+  CCIPTokenPoolChainConfigNotFoundError,
+} from '../../../errors/index.ts'
 import { EVMChain } from '../../../evm/index.ts'
 import { decodeLaneConnection, decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
@@ -395,7 +398,17 @@ async function readRemoteLane(
     }
   if (laneFamilyOf(lane.remoteChainSelector) === ChainFamily.Solana)
     return readSolanaRemoteLane(input, lane, localSelector, servingPools, remote)
-  const registry = await remote.getTokenAdminRegistryFor(trusted[0]!)
+  // the remote registry is found from the first trusted pool; an address that does not answer as a
+  // CCIP pool leaves the remote side unlocated: fail closed, with the fix
+  const registry = await remote.getTokenAdminRegistryFor(trusted[0]!).catch((err: unknown) => {
+    if (isNotCcipContract(err) || err instanceof CCIPContractNotRouterError) return undefined
+    throw err
+  })
+  if (registry === undefined)
+    return {
+      status: 'missing',
+      reason: `the lane's first trusted remote pool ${trusted[0]} does not answer as a CCIP pool on the remote chain, so the remote registry cannot be found from it: trust the remote token's pool`,
+    }
   const registryPool = await readRegistryPool(remote, registry, remoteToken)
   if (registryPool === null)
     return {

@@ -36,7 +36,7 @@ import {
   getMultiTokenPoolInterface,
   poolConfigManagerContract,
 } from '../multi-token-pool/contracts.ts'
-import { simulateEVMTx } from '../simulate.ts'
+import { decodeError, simulateEVMTx } from '../simulate.ts'
 import { toTokenTransferFeeConfig } from '../token-pool/contracts.ts'
 import { type DecodedMultiTokenPoolWrite, decodeMultiTokenPoolWrite } from './calldata.ts'
 import {
@@ -68,10 +68,9 @@ import {
   applyMultiTokenPoolRecordChanges,
   multiTokenPoolChangeChains,
   multiTokenPoolSupportedChains,
-  requiredMultiTokenPoolProviderAnswers,
   resolveMultiTokenPoolLanes,
 } from './projection.ts'
-import { readMultiTokenPoolRecordState, readProviderAnswers } from './record-state.ts'
+import { fillProviderAnswers, readMultiTokenPoolRecordState } from './record-state.ts'
 
 /** Inputs of {@link runMultiTokenPoolGuards}. @internal */
 export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
@@ -385,21 +384,6 @@ export async function runMultiTokenPoolGuards(
   }
 }
 
-/**
- * Adds to `state` the provider answers its policy lanes among `lanes` need, read at `blockTag`.
- * @internal
- */
-export async function fillProviderAnswers(
-  chain: EVMChain,
-  state: MultiTokenPoolRecordState,
-  lanes: readonly MultiTokenPoolLaneKey[],
-  blockTag: number,
-): Promise<void> {
-  const queries = requiredMultiTokenPoolProviderAnswers(state, lanes)
-  if (queries.length)
-    state.providerAnswers.push(...(await readProviderAnswers(chain, queries, blockTag)))
-}
-
 /** The `expected` path the guard options are sealed under. @internal */
 export const GUARD_OPTIONS_PATH = 'guard.options'
 /** The `expected` path the target pool is sealed under. @internal */
@@ -585,8 +569,8 @@ export function assertSnapshotHolds(
  */
 export type MultiTokenPoolSimulatedFrom = 'sender' | 'pcm' | 'none'
 
-/** One call of a write, as simulated. */
-type WriteCall = { from: string; to: string; data: string }
+/** One call of a write, as simulated; `label` says what it is when it is not the write itself. */
+type WriteCall = { from: string; to: string; data: string; label?: string }
 
 /**
  * The store calls the PCM makes for a write: it forwards the exact calldata (`Address.functionCall(
@@ -652,6 +636,7 @@ function pcmLaneChecks(
         localToken,
         remoteChainSelector,
       ]),
+      label: `the PoolConfigManager's post-write lane check of ${getAddress(localToken)} → ${remoteChainSelector} (${type})`,
     })),
   )
 }
@@ -710,13 +695,25 @@ async function crossCheckWithSimulateV1(
   // a write call, or a post-write lane check of the PCM, that reverts in the block is a refusal: the
   // single eth_calls cannot see the state the earlier calls leave
   const failed = calls.slice(0, writes.length).findIndex((c) => c.status !== '0x1')
-  if (failed >= 0)
+  if (failed >= 0) {
+    const call = writes[failed]!
+    const revertData = calls[failed]!.returnData
+    const { errorName, errorArgs } = decodeError(revertData)
     throw new CCTParamsInvalidError(
       input.errorOperation ?? operation,
-      writes[0]!.from === getAddress(poolConfigManager) ? 'data' : 'sender',
-      `the write reverts when simulated with the state it leaves (call ${failed + 1} of ${writes.length}, to ${writes[failed]!.to}): ${calls[failed]!.returnData}`,
-      { context: { ...input.errorContext, revertData: calls[failed]!.returnData } },
+      'data',
+      `${call.label ?? `the write (its call to ${call.to})`} reverts with the state the write leaves: ${errorName ?? revertData}`,
+      {
+        context: {
+          ...input.errorContext,
+          simulatedFrom: input.sender ? 'sender' : 'pcm',
+          errorName,
+          errorArgs,
+          revertData,
+        },
+      },
     )
+  }
   // views that did not run are not a confirmation
   if (calls.some((c) => c.status !== '0x1')) return false
   const [connRaw] = pcm.decodeFunctionResult(

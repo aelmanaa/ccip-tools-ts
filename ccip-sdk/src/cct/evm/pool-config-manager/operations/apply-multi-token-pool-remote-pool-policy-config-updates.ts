@@ -8,6 +8,7 @@
 import { hexlify } from 'ethers'
 
 import { encodeAddressToAny } from '../../../../utils.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
 import { parseUniqueRemoteAddresses } from '../../../remote-address.ts'
 import { validateArray } from '../../validate.ts'
 import type { PolicyRecordKey, PolicyRemovalOptions, RemotePoolPolicyRecord } from '../records.ts'
@@ -46,8 +47,13 @@ export class ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates extends PolicyReco
     record: RemotePoolPolicyRecord,
     at: string,
   ): void {
-    // a record without pools trusts nothing (PolicyRecordHasNoPools)
-    validateArray(this.name, `${at}.remotePoolAddresses`, record.remotePoolAddresses, 1)
+    validateArray(this.name, `${at}.remotePoolAddresses`, record.remotePoolAddresses)
+    if (!record.remotePoolAddresses.length)
+      throw new CCTParamsInvalidError(
+        this.name,
+        `${at}.remotePoolAddresses`,
+        'is empty: a remote pool policy record without pools trusts nothing (PolicyRecordHasNoPools); give at least one pool, or remove the record with recordsToRemove',
+      )
     parseUniqueRemoteAddresses(
       this.name,
       `${at}.remotePoolAddresses`,

@@ -100,7 +100,7 @@ export class RemoveRemotePool extends EVMOperation<
         redirectMultiTokenPool(
           err,
           'applyMultiTokenPoolInlineRemotePoolConfigUpdates',
-          "set the lane's record without the pool, listing it in confirmDropped",
+          "set the lane's record without the pool, listing it in confirmDropped: [{ lane, remotePools: [pool] }]; for a pool from the token's remote pool policy, use applyMultiTokenPoolRemotePoolPolicyConfigUpdates",
         ),
     )
     // resolved before any further RPC, so an unsupported version fails on one call

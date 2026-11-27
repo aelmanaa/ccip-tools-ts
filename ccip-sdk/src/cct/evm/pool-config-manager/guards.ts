@@ -27,6 +27,7 @@ import {
 } from '../../multi-token-pool.ts'
 import { parseUniqueRemoteAddresses } from '../../remote-address.ts'
 import {
+  validateAddress,
   validateArray,
   validateBoolean,
   validateOneOf,
@@ -728,7 +729,9 @@ export function validateMultiTokenPoolGuardOptions(
           `${entry}.lane`,
           'is required: the lane the write drops pools from',
         )
-      validateLaneKeys(operation, `${entry}.lane`, [lane], 1)
+      const { tokenAddress, remoteChainSelector } = lane as Record<string, unknown>
+      validateAddress(operation, `${entry}.lane.tokenAddress`, tokenAddress)
+      validateUint64(operation, `${entry}.lane.remoteChainSelector`, remoteChainSelector)
       const key = guardLaneKey(lane as MultiTokenPoolLaneKey)
       const first = seen.get(key)
       if (first !== undefined)

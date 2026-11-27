@@ -97,7 +97,7 @@ export class AddRemotePool extends EVMOperation<AddRemotePoolParams, ParsedAddRe
         redirectMultiTokenPool(
           err,
           'applyMultiTokenPoolInlineRemotePoolConfigUpdates',
-          "set: [{ tokenAddress, remoteChainSelector, trustPolicyRemotePools, poolDataFormat, remotePools }], which replaces the lane's record",
+          "set: [{ tokenAddress, remoteChainSelector, trustPolicyRemotePools, poolDataFormat, remotePools }] listing the lane's current pools plus the new one, since a set replaces the record; for a pool every policy token trusts, use applyMultiTokenPoolRemotePoolPolicyConfigUpdates recordsToSet",
         ),
     )
     // resolved before any further RPC, so an unsupported version fails on one call

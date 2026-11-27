@@ -232,3 +232,18 @@ export async function readProviderAnswers(
     }),
   )
 }
+
+/**
+ * Adds to `state` the provider answers its policy lanes among `lanes` need, read at `blockTag`.
+ * @internal
+ */
+export async function fillProviderAnswers(
+  chain: EVMChain,
+  state: MultiTokenPoolRecordState,
+  lanes: readonly MultiTokenPoolLaneKey[],
+  blockTag: number,
+): Promise<void> {
+  const queries = requiredMultiTokenPoolProviderAnswers(state, lanes)
+  if (queries.length)
+    state.providerAnswers.push(...(await readProviderAnswers(chain, queries, blockTag)))
+}
