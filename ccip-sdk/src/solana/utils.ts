@@ -763,7 +763,7 @@ export function customInstructionErrorCode(err: unknown): number | undefined {
 }
 
 /** Returns whether a simulation error was caused by Solana compute-budget exhaustion. */
-function isComputeBudgetError(err: unknown): boolean {
+export function isComputeBudgetError(err: unknown): boolean {
   const failed = getInstructionError(err)?.error
   return (
     failed === 'ComputationalBudgetExceeded' ||

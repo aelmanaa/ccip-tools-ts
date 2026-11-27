@@ -3608,6 +3608,8 @@ export {
   TOKEN_ONBOARDING_STEPS,
 } from './onboarding/onboard-token.ts'
 export type * from './pool-group/types.ts'
+export type * from './pool-group/write-types.ts'
+export { toPoolGroupSquadsBatch, toPoolGroupSquadsTransaction } from './pool-group/squads.ts'
 export { POOL_GROUP_FEATURES, POOL_GROUP_POLICY_CLASSES } from './pool-group/types.ts'
 // Shared cross-family multi-token pool shapes, as on `cct/evm`.
 export type * from '../multi-token-pool.ts'
