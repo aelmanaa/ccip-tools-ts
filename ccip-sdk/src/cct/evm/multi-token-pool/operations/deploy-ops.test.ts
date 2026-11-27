@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { ZeroAddress, getAddress } from 'ethers'
+import { ZeroAddress, getAddress, getCreateAddress } from 'ethers'
 
+import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
@@ -176,4 +177,114 @@ describe('MTTP deploys (2.1.0-dev bytecode)', () => {
       blocklist.iface.encodeDeploy([[], ZeroAddress, OTHER, [OTHER]]).slice(2),
     )
   })
+})
+
+const SENDER = getAddress('0x' + '5e'.repeat(20))
+const DEPLOYED = getCreateAddress({ from: SENDER, nonce: 0 })
+
+/** A signer whose deployment mines at the CREATE address of (SENDER, nonce 0), as main's tests. */
+function fakeSigner() {
+  return {
+    signTransaction: () => Promise.resolve('0x'),
+    getAddress: () => Promise.resolve(SENDER),
+    populateTransaction: (tx: unknown) => Promise.resolve({ ...(tx as object) }),
+    sendTransaction: () =>
+      Promise.resolve({
+        hash: '0x' + 'ab'.repeat(32),
+        wait: () => Promise.resolve({ status: 1, contractAddress: DEPLOYED }),
+      }),
+  }
+}
+
+/** The stack stub, with the nonce hooks `execute` uses. */
+function executingChain() {
+  const { chain } = stackChain(defaultStack())
+  return Object.assign(chain, { nextNonce: async () => 0, rollbackNonce: () => {} })
+}
+
+describe('MTTP deploys: the verification field (contract name + encoded constructor args)', () => {
+  const wallet = fakeSigner()
+  const cases = [
+    {
+      name: 'deployPolicyStore',
+      run: (c: EVMChain) =>
+        new DeployPolicyStore().execute(c, {
+          type: 'SecurityPolicyStore',
+          authorizedCallers: [PCM],
+          wallet,
+        }),
+      contract: 'SecurityPolicyStore',
+      args: [[PCM]],
+    },
+    {
+      name: 'deployPoolConfigManager',
+      run: (c: EVMChain) =>
+        new DeployPoolConfigManager().execute(c, {
+          tokenAdminRegistry: TAR,
+          connectionPolicyStore: CPS,
+          feePolicyStore: FPS,
+          securityPolicyStore: SPS,
+          admin: OWNER,
+          wallet,
+        }),
+      contract: 'PoolConfigManager',
+      args: [TAR, CPS, FPS, SPS, OWNER],
+    },
+    {
+      name: 'deployMultiTokenPool',
+      run: (c: EVMChain) =>
+        new DeployMultiTokenPool().execute(c, {
+          type: 'BurnMintMultiTokenPool',
+          router: ROUTER,
+          rmnProxy: RMN,
+          poolConfigManager: PCM,
+          wallet,
+        }),
+      contract: 'BurnMintMultiTokenPool',
+      args: [RMN, ROUTER, PCM],
+    },
+    {
+      name: 'deployMultiTokenPoolProvider (UID)',
+      run: (c: EVMChain) =>
+        new DeployMultiTokenPoolProvider().execute(c, {
+          type: 'FactoryTokenWithUIDPoolDataProvider',
+          tokenFactory: OTHER,
+          wallet,
+        }),
+      contract: 'FactoryTokenWithUIDPoolDataProvider',
+      args: [OTHER],
+    },
+    {
+      name: 'deployMultiTokenPoolProvider (SameAddress)',
+      run: (c: EVMChain) =>
+        new DeployMultiTokenPoolProvider().execute(c, {
+          type: 'SameAddressRemoteTokenAddressProvider',
+          wallet,
+        }),
+      contract: 'SameAddressRemoteTokenAddressProvider',
+      args: [],
+    },
+    {
+      name: 'deployMultiTokenPoolHooks (external blocklist)',
+      run: (c: EVMChain) =>
+        new DeployMultiTokenPoolHooks().execute(c, {
+          type: 'MultiTokenPoolHooksExternalBlocklist',
+          allowlist: [OWNER],
+          blocklist: OTHER,
+          authorizedCallers: [PCM],
+          wallet,
+        }),
+      contract: 'MultiTokenPoolHooksExternalBlocklist',
+      args: [[OWNER], ZeroAddress, OTHER, [PCM]],
+    },
+  ] as const
+
+  for (const { name, run, contract, args } of cases)
+    it(`${name}: names ${contract} and carries its encoded constructor args`, async () => {
+      const result = await run(executingChain())
+      assert.equal(result.contractAddress, DEPLOYED)
+      const { iface } = getMultiTokenPoolArtifact(contract)
+      const encoded = iface.encodeDeploy(args as unknown as unknown[])
+      assert.deepEqual(result.verification, { contract, encodedConstructorArgs: encoded })
+    })
 })

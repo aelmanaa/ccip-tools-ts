@@ -20,7 +20,9 @@ export abstract class MultiTokenPoolDeployOperation<
    */
   override async execute(chain: EVMChain, params: EVMExecuteParams<P>): Promise<DeployResult> {
     const result = await super.execute(chain, params)
-    const receipt = await chain.provider.getTransactionReceipt(result.hash).catch(() => null)
+    const receipt = await Promise.resolve()
+      .then(() => chain.provider.getTransactionReceipt(result.hash))
+      .catch(() => null)
     if (receipt) noteMinedBlock(chain, receipt.blockNumber)
     return result
   }
