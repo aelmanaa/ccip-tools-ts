@@ -10,7 +10,7 @@ import { Console } from 'node:console'
 import { type AddressInfo, createServer } from 'node:net'
 import { after, before, describe, it } from 'node:test'
 
-import { type JsonRpcProvider, Wallet, getAddress } from 'ethers'
+import { type JsonRpcProvider, Wallet, ZeroAddress, getAddress } from 'ethers'
 import { Instance } from 'prool'
 
 import { type RpcEnvName, rpcEndpoint } from '../../../../../../scripts/test-endpoints.ts'
@@ -21,6 +21,12 @@ import {
 } from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { GetMultiTokenPoolHooksState } from '../../multi-token-pool-hooks/operations/get-multi-token-pool-hooks-state.ts'
+import {
+  ApplyMultiTokenPoolHooksAllowlistUpdates,
+  SetMultiTokenPoolHooksBlocklist,
+  SetMultiTokenPoolHooksPolicyEngine,
+} from '../../multi-token-pool-hooks/operations/hooks-config-writes.ts'
 import { mined as minedOn } from '../../pool-config-manager/operations/fork.test.helpers.ts'
 import { readOwnership } from '../contracts.ts'
 import { GetMultiTokenPoolStack } from './get-multi-token-pool-stack.ts'
@@ -195,5 +201,96 @@ describe('MTTP owner-gated writes (Sepolia and Fuji forks)', { skip, timeout: 90
     )
     assert.ok(refusal instanceof CCTParamsInvalidError)
     assert.match(String(refusal.context.reason), /no ownership transfer is pending/)
+  })
+
+  describe('hook settings (Fuji)', () => {
+    const state = (hooks: string) =>
+      withForkRetry(() => new GetMultiTokenPoolHooksState().query(fuji.chain, { hooks }))
+    const ownerWallet = async (hooks: string) =>
+      impersonate(
+        fuji.provider,
+        (await withForkRetry(() => readOwnership(fuji.chain, hooks))).owner,
+      )
+    const refusal = (build: () => Promise<unknown>) =>
+      withForkRetry(() => rejectionOf(build(), 'expected a refusal'))
+
+    it('adds and removes an allowlisted sender', async (t) => {
+      if (!(await state(FUJI_HOOKS)).allowlistEnabled)
+        return t.skip('hooks built without an allowlist')
+      const sender = Wallet.createRandom().address
+      const op = new ApplyMultiTokenPoolHooksAllowlistUpdates()
+      await mined(
+        fuji.provider,
+        op.execute(fuji.chain, {
+          hooks: FUJI_HOOKS,
+          adds: [sender],
+          wallet: await ownerWallet(FUJI_HOOKS),
+        }),
+      )
+      assert.ok((await state(FUJI_HOOKS)).allowlist.includes(getAddress(sender)))
+      // adding it again changes nothing: refused, as main's applyAllowlistUpdates
+      const again = await refusal(() =>
+        op.generate(fuji.chain, { hooks: FUJI_HOOKS, adds: [sender] }),
+      )
+      assert.ok(again instanceof CCTParamsInvalidError && again.context.param === 'adds')
+      await mined(
+        fuji.provider,
+        op.execute(fuji.chain, {
+          hooks: FUJI_HOOKS,
+          removes: [sender],
+          wallet: await ownerWallet(FUJI_HOOKS),
+        }),
+      )
+      assert.ok(!(await state(FUJI_HOOKS)).allowlist.includes(getAddress(sender)))
+    })
+
+    it('sets and clears the external blocklist; an EOA is refused before sending', async () => {
+      const op = new SetMultiTokenPoolHooksBlocklist()
+      const eoa = await refusal(() =>
+        op.generate(fuji.chain, {
+          hooks: FUJI_BLOCKLIST_HOOKS,
+          blocklist: Wallet.createRandom().address,
+        }),
+      )
+      assert.ok(eoa instanceof CCTParamsInvalidError && eoa.context.param === 'blocklist')
+      // any contract with code passes the contract's own check (it is called only at transfer time)
+      await mined(
+        fuji.provider,
+        op.execute(fuji.chain, {
+          hooks: FUJI_BLOCKLIST_HOOKS,
+          blocklist: FUJI_HOOKS,
+          wallet: await ownerWallet(FUJI_BLOCKLIST_HOOKS),
+        }),
+      )
+      assert.equal((await state(FUJI_BLOCKLIST_HOOKS)).blocklist, FUJI_HOOKS)
+      await mined(
+        fuji.provider,
+        op.execute(fuji.chain, {
+          hooks: FUJI_BLOCKLIST_HOOKS,
+          blocklist: ZeroAddress,
+          wallet: await ownerWallet(FUJI_BLOCKLIST_HOOKS),
+        }),
+      )
+      assert.equal((await state(FUJI_BLOCKLIST_HOOKS)).blocklist, null)
+    })
+
+    it('refuses a policy engine that is an EOA, or that reverts attach() when simulated', async () => {
+      const op = new SetMultiTokenPoolHooksPolicyEngine()
+      const eoa = await refusal(() =>
+        op.generate(fuji.chain, { hooks: FUJI_HOOKS, policyEngine: Wallet.createRandom().address }),
+      )
+      assert.ok(eoa instanceof CCTParamsInvalidError && eoa.context.param === 'policyEngine')
+      // a contract without attach(): the write reverts from the owner, named before any signature
+      const { owner } = await withForkRetry(() => readOwnership(fuji.chain, FUJI_HOOKS))
+      const reverted = await refusal(() =>
+        op.generate(fuji.chain, {
+          hooks: FUJI_HOOKS,
+          policyEngine: FUJI_BLOCKLIST_HOOKS,
+          sender: owner,
+        }),
+      )
+      assert.ok(reverted instanceof CCTParamsInvalidError)
+      assert.equal(reverted.context.simulatedFrom, 'sender')
+    })
   })
 })
