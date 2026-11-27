@@ -10,7 +10,7 @@ import type { TransactionReceipt } from 'ethers'
 
 import type { EVMChain } from '../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../evm/types.ts'
-import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
+import { type CCTStateChange, CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
 import type { MultiTokenPoolLaneFinding, MultiTokenPoolSnapshot } from '../../multi-token-pool.ts'
 import type { TransactionResult } from '../../operation.ts'
 import { noteMinedBlock } from '../mined-block.ts'
@@ -116,6 +116,15 @@ export abstract class MultiTokenPoolWriteOperation<
   }
 
   /**
+   * Whether a move of a sealed value leaves the proposal valid (a balance that only grew, for a
+   * withdrawal of the whole balance): such a move is never reported, on the snapshot check, the
+   * rebuild before a send, or a caller's `expectedSnapshot`. Defaults to none.
+   */
+  protected tolerated(_change: CCTStateChange): boolean {
+    return false
+  }
+
+  /**
    * A refusal of this op at `param`, carrying its {@link errorContext} (pass `params` when the op's
    * context depends on them).
    */
@@ -173,7 +182,7 @@ export abstract class MultiTokenPoolWriteOperation<
         : { ...params, sender, expectedSnapshot: undefined },
     )
     if (params.expectedSnapshot) return unsigned
-    const changed = snapshotChanges(first.snapshot!, unsigned.snapshot!)
+    const changed = snapshotChanges(first.snapshot!, unsigned.snapshot!, (c) => this.tolerated(c))
     if (first.snapshot!.calldataHash !== unsigned.snapshot!.calldataHash)
       changed.unshift({
         path: 'calldataHash',

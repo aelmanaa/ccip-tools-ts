@@ -16,11 +16,8 @@ import {
 } from '../../multi-token-pool/contracts.ts'
 import { parseRateLimitConfig, toAbiRateLimitConfig } from '../../token-pool/rate-limit.ts'
 import { assertUnique, validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
-import {
-  type MultiTokenPoolRecordState,
-  TRANSFER_DIRECTIONS,
-  rateLimitBucketOf,
-} from '../projection.ts'
+import type { DecodedMultiTokenPoolWrite } from '../calldata.ts'
+import { type MultiTokenPoolRecordState, TRANSFER_DIRECTIONS } from '../projection.ts'
 import type { MultiTokenPoolRateLimits } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -106,10 +103,9 @@ export abstract class RateLimitBucketWriteOperation<
     { updates }: RateLimitBucketWriteParams<U>,
     { version, state }: PoolConfigManagerWriteContext,
   ): PoolConfigManagerWrite {
-    const stored = updates.map((u, i) => {
-      const rateLimits = this.rateLimitsOf(state, u)
-      if (!rateLimits) throw this.refuse(`updates[${i}]`, this.missingRecord(u))
-      return rateLimits
+    // the store reverts on a missing record: named here first
+    updates.forEach((u, i) => {
+      if (!this.rateLimitsOf(state, u)) throw this.refuse(`updates[${i}]`, this.missingRecord(u))
     })
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
       multiTokenPoolFunctionOf(this.name),
@@ -127,13 +123,28 @@ export abstract class RateLimitBucketWriteOperation<
         })),
       ],
     )
-    // the values the write replaces: each bucket as stored
-    const expected = Object.fromEntries(
-      updates.map((u, i) => {
-        const bucket = rateLimitBucketOf(u.direction, u.fastFinality)
-        return [`${this.pathPrefix}.${this.keyOf(u)}.${bucket}`, stored[i]![bucket]]
+    return { data }
+  }
+
+  /** Each bucket the calldata sets, as stored (a missing record: `null`). */
+  protected sealedFrom(
+    _chain: EVMChain,
+    { changes }: DecodedMultiTokenPoolWrite,
+    { state }: PoolConfigManagerWriteContext,
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      changes.flatMap((c) => {
+        if (c.kind !== 'setInlineRateLimitBucket' && c.kind !== 'setPolicyRateLimitBucket')
+          return []
+        // the hooks read only the record key, which the decoded change carries
+        const key = c as unknown as U
+        return [
+          [
+            `${this.pathPrefix}.${this.keyOf(key)}.${c.bucket}`,
+            this.rateLimitsOf(state, key)?.[c.bucket] ?? null,
+          ],
+        ]
       }),
     )
-    return { data, expected }
   }
 }

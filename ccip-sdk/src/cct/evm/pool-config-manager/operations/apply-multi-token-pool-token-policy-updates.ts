@@ -19,6 +19,7 @@ import {
   tokenRolesGate,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateAddress, validateArray, validateOneOf } from '../../validate.ts'
+import type { DecodedMultiTokenPoolWrite } from '../calldata.ts'
 import { type PolicyName, encodePolicyName } from '../contracts.ts'
 import { policyKey, tokenRecordsOf } from '../projection.ts'
 import {
@@ -117,7 +118,7 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
     ])
     const names = policyNames[recordType]
     const context = { recordType }
-    const current = await Promise.all(
+    await Promise.all(
       assignments.map(async (a, i) => {
         const at = `assignments[${i}]`
         const token = tokens[i]!
@@ -172,11 +173,28 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
               { context: { ...context, subsets } },
             )
         }
-        return [`policies.${recordType}.${token}`, old] as const
       }),
     )
-    // the values the write replaces: each token's current assignment of this type
-    const expected = Object.fromEntries(current)
-    return { data, expected }
+    return { data }
+  }
+
+  /** Each token's current assignment of the type the calldata assigns. */
+  protected sealedFrom(
+    _chain: EVMChain,
+    { changes }: DecodedMultiTokenPoolWrite,
+    { state }: PoolConfigManagerWriteContext,
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      changes.flatMap((c) =>
+        c.kind === 'assignPolicy'
+          ? [
+              [
+                `policies.${c.type}.${getAddress(c.tokenAddress)}`,
+                tokenRecordsOf(state, getAddress(c.tokenAddress))?.policies[c.type] ?? null,
+              ],
+            ]
+          : [],
+      ),
+    )
   }
 }

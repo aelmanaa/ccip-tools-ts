@@ -159,4 +159,64 @@ describe('renounceMultiTokenPoolDefaultAdmin', () => {
       assert.deepEqual(calls, [])
     })
   })
+
+  describe('a pause set now with no unpauser (it would stay forever, E7 N1)', () => {
+    const BOB = getAddress('0x' + 'b0'.repeat(20))
+    const paused = (unpauser: boolean) => {
+      const { state } = scheduled(Number(SCHEDULE) + 1)
+      state.globallyPaused = true
+      if (unpauser) {
+        state.pcm.roles.UNPAUSER_ROLE = [BOB]
+        state.roleLogs.push({
+          event: 'RoleGranted',
+          role: 'UNPAUSER_ROLE',
+          account: BOB,
+          blockNumber: 201,
+        })
+      }
+      return stackChain(state)
+    }
+
+    it('refuses without confirmPermanentPauses, naming the pause', async () => {
+      await assert.rejects(renounce(paused(false).chain), (e: unknown) => {
+        assert.ok(e instanceof CCTParamsInvalidError)
+        assert.equal(e.context.param, 'confirmPermanentPauses')
+        assert.match(String(e.context.reason), /pauses are set now \(global\)/)
+        return true
+      })
+    })
+
+    it('builds when an unpauser remains, or with the confirmation; seals the pauses', async () => {
+      const tx = await renounce(paused(true).chain)
+      assert.deepEqual(tx.snapshot.expected['pauses.active'], ['global'])
+      const confirmed = await new RenounceMultiTokenPoolDefaultAdmin().generate(
+        paused(false).chain,
+        {
+          poolConfigManager: PCM,
+          sender: OWNER,
+          confirmPermanentFreeze: true,
+          confirmPermanentPauses: true,
+        },
+      )
+      assert.deepEqual(confirmed.snapshot.expected['pauses.active'], ['global'])
+    })
+
+    it('a pause set after the build makes the proposal stale', async () => {
+      const { state } = scheduled(Number(SCHEDULE) + 1)
+      const { chain } = stackChain(state)
+      const tx = await renounce(chain)
+      assert.deepEqual(tx.snapshot.expected['pauses.active'], [])
+      state.globallyPaused = true
+      const check = await new CheckMultiTokenPoolSnapshot().query(chain, {
+        snapshot: tx.snapshot,
+        transaction: tx,
+        sender: OWNER,
+      })
+      assert.equal(check.ok, false)
+      assert.deepEqual(
+        check.changed.map((c) => c.path),
+        ['pauses.active'],
+      )
+    })
+  })
 })

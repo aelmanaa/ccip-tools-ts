@@ -51,7 +51,11 @@ import type { Result } from 'ethers'
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { CCTDataDecodeError, CCTParamsInvalidError } from '../../errors.ts'
 import { latestBlock } from '../mined-block.ts'
-import { NO_RECORD_CHANGE_FUNCTIONS } from './calldata.ts'
+import {
+  type DecodedMultiTokenPoolWrite,
+  NO_RECORD_CHANGE_FUNCTIONS,
+  decodeMultiTokenPoolWrite,
+} from './calldata.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
 /** Common fields of every PoolConfigManager write. */
@@ -98,11 +102,15 @@ export type PoolConfigManagerWriteContext = Pick<
  */
 export type PoolConfigManagerFacts = Record<string, unknown>
 
-/** What an op encodes: the PCM calldata, and the values it keeps, merges or replaces. @internal */
+/**
+ * What an op encodes: the PCM calldata, and values it seals that are not chain state (a
+ * confirmation it was built with). The state it replaces comes from
+ * {@link PoolConfigManagerWriteOperation.sealedFrom}. @internal
+ */
 export type PoolConfigManagerWrite = {
   /** The calldata sent to the PCM. */
   data: string
-  /** Values the write keeps, merges or replaces, by dotted path. */
+  /** Sealed values that are not chain state, by dotted path. */
   expected?: Record<string, unknown>
 }
 
@@ -117,6 +125,45 @@ export abstract class PoolConfigManagerWriteOperation<
 > extends MultiTokenPoolWriteOperation<P, Parsed> {
   /** The roles the PCM accepts for this write (any one suffices). */
   protected abstract gate(params: Parsed): readonly PoolConfigManagerRole[]
+
+  /**
+   * The chain state this write replaces or keeps, read from `ctx` for the records its calldata
+   * touches (`decoded`), by dotted path. The build seals it; the snapshot check calls this same
+   * method on the proposal's calldata and a fresh read ({@link freshSealed}), so a sealed value is
+   * re-read, never echoed back.
+   */
+  protected abstract sealedFrom(
+    chain: EVMChain,
+    decoded: DecodedMultiTokenPoolWrite,
+    ctx: PoolConfigManagerWriteContext,
+  ): Promise<Record<string, unknown>> | Record<string, unknown>
+
+  /**
+   * The values a proposal of this op sealed, re-read now: the records its calldata touches, from a
+   * fresh read of the PCM at `blockTag`. The snapshot check compares them with the sealed ones.
+   * @internal
+   */
+  async freshSealed(
+    chain: EVMChain,
+    {
+      data,
+      address,
+      version,
+      blockTag,
+    }: { data: string; address: string; version: MultiTokenPoolVersion; blockTag: number },
+  ): Promise<Record<string, unknown>> {
+    const read = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
+    return this.sealedFrom(chain, decodeMultiTokenPoolWrite(data, version), {
+      address,
+      version,
+      blockTag,
+      state: read.state,
+      staticConfig: read.staticConfig,
+      policyNames: read.policyNames,
+      rateLimitPolicyDecimals: read.rateLimitPolicyDecimals,
+      facts: {},
+    })
+  }
 
   /** Encodes the write; may read the PCM at `ctx.blockTag` to merge. */
   protected abstract encode(
@@ -222,10 +269,11 @@ export abstract class PoolConfigManagerWriteOperation<
     const moved = snapshotChanges(
       { ...snapshot, expected: sealed },
       { guardInputsHash: snapshot.guardInputsHash, expected: facts },
+      (c) => this.tolerated(c),
     )
     if (moved.length) return { ok: false, changed: moved, findings: [] }
     const rebuilt = await this.generate(chain, { ...raw, sender })
-    const changed = snapshotChanges(snapshot, rebuilt.snapshot)
+    const changed = snapshotChanges(snapshot, rebuilt.snapshot, (c) => this.tolerated(c))
     if (rebuilt.snapshot.calldataHash !== snapshot.calldataHash)
       changed.unshift({
         path: 'calldataHash',
@@ -284,7 +332,7 @@ export abstract class PoolConfigManagerWriteOperation<
           blockTag,
           await readPoolConfigManagerStaticConfig(chain, address, version, { blockTag }),
         )
-    const { data, expected } = await this.encode(chain, params, {
+    const ctx: PoolConfigManagerWriteContext = {
       address,
       version,
       blockTag,
@@ -293,9 +341,16 @@ export abstract class PoolConfigManagerWriteOperation<
       policyNames: read.policyNames,
       rateLimitPolicyDecimals: read.rateLimitPolicyDecimals,
       facts,
-    })
+    }
+    const { data, expected: extra } = await this.encode(chain, params, ctx)
     if (!this.changesRecords()) assertRecordFree(this.name, address, version, data)
-    const sealed = { ...facts, ...expected }
+    // what the write is judged on and replaces: a record-free write's facts, and the records its
+    // calldata touches, read the way the snapshot check reads them again
+    const expected = {
+      ...facts,
+      ...(await this.sealedFrom(chain, decodeMultiTokenPoolWrite(data, version), ctx)),
+      ...extra,
+    }
     const context = this.errorContext(params)
     const result = await runMultiTokenPoolGuards({
       chain,
@@ -307,8 +362,9 @@ export abstract class PoolConfigManagerWriteOperation<
       stateRead: read,
       ...(params.poolAddress !== undefined && { poolAddress: params.poolAddress }),
       ...(params.sender !== undefined && { sender: params.sender }),
-      ...(Object.keys(sealed).length && { expected: sealed }),
+      expected,
       ...(context && { errorContext: context }),
+      tolerate: (c) => this.tolerated(c),
       ...writeGuardsOf(params),
     })
     return {

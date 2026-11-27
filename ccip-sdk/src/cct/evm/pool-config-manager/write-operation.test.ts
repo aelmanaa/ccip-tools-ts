@@ -25,6 +25,9 @@ class RecordFreeButPauses extends PoolConfigManagerWriteOperation<PoolConfigMana
   protected override readFacts() {
     return { 'admin.defaultAdmin': OWNER }
   }
+  protected sealedFrom() {
+    return {}
+  }
   protected gate(): readonly PoolConfigManagerRole[] {
     return ['DEFAULT_ADMIN_ROLE']
   }

@@ -10,6 +10,7 @@
 import { type Result, ZeroAddress, getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
+import { resultToObject } from '../../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   assertDefaultAdminTransferAcceptable,
@@ -21,6 +22,7 @@ import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_ROLES,
   POOL_CONFIG_MANAGER_TYPE,
+  connectionPolicyStoreContract,
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
   poolConfigManagerContract,
@@ -31,7 +33,10 @@ import { validateAddress, validateOneOf, validateUint48 } from '../../validate.t
 import {
   type PoolConfigManagerAdminState,
   type PoolConfigManagerTarget,
+  readConfiguredTokens,
+  readInBatches,
   readPoolConfigManagerAdmin,
+  readPoolConfigManagerStaticConfig,
 } from '../contracts.ts'
 import {
   type PoolConfigManagerFacts,
@@ -40,6 +45,7 @@ import {
   type PoolConfigManagerWriteParams,
   PoolConfigManagerWriteOperation,
 } from '../write-operation.ts'
+import { GetMultiTokenPoolChainPauses } from './get-multi-token-pool-chain-pauses.ts'
 import { GetMultiTokenPoolRoleHolders } from './get-multi-token-pool-role-holders.ts'
 
 /** The roles `grantRole` / `revokeRole` / `renounceRole` take: every role but the default admin. */
@@ -122,6 +128,8 @@ const adminOf = (facts: PoolConfigManagerFacts) =>
 /** Where a renounce seals the holders of the pause roles. */
 const PAUSER_HOLDERS = 'roles.holders.PAUSER_ROLE'
 const UNPAUSER_HOLDERS = 'roles.holders.UNPAUSER_ROLE'
+/** Where a renounce seals the pauses active now (`null`: they cannot be read in full). */
+const ACTIVE_PAUSES = 'pauses.active'
 /** Where a renounce seals its `confirmPermanentPauses`. */
 const CONFIRM_PERMANENT_PAUSES = 'confirm.permanentPauses'
 
@@ -150,6 +158,67 @@ function assertPausesRecoverable(
       'confirmPermanentPauses',
       `is required: PAUSER_ROLE has holders (${pausers.join(', ')}) but UNPAUSER_ROLE has none, and after the renounce no one can grant it, so the next pause stops its lanes for good. Grant UNPAUSER_ROLE or revoke PAUSER_ROLE first, or pass confirmPermanentPauses: true`,
     )
+  const active = facts[ACTIVE_PAUSES] as string[] | null
+  if (active === null)
+    throw new CCTParamsInvalidError(
+      operation,
+      'confirmPermanentPauses',
+      'is required: the chain pauses cannot be read in full (the RPC serves no historical code to find the store deployment block), so a pause no unpauser could lift cannot be ruled out. Use an archive RPC, or pass confirmPermanentPauses: true',
+    )
+  if (active.length && !unpausers.length)
+    throw new CCTParamsInvalidError(
+      operation,
+      'confirmPermanentPauses',
+      `is required: pauses are set now (${active.join('; ')}) and UNPAUSER_ROLE has no holder, so after the renounce they stay forever. Grant UNPAUSER_ROLE and lift them first, or pass confirmPermanentPauses: true`,
+    )
+}
+
+/**
+ * Every pause set now on the PCM: the global one, each chain's (from the store's pause logs, each
+ * flag read now) and each configured token's, as sorted labels; `null` when the chain pause logs
+ * cannot be read from the store's deployment block.
+ */
+async function activePauses(
+  chain: EVMChain,
+  {
+    address,
+    version,
+    blockTag,
+  }: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
+): Promise<string[] | null> {
+  const flags = (outbound: boolean, inbound: boolean) =>
+    outbound && inbound ? 'both' : outbound ? 'outbound' : 'inbound'
+  const [chains, { tokens }, { connectionPolicyStore }] = await Promise.all([
+    new GetMultiTokenPoolChainPauses()
+      .query(chain, { poolConfigManager: address, toBlock: blockTag })
+      .then((r) => (r.complete ? r : null))
+      .catch((err: unknown) => {
+        if (err instanceof CCTParamsInvalidError && err.context.param === 'fromBlock') return null
+        throw err
+      }),
+    readConfiguredTokens(chain, address, version, { blockTag }),
+    readPoolConfigManagerStaticConfig(chain, address, version, { blockTag }),
+  ])
+  if (!chains) return null
+  const store = connectionPolicyStoreContract(chain, connectionPolicyStore, version)
+  const profiles = await readInBatches(
+    tokens,
+    async (batch) =>
+      (await store.getTokenProfiles(batch, { blockTag })).map((p) => resultToObject(p)),
+    { batchSize: 100 },
+  )
+  return [
+    ...(chains.global ? ['global'] : []),
+    ...chains.chains
+      .filter((c) => c.outbound || c.inbound)
+      .map((c) => `chain ${c.remoteChainSelector} ${flags(c.outbound, c.inbound)}`),
+    ...tokens.flatMap((t, i) => {
+      const p = profiles[i]!
+      return p.isOutboundPaused || p.isInboundPaused
+        ? [`token ${getAddress(t)} ${flags(p.isOutboundPaused, p.isInboundPaused)}`]
+        : []
+    }),
+  ].sort()
 }
 
 /** The path a role-membership fact is sealed at. */
@@ -188,6 +257,11 @@ abstract class RoleWriteOperation<
   // a role or admin write changes no stored record
   protected override changesRecords(): boolean {
     return false
+  }
+
+  // it touches no record: what it is judged on is its facts (`readFacts`)
+  protected sealedFrom(): Record<string, unknown> {
+    return {}
   }
 
   /** The calldata. */
@@ -434,7 +508,7 @@ export class RenounceMultiTokenPoolDefaultAdmin extends AdminWriteOperation<Reno
     params: RenounceMultiTokenPoolDefaultAdminParams,
     ctx: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
   ): Promise<PoolConfigManagerFacts> {
-    const [admin, holders] = await Promise.all([
+    const [admin, holders, pauses] = await Promise.all([
       this.adminFacts(chain, ctx),
       new GetMultiTokenPoolRoleHolders()
         .query(chain, { poolConfigManager: ctx.address, toBlock: ctx.blockTag })
@@ -444,11 +518,13 @@ export class RenounceMultiTokenPoolDefaultAdmin extends AdminWriteOperation<Reno
           if (err instanceof CCTParamsInvalidError && err.context.param === 'fromBlock') return null
           throw err
         }),
+      activePauses(chain, ctx),
     ])
     return {
       ...admin,
       [PAUSER_HOLDERS]: holders?.PAUSER_ROLE ?? null,
       [UNPAUSER_HOLDERS]: holders?.UNPAUSER_ROLE ?? null,
+      [ACTIVE_PAUSES]: pauses,
     }
   }
 
