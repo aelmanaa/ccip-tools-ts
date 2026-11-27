@@ -57,6 +57,7 @@ export async function readHookList(
       proposedAdmin: keyOrNull(list.proposedAdmin),
       enabled: list.enabled,
       entryCount: list.entryCount,
+      poolGroupAddress: list.group.toBase58(),
     }
   }
   if (account.data.subarray(0, 8).equals(disc('Blocklist'))) {

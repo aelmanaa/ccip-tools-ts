@@ -264,7 +264,14 @@ export const POOL_GROUP_SNAPSHOT_RECHECKS: ReadonlyMap<string, PoolGroupRecheck>
     async () => (await import('./security.ts')).POOL_GROUP_SECURITY_OPERATIONS,
   ),
   ...lazyRechecks(
-    ['createPoolGroupAllowlist', 'setPoolGroupHookConfig', 'setPoolGroupPolicyEngine'],
+    [
+      'createPoolGroupAllowlist',
+      'applyPoolGroupListUpdates',
+      'transferPoolGroupListAdmin',
+      'acceptPoolGroupListAdmin',
+      'setPoolGroupHookConfig',
+      'setPoolGroupPolicyEngine',
+    ],
     async () => (await import('./hook-writes.ts')).POOL_GROUP_HOOK_OPERATIONS,
   ),
 ])

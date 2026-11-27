@@ -14,7 +14,11 @@ import type { SolanaChain } from '../../../solana/index.ts'
 import { isWallet } from '../../../solana/types.ts'
 import { canonicalHash } from '../../canonical.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
-import type { MultiTokenPoolSnapshot, MultiTokenPoolSnapshotCheck } from '../../multi-token-pool.ts'
+import type {
+  MultiTokenPoolLaneFinding,
+  MultiTokenPoolSnapshot,
+  MultiTokenPoolSnapshotCheck,
+} from '../../multi-token-pool.ts'
 import { Operation } from '../../operation.ts'
 import {
   type SolanaExecuteParams,
@@ -67,6 +71,11 @@ export type ParsedPoolGroupWrite = {
   liveCheck?: PoolGroupLiveCheckOptions
   /** The snapshot a previous build returned. */
   expectedSnapshot?: MultiTokenPoolSnapshot
+  /**
+   * Lanes a partitioned op leaves out (`partition`): the lanes a first judgement refused, so the
+   * rest is built without them.
+   */
+  excludedLanes?: PoolGroupLaneKey[]
 }
 
 /** What an op's plan returns: its items, the values its snapshot keeps, and how to judge it. @internal */
@@ -77,10 +86,17 @@ export type PoolGroupWritePlan<X extends object> = {
   items: PoolGroupPackItem[]
   /** Values the write keeps, merges or replaces, by dotted path. */
   expected: Record<string, unknown>
-  /** Judge options; `null` skips the lane guard (a new group has no lanes). */
+  /** Judge options (`checkLane`: tests inject the lane check); `null` skips the lane guard (a new group has no lanes). */
   judge: Pick<
     JudgePoolGroupWriteInput,
-    'failsClosedSeverity' | 'goingLiveSeverity' | 'scope' | 'lanes' | 'drainConfirmed'
+    | 'failsClosedSeverity'
+    | 'goingLiveSeverity'
+    | 'scope'
+    | 'unreadableSeverity'
+    | 'bestEffort'
+    | 'checkLane'
+    | 'lanes'
+    | 'drainConfirmed'
   > | null
   /**
    * Judge each item as its own simulated transaction (batched lane ops whose items touch disjoint
@@ -100,6 +116,14 @@ export type PoolGroupWritePlan<X extends object> = {
    * account changes, so the judge cannot see them; reported in `goingLive` with the judged ones.
    */
   goingLive?: PoolGroupLaneKey[]
+  /**
+   * Lanes are independent (a permissionless crank): a lane the judge refuses is left out and
+   * reported (a warning finding and a follow-up) instead of refusing every lane; the plan honours
+   * `excludedLanes`.
+   */
+  partition?: { operation: string; inputs: (lanes: PoolGroupLaneKey[]) => Record<string, unknown> }
+  /** Findings the plan itself makes (lanes it cannot read and leaves out). */
+  findings?: MultiTokenPoolLaneFinding[]
 }
 
 /** Lanes, each once, in order. */
@@ -110,6 +134,24 @@ const uniqueLanes = <T extends PoolGroupLaneKey>(lanes: readonly T[]): T[] =>
         (o) => o.tokenAddress === l.tokenAddress && o.remoteChainSelector === l.remoteChainSelector,
       ) === i,
   )
+
+/** Re-plans of a partitioned op before it gives up (each round leaves more lanes out). */
+const MAX_PARTITION_ROUNDS = 4
+
+/** The lanes and error findings a judge refusal names (lane rules, never a simulation refusal). */
+function refusedLanes(err: unknown): MultiTokenPoolLaneFinding[] {
+  if (!(err instanceof CCTParamsInvalidError) || err.context.param !== 'guards') return []
+  const findings: unknown = err.context.findings
+  return Array.isArray(findings)
+    ? findings.filter(
+        (f): f is MultiTokenPoolLaneFinding =>
+          typeof f === 'object' &&
+          f !== null &&
+          Reflect.get(f, 'severity') === 'error' &&
+          typeof Reflect.get(f, 'tokenAddress') === 'string',
+      )
+    : []
+}
 
 /** A plan's kept values, with the pool group it writes (so a snapshot binds to one group). */
 const expectedOf = (plan: PoolGroupWritePlan<object>): Record<string, unknown> => ({
@@ -158,6 +200,9 @@ async function judgeGroups(
     unreadable: unique(parts.flatMap((p) => p.unreadable)),
     guardInputsHash: canonicalHash(parts.map((p) => p.guardInputsHash)),
     slot: parts.reduce((m, p) => (p.slot < m ? p.slot : m), parts[0]!.slot),
+    ...(parts.some((p) => p.unlisted) && {
+      unlisted: parts.flatMap((p) => (p.unlisted ? [p.unlisted] : [])).join('; '),
+    }),
   }
 }
 
@@ -283,6 +328,14 @@ export abstract class PoolGroupWriteOperation<
     return ix.keys[0]?.pubkey
   }
 
+  /** {@link proposalGroup}, for ops whose group is read from an account the instruction names. */
+  protected proposalGroupOf(
+    _chain: SolanaChain,
+    ix: TransactionInstruction,
+  ): Promise<PublicKey | undefined> {
+    return Promise.resolve(this.proposalGroup(ix))
+  }
+
   /** Builds the unsigned transactions; no signing. */
   async generate(
     chain: SolanaChain,
@@ -303,28 +356,91 @@ export abstract class PoolGroupWriteOperation<
     chain: SolanaChain,
     parsed: Parsed,
   ): Promise<{ result: PoolGroupUnsignedResult; extra: X }> {
-    const plan = await this.plan(chain, parsed)
+    let current = parsed
+    const left: MultiTokenPoolLaneFinding[] = []
+    let plan: PoolGroupWritePlan<X>
+    let judgement: PoolGroupJudgement | null
+    for (let round = 0; ; round++) {
+      plan = await this.plan(chain, current)
+      if (!plan.items.length) {
+        judgement = null
+        break
+      }
+      try {
+        judgement = plan.judge
+          ? await judgeGroups(
+              {
+                operation: this.name,
+                chain,
+                program: parsed.program,
+                group: plan.group,
+                payer: parsed.payer,
+                ...plan.judge,
+                ...parsed.guardOptions,
+                ...(parsed.liveCheck && { liveCheck: parsed.liveCheck }),
+              },
+              judgedGroups(
+                plan,
+                plan.items.map((i) => i.instructions),
+              ),
+            )
+          : null
+        break
+      } catch (err) {
+        // one refused lane of a crank never blocks the others (S4 review M5)
+        const refused = plan.partition ? refusedLanes(err) : []
+        if (!refused.length || round >= MAX_PARTITION_ROUNDS) throw err
+        left.push(...refused)
+        current = {
+          ...current,
+          excludedLanes: uniqueLanes([
+            ...(current.excludedLanes ?? []),
+            ...refused.map((f) => ({
+              tokenAddress: f.tokenAddress,
+              remoteChainSelector: f.remoteChainSelector,
+            })),
+          ]),
+        }
+      }
+    }
     const extra = plan.extra
-    const empty = { affectedLanes: [], goingLive: [], findings: [] }
-    if (!plan.items.length) return { result: { transactions: [], ...empty }, extra }
-    const judgement = plan.judge
-      ? await judgeGroups(
-          {
-            operation: this.name,
-            chain,
-            program: parsed.program,
-            group: plan.group,
-            payer: parsed.payer,
-            ...plan.judge,
-            ...parsed.guardOptions,
-            ...(parsed.liveCheck && { liveCheck: parsed.liveCheck }),
-          },
-          judgedGroups(
-            plan,
-            plan.items.map((i) => i.instructions),
-          ),
-        )
-      : null
+    const leftOut = uniqueLanes(
+      left.map((f) => ({
+        tokenAddress: f.tokenAddress,
+        remoteChainSelector: f.remoteChainSelector,
+      })),
+    )
+    const partitioned = {
+      findings: [
+        ...(plan.findings ?? []),
+        ...left.map((f) => ({
+          ...f,
+          severity: 'warning' as const,
+          reason: `${f.reason} (this lane was left out of the write; the others were built)`,
+        })),
+      ],
+      followUps:
+        leftOut.length && plan.partition
+          ? [
+              {
+                operation: plan.partition.operation,
+                reason: `${leftOut.length} lane(s) were left out because the lane check refused them: fix the findings, then run it again for them`,
+                inputs: plan.partition.inputs(leftOut),
+              },
+            ]
+          : [],
+    }
+    if (!plan.items.length)
+      return {
+        result: {
+          transactions: [],
+          affectedLanes: [],
+          goingLive: [],
+          findings: partitioned.findings,
+          ...(partitioned.followUps.length && { followUps: partitioned.followUps }),
+        },
+        extra,
+      }
     const packed = await packPoolGroupTransactions({
       operation: this.name,
       chain,
@@ -343,14 +459,20 @@ export abstract class PoolGroupWriteOperation<
       calldataHash: poolGroupTransactionsHash(packed.transactions),
       ...(parsed.expectedSnapshot && { expectedSnapshot: parsed.expectedSnapshot }),
     })
-    const followUps = plan.followUps ? plan.followUps(judgement) : []
+    const followUps = [
+      ...(plan.followUps ? plan.followUps(judgement) : []),
+      ...partitioned.followUps,
+    ]
     return {
       result: {
         ...packed,
         snapshot,
         affectedLanes: judgement?.affectedLanes ?? [],
         goingLive: uniqueLanes([...(judgement?.goingLive ?? []), ...(plan.goingLive ?? [])]),
-        findings: (judgement?.findings ?? []).filter((f) => f.severity === 'warning'),
+        findings: [
+          ...(judgement?.findings ?? []).filter((f) => f.severity === 'warning'),
+          ...partitioned.findings,
+        ],
         ...(followUps.length && { followUps }),
       },
       extra,
@@ -424,12 +546,13 @@ export abstract class PoolGroupWriteOperation<
   ): Promise<MultiTokenPoolSnapshotCheck> {
     const instructions = proposalInstructions(ref.program, transactions)
     // every instruction of these ops names its pool group: it must be the one checked
-    const foreign = instructions.findIndex((ix) => !this.proposalGroup(ix)?.equals(ref.group))
+    const groups = await Promise.all(instructions.map((ix) => this.proposalGroupOf(chain, ix)))
+    const foreign = groups.findIndex((g) => !g?.equals(ref.group))
     if (foreign >= 0)
       throw new CCTParamsInvalidError(
         this.name,
         'transactions',
-        `instruction ${foreign} of the proposal writes the pool group ${this.proposalGroup(instructions[foreign]!)?.toBase58() ?? '(none)'}, not ${ref.group.toBase58()}: pass the pool group the proposal targets`,
+        `instruction ${foreign} of the proposal writes the pool group ${groups[foreign]?.toBase58() ?? '(none)'}, not ${ref.group.toBase58()}: pass the pool group the proposal targets`,
       )
     const sealed: unknown = snapshot.expected[POOL_GROUP_GUARD_OPTIONS_PATH]
     const options = typeof sealed === 'object' && sealed !== null ? sealed : {}

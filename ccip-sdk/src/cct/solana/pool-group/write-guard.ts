@@ -24,7 +24,7 @@ import {
 } from '@solana/web3.js'
 import { keccak256 } from 'ethers'
 
-import { CCIPError } from '../../../errors/index.ts'
+import { CCIPError, CCIPHttpError } from '../../../errors/index.ts'
 import type { SolanaChain } from '../../../solana/index.ts'
 import { deriveTokenPoolChainConfigV2Pda } from '../../../solana/token-pool.ts'
 import { MAX_COMPUTE_UNIT_LIMIT } from '../../../solana/utils.ts'
@@ -50,6 +50,7 @@ import {
   decodePoolGroupIdlAccount,
   poolGroupPdas,
 } from './accounts.ts'
+import { laneSendFootprint } from './lane-hooks.ts'
 import {
   type LaneFailsClosed,
   type PoolGroupLaneState,
@@ -168,13 +169,6 @@ function classFingerprint(
     uid: state.ext?.uid ?? null,
   })
 }
-
-/** The named records a lane references, as a stable string. */
-const namedRecords = (state: PoolGroupLaneState) =>
-  [...state.named.values()]
-    .map((n) => n.address.toBase58())
-    .sort()
-    .join()
 
 /** Where a lane takes SECURITY from (kind, and the named record). */
 function securitySource(state: PoolGroupLaneState): string {
@@ -295,6 +289,18 @@ export type JudgePoolGroupWriteInput = PoolGroupGuardOptions & {
    * already confirms (A21 is not asked twice).
    */
   drainConfirmed?: readonly PoolGroupLaneKey[]
+  /**
+   * Severity of a lane the write changes that cannot be read after it; defaults to
+   * `failsClosedSeverity`. A write that can re-open lanes (reset, schedule) passes `'error'`, so an
+   * unreadable lane never goes live unchecked (A23, S4 review M2).
+   */
+  unreadableSeverity?: 'error' | 'warning'
+  /**
+   * An emergency write that only closes lanes (activate-now): a lane listing or read that fails is
+   * reported in `unlisted` instead of refusing the write, which an operator must always be able to
+   * make (S4 review M4).
+   */
+  bestEffort?: boolean
 }
 
 /** What a judged write reports. @internal */
@@ -306,13 +312,15 @@ export type PoolGroupJudgement = {
   /** Every finding, errors included (errors refuse the write unless `reportFindings`). */
   findings: MultiTokenPoolLaneFinding[]
   /** Lanes the write leaves failing closed, with why. */
-  failingClosed: (PoolGroupLaneKey & { reason: string })[]
+  failingClosed: (PoolGroupLaneKey & { reason: string; code: LaneFailsClosed['code'] })[]
   /** Affected lanes that cannot be read after the write (findings at `failsClosedSeverity`). */
   unreadable: PoolGroupLaneKey[]
   /** keccak256 of every input the guard read for the affected lanes. */
   guardInputsHash: string
   /** The slot the simulation ran at. */
   slot: bigint
+  /** `bestEffort`: why the lanes could not be listed or read, so none was judged. */
+  unlisted?: string
 }
 
 const laneKey = (l: PoolGroupLaneKey) => `${l.tokenAddress}:${l.remoteChainSelector}`
@@ -425,6 +433,23 @@ type CheckedLane = {
   mode: 'live' | 'changed'
 }
 
+/**
+ * Whether a raw (non-SDK) error is an RPC rate limit, also when ethers wraps the HTTP 429 in a
+ * `CALL_EXCEPTION` ("missing revert data"): its message, cause or `info` names it (S4 review m11).
+ */
+function isRateLimited(err: unknown): boolean {
+  const seen: unknown[] = []
+  const text = (v: unknown, depth: number): string => {
+    if (depth > 4 || v === null || typeof v !== 'object' || seen.includes(v))
+      return typeof v === 'string' || typeof v === 'number' ? String(v) : ''
+    seen.push(v)
+    return ['message', 'shortMessage', 'code', 'status', 'cause', 'info', 'error', 'body']
+      .map((k) => text(Reflect.get(v, k), depth + 1))
+      .join(' ')
+  }
+  return /\b429\b|too many requests|rate limit/i.test(text(err, 0))
+}
+
 /** Findings that a fact could not be read: never waived as an error the lane already had. */
 const UNREAD_CHECKS: readonly MultiTokenPoolLaneFinding['check'][] = [
   'REMOTE_UNREADABLE',
@@ -491,6 +516,12 @@ async function checkLanesAfter(
               : f,
           )
         } catch (err) {
+          if (!(err instanceof CCIPError) && isRateLimited(err))
+            throw new CCIPHttpError(
+              429,
+              `a remote RPC rate-limited the lane check of ${laneKey(key)} (the write is not judged): retry, or pass a getChain with another endpoint`,
+              { cause: err instanceof Error ? err : undefined },
+            )
           if (!(err instanceof CCIPError) || err.isTransient) throw err
           return [
             {
@@ -677,24 +708,47 @@ export async function judgePoolGroupWrite(
       slot,
     }
 
-  const listed = input.lanes
-    ? [...input.lanes]
-    : await listPoolGroupLaneRequests(
-        operation,
-        chain,
-        { program, group },
-        {
-          fix: 'judging the lanes this write changes needs it; use an RPC that serves getProgramAccounts',
-        },
-      )
-  // lanes the write creates or links to this group are not listed before it: found from the
-  // ChainConfigV2 accounts it leaves naming this group
-  const requests = [...listed, ...lanesJoining(program, group, changed, listed)]
-  const [statesBefore, statesAfter] = await Promise.all([
-    readPoolGroupLaneStates(chain, program, requests),
-    readPoolGroupLaneStates(chain, program, requests, { overlay: changed }),
-  ])
+  const listAndRead = async () => {
+    const listed = input.lanes
+      ? [...input.lanes]
+      : await listPoolGroupLaneRequests(
+          operation,
+          chain,
+          { program, group },
+          {
+            fix: 'judging the lanes this write changes needs it; use an RPC that serves getProgramAccounts',
+          },
+        )
+    // lanes the write creates or links to this group are not listed before it: found from the
+    // ChainConfigV2 accounts it leaves naming this group
+    const requests = [...listed, ...lanesJoining(program, group, changed, listed)]
+    const [before, after] = await Promise.all([
+      readPoolGroupLaneStates(chain, program, requests),
+      readPoolGroupLaneStates(chain, program, requests, { overlay: changed }),
+    ])
+    return { requests, statesBefore: before, statesAfter: after }
+  }
+  let read
+  try {
+    read = await listAndRead()
+  } catch (err) {
+    if (!input.bestEffort) throw err
+    const unlisted = err instanceof Error ? err.message : String(err)
+    chain.logger.warn(`${operation}: the lanes this write changes were not judged (${unlisted})`)
+    return {
+      affectedLanes: [],
+      goingLive: [],
+      findings: [],
+      failingClosed: [],
+      unreadable: [],
+      guardInputsHash: canonicalHash({ lanes: 'unlisted', changed: changedInputs }),
+      slot,
+      unlisted,
+    }
+  }
+  const { requests, statesBefore, statesAfter } = read
   const severity = input.failsClosedSeverity ?? 'error'
+  const unreadableSeverity = input.unreadableSeverity ?? severity
   const loosens =
     input.scope === 'loosened'
       ? (await import('../../evm/pool-config-manager/guards.ts')).loosensRateLimits
@@ -750,16 +804,16 @@ export async function judgePoolGroupWrite(
       unreadable.push(key)
       findings.push({
         check: 'LANE_UNREADABLE',
-        severity,
+        severity: unreadableSeverity,
         ...key,
-        reason: `the local lane this write changes cannot be read after it (${v1.reason}), so it is not judged${severity === 'error' ? ': the write is refused' : ': check it with checkMultiTokenPoolLane'}`,
+        reason: `the local lane this write changes cannot be read after it (${v1.reason}), so it is not judged${unreadableSeverity === 'error' ? ': the write is refused' : ': check it with checkMultiTokenPoolLane'}`,
       })
       return
     }
     // a lane unreadable before the write is judged as nothing trusted and nothing live
     const before0 = v0 && !isUnread(v0) ? v0 : nothing
     const after1 = v1 ?? nothing
-    if (s1 && (after1.outbound || after1.inbound))
+    if (s1 && !isUnread(s1) && (after1.outbound || after1.inbound))
       openAfter.push({
         key,
         state: s1,
@@ -774,29 +828,16 @@ export async function judgePoolGroupWrite(
       !isUnread(s0) &&
       s1 &&
       !isUnread(s1) &&
-      // CONNECTION and FEE (A23), and SECURITY, whose hooks the lane check judges (S4 H1)
-      (['connection', 'fee', 'security'] as const).some(
+      // CONNECTION and FEE (A23), and SECURITY: the lane check judges its hooks (the accounts
+      // they need, an empty enabled allowlist) and measures the send lock budget on the
+      // post-state, named records and hook accounts included (S4 review M1)
+      ((['connection', 'fee', 'security'] as const).some(
         (cls) => classFingerprint(s0, cls) !== classFingerprint(s1, cls),
-      )
+      ) ||
+        // what a send resolves changed (records, hook accounts): its lock budget is re-measured
+        [...laneSendFootprint(s0)].sort().join() !== [...laneSendFootprint(s1)].sort().join())
     )
       checkedLanes.push({ key, mint, selector, open: openOf(after1), mode: 'changed' })
-    // the send lock budget is measured on the state before the write: a write that changes the
-    // records a send passes (an assignment) is reported, to re-check after it lands (S3b N3)
-    if (
-      s0 &&
-      !isUnread(s0) &&
-      s1 &&
-      !isUnread(s1) &&
-      (after1.outbound || after1.inbound) &&
-      namedRecords(s0) !== namedRecords(s1)
-    )
-      findings.push({
-        check: 'ACCOUNT_LOCKS_EXCEEDED',
-        severity: 'warning',
-        ...key,
-        reason:
-          'the write changes the policy records a send of this lane passes, and the send lock budget was measured before it: run checkMultiTokenPoolLane after it lands',
-      })
     // a SECURITY source change swaps the lane's CCVs at once (no notice): refused on a lane live
     // before and after unless its effective CCVs are unchanged or the caller confirms it (A23)
     if (
@@ -820,7 +861,7 @@ export async function judgePoolGroupWrite(
       )
     const fails = v1?.failsClosed
     if (fails && fails.code !== before0.failsClosed?.code) {
-      failingClosed.push({ ...key, reason: fails.reason })
+      failingClosed.push({ ...key, reason: fails.reason, code: fails.code })
       const { check, recordType, fix } = laneFailsClosedFinding(fails.code)
       const what = fails.directions.length > 1 ? 'every transfer' : 'every send'
       findings.push({
@@ -836,7 +877,7 @@ export async function judgePoolGroupWrite(
       v1.failsClosedAt !== before0.failsClosedAt
     ) {
       const reason = `GroupCcvsNotSynced from ${v1.failsClosedAt}: the lane's CCV copy activates a set its SECURITY record does not (a pending set cancelled or replaced), so every transfer reverts from then until the lane syncs`
-      failingClosed.push({ ...key, reason })
+      failingClosed.push({ ...key, reason, code: 'GroupCcvsNotSynced' })
       findings.push({
         check: 'CCVS_NOT_SYNCED',
         severity,
