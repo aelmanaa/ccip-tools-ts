@@ -7450,10 +7450,15 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * replaced.
    *
    * @remarks
-   * With `restore` (the stop's snapshot) the exact buckets come back, refused if the stopped record
-   * changed since. Without it the lift restores from chain state: the inline record is removed when
-   * the token has a rate limit policy, else `rateLimits` is required. Each lane the lift makes live
-   * is judged, with no attestations (pass `getChain` for the remote sides).
+   * With `restore` (the stop's snapshot, verified by its hash) the record the stop replaced comes
+   * back, refused if the stopped record changed since; a lane that was on a policy goes back to the
+   * policy as it is now. Without `restore` the lift restores from chain state (the inline record is
+   * removed when the token has a rate limit policy, else `rateLimits` is required) and **cannot tell
+   * whose stop it lifts**: another operator's or an incident's stop is lifted too, so planners use
+   * `restore`. It never touches a direction outside `direction`: from `rateLimits` only the lifted
+   * direction's buckets are taken, and a lane also stopped in the other direction is refused on the
+   * policy path. Each lane the lift makes live is judged, with no attestations (pass `getChain` for
+   * the remote sides).
    *
    * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
    * write simulated from it; without it each store call is simulated from the PoolConfigManager
@@ -7497,10 +7502,15 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * before sending. Use {@link generateUnsignedLiftMultiTokenPoolLaneStops} for multisig or offline signing.
    *
    * @remarks
-   * With `restore` (the stop's snapshot) the exact buckets come back, refused if the stopped record
-   * changed since. Without it the lift restores from chain state: the inline record is removed when
-   * the token has a rate limit policy, else `rateLimits` is required. Each lane the lift makes live
-   * is judged, with no attestations (pass `getChain` for the remote sides).
+   * With `restore` (the stop's snapshot, verified by its hash) the record the stop replaced comes
+   * back, refused if the stopped record changed since; a lane that was on a policy goes back to the
+   * policy as it is now. Without `restore` the lift restores from chain state (the inline record is
+   * removed when the token has a rate limit policy, else `rateLimits` is required) and **cannot tell
+   * whose stop it lifts**: another operator's or an incident's stop is lifted too, so planners use
+   * `restore`. It never touches a direction outside `direction`: from `rateLimits` only the lifted
+   * direction's buckets are taken, and a lane also stopped in the other direction is refused on the
+   * policy path. Each lane the lift makes live is judged, with no attestations (pass `getChain` for
+   * the remote sides).
    *
    * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
    *

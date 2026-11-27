@@ -557,19 +557,35 @@ export function parseMultiTokenPoolSnapshot(json: string): MultiTokenPoolSnapsho
       cause: error instanceof Error ? error : undefined,
     })
   }
-  if (!isSnapshotShape(parsed))
+  return verifyMultiTokenPoolSnapshot(OPERATION, 'json', parsed)
+}
+
+/**
+ * Checks that a value is a snapshot an op built, untouched: its shape, and its `hash` over the
+ * other fields. The one check {@link parseMultiTokenPoolSnapshot} and every op that reads values back
+ * out of a snapshot (a lift's `restore`) share.
+ * @throws {@link CCTParamsInvalidError} at `param` if it is not a snapshot, or at `<param>.hash` if
+ *   it was edited or truncated
+ * @internal
+ */
+export function verifyMultiTokenPoolSnapshot(
+  operation: string,
+  param: string,
+  value: unknown,
+): MultiTokenPoolSnapshot {
+  if (!isSnapshotShape(value))
     throw new CCTParamsInvalidError(
-      OPERATION,
-      'json',
+      operation,
+      param,
       'is not a snapshot: needs bigint observedAt, object expected, and string operation, guardInputsHash, calldataHash and hash',
     )
-  if (snapshotHash(parsed) !== parsed.hash)
+  if (snapshotHash(value) !== value.hash)
     throw new CCTParamsInvalidError(
-      OPERATION,
-      'json.hash',
+      operation,
+      `${param}.hash`,
       'does not match the snapshot fields: the snapshot was edited or truncated',
     )
-  return parsed
+  return value
 }
 
 const OPERATION = 'parseMultiTokenPoolSnapshot'

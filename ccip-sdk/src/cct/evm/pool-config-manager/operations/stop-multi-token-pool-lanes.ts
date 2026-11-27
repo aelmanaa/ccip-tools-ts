@@ -18,6 +18,7 @@ import {
   type MultiTokenPoolRateLimits,
   type MultiTokenPoolSnapshot,
   isLaneStopped,
+  verifyMultiTokenPoolSnapshot,
 } from '../../../multi-token-pool.ts'
 import type { RateLimitConfig } from '../../../rate-limit.ts'
 import {
@@ -60,22 +61,28 @@ export type StopMultiTokenPoolLanesParams = PoolConfigManagerWriteParams &
   }
 
 /**
- * Parameters of `liftMultiTokenPoolLaneStops`. With `restore` (the stop's snapshot), the exact
- * buckets come back: the record is removed when the stop created it, or set back to what it
- * replaced; refused if the stopped record changed since. Without it, the lift restores from chain
- * state: a token assigned a rate limit policy gets its inline record removed, so the policy applies
- * again; otherwise `rateLimits` is required. Each lane the lift makes live is judged.
+ * Parameters of `liftMultiTokenPoolLaneStops`. With `restore` (the stop's snapshot, verified by its
+ * hash), the record the stop replaced comes back: it is removed when the stop created it (a lane that
+ * was on a policy goes back to the policy as it is now), or set back to what it was; refused if the
+ * stopped record changed since. Without it, the lift restores from chain state: a token assigned a
+ * rate limit policy gets its inline record removed, so the policy applies again; otherwise
+ * `rateLimits` is required. A lift without `restore` cannot tell whose stop it lifts (another
+ * operator's, or an incident's): planners use `restore`. A lift never touches a direction outside
+ * `direction`. Each lane the lift makes live is judged.
  */
 export type LiftMultiTokenPoolLaneStopsParams = StopMultiTokenPoolLanesParams &
   MultiTokenPoolWriteGuards & {
     /** The snapshot `stopMultiTokenPoolLanes` returned for these lanes. */
     restore?: MultiTokenPoolSnapshot
-    /** The buckets to set, without `restore`, for a token with no rate limit policy (or to override it). */
+    /**
+     * Without `restore`: the lifted direction's buckets, for a token with no rate limit policy (or to
+     * override it). The other direction keeps its current buckets.
+     */
     rateLimits?: MultiTokenPoolRateLimits
   }
 
-/** The two buckets of each direction a stop holds. */
-const STOPPED_BUCKETS = {
+/** The buckets of each direction (a stop holds them; a lift writes only the lifted direction's). */
+const DIRECTION_BUCKETS = {
   outbound: ['outbound', 'fastFinalityOutbound'],
   inbound: ['inbound', 'fastFinalityInbound'],
   both: ['outbound', 'fastFinalityOutbound', 'inbound', 'fastFinalityInbound'],
@@ -89,7 +96,7 @@ export function stoppedRateLimits(
   direction: PauseDirection,
 ): MultiTokenPoolRateLimits {
   const out = structuredClone(rateLimits)
-  for (const bucket of STOPPED_BUCKETS[direction]) out[bucket] = { ...STOP }
+  for (const bucket of DIRECTION_BUCKETS[direction]) out[bucket] = { ...STOP }
   return out
 }
 
@@ -215,9 +222,10 @@ export class StopMultiTokenPoolLanes extends LaneStopWriteOperation<StopMultiTok
  * Lifts lane stops: removes the inline record a stop created, or restores the buckets it replaced
  * (see {@link LiftMultiTokenPoolLaneStopsParams}). Each lane it makes live is judged, with no
  * attestations.
- * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `restore` is not a
- *   stop snapshot of these lanes, a lane is not stopped in the direction, its stopped record changed
- *   since the stop, a token with no rate limit policy is given no `rateLimits`, `sender` lacks the
+ * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `restore` is not an
+ *   untouched stop snapshot of these lanes (`restore.hash`), a lane is not stopped in the direction,
+ *   its stopped record changed since the stop, a lift from chain state would also lift the other
+ *   direction's stop, a token with no rate limit policy is given no `rateLimits`, `sender` lacks the
  *   gate, or a lane guard refuses a lane the lift loosens; `context.recordType` is `'rateLimit'`
  */
 export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMultiTokenPoolLaneStopsParams> {
@@ -231,20 +239,14 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
     if (params.restore !== undefined && params.rateLimits !== undefined)
       throw this.refuse('rateLimits', 'give restore or rateLimits, not both')
     if (params.restore !== undefined) {
-      // a snapshot from JSON or another op: check its shape at run time
-      const { operation, expected } = params.restore as { operation?: unknown; expected?: unknown }
-      if (operation !== 'stopMultiTokenPoolLanes' || typeof expected !== 'object' || !expected)
+      // values are read back out of it and written to chain: an edited snapshot is refused
+      const restore = verifyMultiTokenPoolSnapshot(this.name, 'restore', params.restore)
+      if (restore.operation !== 'stopMultiTokenPoolLanes')
         throw this.refuse(
           'restore',
-          `is not a stopMultiTokenPoolLanes snapshot (built by ${String(operation)}): pass the snapshot the stop returned`,
+          `is not a stopMultiTokenPoolLanes snapshot (built by ${restore.operation}): pass the snapshot the stop returned`,
         )
-      parsed.lanes.forEach((lane, i) => {
-        if (!(inlinePath(lane) in expected) || !(resolvedPath(lane) in expected))
-          throw this.refuse(
-            `lanes[${i}]`,
-            'is not in the restore snapshot: lift only the lanes that stop covered, or give rateLimits',
-          )
-      })
+      parsed.lanes.forEach((lane, i) => this.#restored(restore, lane, i))
     }
     return params.rateLimits === undefined
       ? parsed
@@ -252,6 +254,36 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
           ...parsed,
           rateLimits: parseMultiTokenPoolRateLimits(this.name, 'rateLimits', params.rateLimits),
         }
+  }
+
+  /** The record a stop replaced and the buckets it copied, parsed from its snapshot. */
+  #restored(
+    restore: MultiTokenPoolSnapshot,
+    lane: MultiTokenPoolLaneKey,
+    i: number,
+  ): { prior: MultiTokenPoolRateLimits | null; copied: MultiTokenPoolRateLimits } {
+    const { expected } = restore
+    if (!(inlinePath(lane) in expected) || !(resolvedPath(lane) in expected))
+      throw this.refuse(
+        `lanes[${i}]`,
+        'is not in the restore snapshot: lift only the lanes that stop covered, or give rateLimits',
+      )
+    const prior = expected[inlinePath(lane)] as { rateLimits?: unknown } | null
+    return {
+      prior:
+        prior === null
+          ? null
+          : parseMultiTokenPoolRateLimits(
+              this.name,
+              `restore.${inlinePath(lane)}`,
+              prior.rateLimits,
+            ),
+      copied: parseMultiTokenPoolRateLimits(
+        this.name,
+        `restore.${resolvedPath(lane)}`,
+        expected[resolvedPath(lane)],
+      ),
+    }
   }
 
   // the lift makes its lanes live: no attestations
@@ -274,10 +306,7 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
           `is not stopped ${direction}${current ? '' : ' (it has no inline rate limit record)'}: nothing to lift`,
         )
       if (restore) {
-        const prior = restore.expected[inlinePath(lane)] as {
-          rateLimits: MultiTokenPoolRateLimits
-        } | null
-        const copied = restore.expected[resolvedPath(lane)] as MultiTokenPoolRateLimits
+        const { prior, copied } = this.#restored(restore, lane, i)
         // the record the stop wrote must still be there: anything since was someone else's write
         if (
           canonicalHash([current.rateLimits]) !==
@@ -288,13 +317,24 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
             `its rate limit record changed since the stop (or the stop was not ${direction}), so restoring would undo that change: lift it with rateLimits, or from chain state`,
           )
         if (prior === null) remove.push(lane)
-        else set.push({ lane, rateLimits: prior.rateLimits })
+        else set.push({ lane, rateLimits: prior })
         return
       }
-      if (rateLimits) set.push({ lane, rateLimits })
-      else if (tokenRecordsOf(state, lane.tokenAddress)?.policies.rateLimit != null)
+      // never touch a direction the caller did not ask to lift
+      const other = direction === 'both' ? null : direction === 'outbound' ? 'inbound' : 'outbound'
+      if (rateLimits) {
+        // only the lifted direction's buckets come from rateLimits; the other keeps its own
+        const merged = structuredClone(rateLimits)
+        if (other) for (const b of DIRECTION_BUCKETS[other]) merged[b] = current.rateLimits[b]
+        set.push({ lane, rateLimits: merged })
+      } else if (tokenRecordsOf(state, lane.tokenAddress)?.policies.rateLimit != null) {
+        if (other && isLaneStopped(current.rateLimits, other))
+          throw this.refuse(
+            `lanes[${i}]`,
+            `is also stopped ${other}: removing its inline record would lift that direction too; lift 'both', or give rateLimits (its ${other} buckets stay as they are)`,
+          )
         remove.push(lane)
-      else
+      } else
         throw this.refuse(
           'rateLimits',
           `${lane.tokenAddress} has no rate limit policy to fall back to, so the lift needs the buckets: give rateLimits, or restore (the stop's snapshot)`,

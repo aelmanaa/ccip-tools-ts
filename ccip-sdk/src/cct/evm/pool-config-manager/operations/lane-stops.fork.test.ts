@@ -183,4 +183,42 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
         (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
     )
   })
+
+  it('lifts only the direction asked for: a lane stopped both ways keeps its other stop', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: POLICY_TOKEN, remoteChainSelector: FUJI }]
+    const before = await laneView(CORE_POOL, POLICY_TOKEN)
+    const wallet = await signer(CORE_CONFIG)
+    const target = { poolAddress: CORE_POOL, lanes, wallet, getChain }
+    await mined(stop.execute(chain, { ...target, direction: 'both' }))
+    // from chain state, removing the inline record would lift inbound too: refused
+    await assert.rejects(
+      lift.generate(chain, { poolAddress: CORE_POOL, lanes, direction: 'outbound', getChain }),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        e.context.param === 'lanes[0]' &&
+        /also stopped inbound/.test(e.message),
+    )
+    // with rateLimits, only outbound is taken from them: inbound stays stopped
+    const open = { enabled: true, capacity: 10n ** 21n, rate: 10n ** 18n } as const
+    await mined(
+      lift.execute(chain, {
+        ...target,
+        direction: 'outbound',
+        rateLimits: {
+          outbound: open,
+          inbound: open,
+          fastFinalityOutbound: { enabled: false },
+          fastFinalityInbound: { enabled: false },
+        },
+      }),
+    )
+    const half = await laneView(CORE_POOL, POLICY_TOKEN)
+    assert.deepEqual(half.stopped, { outbound: false, inbound: true })
+    // then inbound, from chain state: back on the policy, as before
+    await mined(lift.execute(chain, { ...target, direction: 'inbound' }))
+    const after = await laneView(CORE_POOL, POLICY_TOKEN)
+    assert.equal(after.sources.kind, 'policy')
+    assert.deepEqual(after, before)
+  })
 })
