@@ -72,26 +72,31 @@ import {
 } from './lockbox/operations/index.ts'
 import {
   type ApplyMultiTokenPoolHooksAllowlistUpdatesParams,
+  type DeployMultiTokenPoolHooksParams,
   type GetMultiTokenPoolHooksStateParams,
   type GetMultiTokenPoolHooksStateResult,
   type SetMultiTokenPoolHooksBlocklistParams,
   type SetMultiTokenPoolHooksPolicyEngineParams,
   type UpdateMultiTokenPoolHooksAuthorizedCallersParams,
   ApplyMultiTokenPoolHooksAllowlistUpdates,
+  DeployMultiTokenPoolHooks,
   GetMultiTokenPoolHooksState,
   SetMultiTokenPoolHooksBlocklist,
   SetMultiTokenPoolHooksPolicyEngine,
   UpdateMultiTokenPoolHooksAuthorizedCallers,
 } from './multi-token-pool-hooks/operations/index.ts'
 import {
+  type DeployMultiTokenPoolProviderParams,
   type GetMultiTokenPoolProviderParams,
   type GetMultiTokenPoolProviderResult,
+  DeployMultiTokenPoolProvider,
   GetMultiTokenPoolProvider,
 } from './multi-token-pool-providers/operations/index.ts'
 import {
   type AcceptMultiTokenPoolHooksOwnershipParams,
   type AcceptMultiTokenPoolOwnershipParams,
   type AcceptPolicyStoreOwnershipParams,
+  type DeployMultiTokenPoolParams,
   type GetMultiTokenPoolStackResult,
   type GetMultiTokenPoolStateResult,
   type MultiTokenPoolReadParams,
@@ -103,6 +108,7 @@ import {
   AcceptMultiTokenPoolHooksOwnership,
   AcceptMultiTokenPoolOwnership,
   AcceptPolicyStoreOwnership,
+  DeployMultiTokenPool,
   GetMultiTokenPoolStack,
   GetMultiTokenPoolState,
   GetMultiTokenPoolTransferQuote,
@@ -119,9 +125,11 @@ import type {
 } from './multi-token-pool/write-operation.ts'
 import type { DeployResult, EVMExecuteParams } from './operation.ts'
 import {
+  type DeployPolicyStoreParams,
   type GetPolicyStoreStateParams,
   type GetPolicyStoreStateResult,
   type UpdatePolicyStoreAuthorizedCallersParams,
+  DeployPolicyStore,
   GetPolicyStoreState,
   UpdatePolicyStoreAuthorizedCallers,
 } from './policy-store/operations/index.ts'
@@ -150,6 +158,7 @@ import {
   type CancelMultiTokenPoolDefaultAdminTransferParams,
   type ChangeMultiTokenPoolDefaultAdminDelayParams,
   type CheckMultiTokenPoolSnapshotParams,
+  type DeployPoolConfigManagerParams,
   type GetMultiTokenPoolChainPausesParams,
   type GetMultiTokenPoolChainPausesResult,
   type GetMultiTokenPoolConfiguredTokensParams,
@@ -222,6 +231,7 @@ import {
   ChangeMultiTokenPoolDefaultAdminDelay,
   CheckMultiTokenPoolLane,
   CheckMultiTokenPoolSnapshot,
+  DeployPoolConfigManager,
   GetMultiTokenPoolChainPauses,
   GetMultiTokenPoolConfiguredTokens,
   GetMultiTokenPoolConnectionPolicy,
@@ -646,6 +656,11 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   readonly #changeMultiTokenPoolDefaultAdminDelay = new ChangeMultiTokenPoolDefaultAdminDelay()
   readonly #rollbackMultiTokenPoolDefaultAdminDelay = new RollbackMultiTokenPoolDefaultAdminDelay()
   readonly #withdrawMultiTokenPoolFeeTokens = new WithdrawMultiTokenPoolFeeTokens()
+  readonly #deployPolicyStore = new DeployPolicyStore()
+  readonly #deployPoolConfigManager = new DeployPoolConfigManager()
+  readonly #deployMultiTokenPool = new DeployMultiTokenPool()
+  readonly #deployMultiTokenPoolProvider = new DeployMultiTokenPoolProvider()
+  readonly #deployMultiTokenPoolHooks = new DeployMultiTokenPoolHooks()
   readonly #setMultiTokenPoolRouter = new SetMultiTokenPoolRouter()
   readonly #setPoolConfigManager = new SetPoolConfigManager()
   readonly #transferMultiTokenPoolOwnership = new TransferMultiTokenPoolOwnership()
@@ -8741,6 +8756,236 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
     opts: EVMExecuteParams<WithdrawMultiTokenPoolFeeTokensParams>,
   ): Promise<WithdrawMultiTokenPoolFeeTokensResult> {
     return this.#withdrawMultiTokenPoolFeeTokens.execute(this.chain, opts)
+  }
+
+  // ── Deploys ──
+  /**
+   * Builds an unsigned deployment of a multi-token pool policy store. `type` selects it (`ConnectionPolicyStore`, `FeePolicyStore` or `SecurityPolicyStore`); `authorizedCallers` (its PoolConfigManager) are a constructor argument. The deployed address is only known once mined; use
+   * {@link deployPolicyStore} to receive `{ hash, contractAddress, verification }`.
+   * @remarks `2.1.0-dev`: bytecode pinned to chainlink-ccip `c950d9bc` until contracts-ccip ships
+   * MTTP. The PCM takes the stores' addresses, so a store deployed first authorizes its PCM afterwards with {@link updatePolicyStoreAuthorizedCallers}. The sequence: three stores → {@link deployPoolConfigManager} → authorize the PCM on each store → {@link deployMultiTokenPool}.
+   * @throws {@link CCTParamsInvalidError} if `type` is not a store type, or a caller is invalid or duplicated
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedDeployPolicyStore({
+   *   type: 'FeePolicyStore',
+   *   authorizedCallers: [],
+   *   sender: '0xDeployer...',
+   * })
+   * ```
+   */
+  generateUnsignedDeployPolicyStore(opts: DeployPolicyStoreParams): Promise<UnsignedEVMTx> {
+    return this.#deployPolicyStore.generate(this.chain, opts)
+  }
+
+  /**
+   * Deploys a multi-token pool policy store. `type` selects it (`ConnectionPolicyStore`, `FeePolicyStore` or `SecurityPolicyStore`); `authorizedCallers` (its PoolConfigManager) are a constructor argument. Signs and submits with `opts.wallet`; resolves to the tx hash, the deployed
+   * address, and a `verification` ({@link ExplorerVerificationInput}) for a block explorer.
+   * @remarks `2.1.0-dev`: bytecode pinned to chainlink-ccip `c950d9bc` until contracts-ccip ships
+   * MTTP. The PCM takes the stores' addresses, so a store deployed first authorizes its PCM afterwards with {@link updatePolicyStoreAuthorizedCallers}. The sequence: three stores → {@link deployPoolConfigManager} → authorize the PCM on each store → {@link deployMultiTokenPool}.
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the tx reverts, fails, or mines with no, invalid, or unexpected contract address
+   * @throws {@link CCTParamsInvalidError} if `type` is not a store type, or a caller is invalid or duplicated
+   * @example
+   * ```typescript
+   * const { hash, contractAddress, verification } = await cct.deployPolicyStore({
+   *   type: 'FeePolicyStore',
+   *   authorizedCallers: [],
+   *   wallet,
+   * })
+   * ```
+   */
+  deployPolicyStore(opts: EVMExecuteParams<DeployPolicyStoreParams>): Promise<DeployResult> {
+    return this.#deployPolicyStore.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned deployment of a PoolConfigManager over three policy stores and a TokenAdminRegistry (all immutable). `admin` (`DEFAULT_ADMIN_ROLE`) defaults to `sender`. The deployed address is only known once mined; use
+   * {@link deployPoolConfigManager} to receive `{ hash, contractAddress, verification }`.
+   * @remarks `2.1.0-dev`: bytecode pinned to chainlink-ccip `c950d9bc` until contracts-ccip ships
+   * MTTP. Each store is checked against its slot (`typeAndVersion`) before the build; a given `router` must resolve to `tokenAdminRegistry`. The stores must then authorize the PCM ({@link updatePolicyStoreAuthorizedCallers}).
+   * @throws {@link CCTParamsInvalidError} if an address is invalid, a store is not of its slot's type, `router` uses another registry, or neither `admin` nor `sender` is given
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedDeployPoolConfigManager({
+   *   tokenAdminRegistry: '0xTokenAdminRegistry...',
+   *   connectionPolicyStore: '0xConnectionPolicyStore...',
+   *   feePolicyStore: '0xFeePolicyStore...',
+   *   securityPolicyStore: '0xSecurityPolicyStore...',
+   *   router: '0xRouter...', // optional cross-check
+   *   sender: '0xDeployer...',
+   * })
+   * ```
+   */
+  generateUnsignedDeployPoolConfigManager(
+    opts: DeployPoolConfigManagerParams,
+  ): Promise<UnsignedEVMTx> {
+    return this.#deployPoolConfigManager.generate(this.chain, opts)
+  }
+
+  /**
+   * Deploys a PoolConfigManager over three policy stores and a TokenAdminRegistry (all immutable). `admin` (`DEFAULT_ADMIN_ROLE`) defaults to `sender`. Signs and submits with `opts.wallet`; resolves to the tx hash, the deployed
+   * address, and a `verification` ({@link ExplorerVerificationInput}) for a block explorer.
+   * @remarks `2.1.0-dev`: bytecode pinned to chainlink-ccip `c950d9bc` until contracts-ccip ships
+   * MTTP. Each store is checked against its slot (`typeAndVersion`) before the build; a given `router` must resolve to `tokenAdminRegistry`. The stores must then authorize the PCM ({@link updatePolicyStoreAuthorizedCallers}).
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the tx reverts, fails, or mines with no, invalid, or unexpected contract address
+   * @throws {@link CCTParamsInvalidError} if an address is invalid, a store is not of its slot's type, `router` uses another registry, or neither `admin` nor `sender` is given
+   * @example
+   * ```typescript
+   * const { hash, contractAddress, verification } = await cct.deployPoolConfigManager({
+   *   tokenAdminRegistry: '0xTokenAdminRegistry...',
+   *   connectionPolicyStore: '0xConnectionPolicyStore...',
+   *   feePolicyStore: '0xFeePolicyStore...',
+   *   securityPolicyStore: '0xSecurityPolicyStore...',
+   *   router: '0xRouter...', // optional cross-check
+   *   wallet,
+   * })
+   * ```
+   */
+  deployPoolConfigManager(
+    opts: EVMExecuteParams<DeployPoolConfigManagerParams>,
+  ): Promise<DeployResult> {
+    return this.#deployPoolConfigManager.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned deployment of a multi-token pool (`type: 'BurnMintMultiTokenPool'`) on its PoolConfigManager. As {@link deployTokenPool}, `router` and `rmnProxy` are required and non-zero. The deployed address is only known once mined; use
+   * {@link deployMultiTokenPool} to receive `{ hash, contractAddress, verification }`.
+   * @remarks `2.1.0-dev`: bytecode pinned to chainlink-ccip `c950d9bc` until contracts-ccip ships
+   * MTTP. The pool serves no token until its PCM registers one and {@link setPool} points the token at it (which runs the lane check).
+   * @throws {@link CCTParamsInvalidError} if `type` is unsupported or an address is invalid or zero
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedDeployMultiTokenPool({
+   *   type: 'BurnMintMultiTokenPool',
+   *   router: '0xRouter...',
+   *   rmnProxy: '0xRmnProxy...',
+   *   poolConfigManager: '0xPoolConfigManager...',
+   *   sender: '0xDeployer...',
+   * })
+   * ```
+   */
+  generateUnsignedDeployMultiTokenPool(opts: DeployMultiTokenPoolParams): Promise<UnsignedEVMTx> {
+    return this.#deployMultiTokenPool.generate(this.chain, opts)
+  }
+
+  /**
+   * Deploys a multi-token pool (`type: 'BurnMintMultiTokenPool'`) on its PoolConfigManager. As {@link deployTokenPool}, `router` and `rmnProxy` are required and non-zero. Signs and submits with `opts.wallet`; resolves to the tx hash, the deployed
+   * address, and a `verification` ({@link ExplorerVerificationInput}) for a block explorer.
+   * @remarks `2.1.0-dev`: bytecode pinned to chainlink-ccip `c950d9bc` until contracts-ccip ships
+   * MTTP. The pool serves no token until its PCM registers one and {@link setPool} points the token at it (which runs the lane check).
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the tx reverts, fails, or mines with no, invalid, or unexpected contract address
+   * @throws {@link CCTParamsInvalidError} if `type` is unsupported or an address is invalid or zero
+   * @example
+   * ```typescript
+   * const { hash, contractAddress, verification } = await cct.deployMultiTokenPool({
+   *   type: 'BurnMintMultiTokenPool',
+   *   router: '0xRouter...',
+   *   rmnProxy: '0xRmnProxy...',
+   *   poolConfigManager: '0xPoolConfigManager...',
+   *   wallet,
+   * })
+   * ```
+   */
+  deployMultiTokenPool(opts: EVMExecuteParams<DeployMultiTokenPoolParams>): Promise<DeployResult> {
+    return this.#deployMultiTokenPool.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned deployment of a multi-token pool provider: `type` selects `SameAddressRemoteTokenAddressProvider` (no args) or `FactoryTokenWithUIDPoolDataProvider` (`tokenFactory`). The deployed address is only known once mined; use
+   * {@link deployMultiTokenPoolProvider} to receive `{ hash, contractAddress, verification }`.
+   * @remarks `2.1.0-dev`: bytecode pinned to chainlink-ccip `c950d9bc` until contracts-ccip ships
+   * MTTP. Attach it per token through the PCM's token config.
+   * @throws {@link CCTParamsInvalidError} if `type` is unsupported or `tokenFactory` is invalid or zero
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedDeployMultiTokenPoolProvider({
+   *   type: 'FactoryTokenWithUIDPoolDataProvider',
+   *   tokenFactory: '0xTokenFactory...',
+   *   sender: '0xDeployer...',
+   * })
+   * ```
+   */
+  generateUnsignedDeployMultiTokenPoolProvider(
+    opts: DeployMultiTokenPoolProviderParams,
+  ): Promise<UnsignedEVMTx> {
+    return this.#deployMultiTokenPoolProvider.generate(this.chain, opts)
+  }
+
+  /**
+   * Deploys a multi-token pool provider: `type` selects `SameAddressRemoteTokenAddressProvider` (no args) or `FactoryTokenWithUIDPoolDataProvider` (`tokenFactory`). Signs and submits with `opts.wallet`; resolves to the tx hash, the deployed
+   * address, and a `verification` ({@link ExplorerVerificationInput}) for a block explorer.
+   * @remarks `2.1.0-dev`: bytecode pinned to chainlink-ccip `c950d9bc` until contracts-ccip ships
+   * MTTP. Attach it per token through the PCM's token config.
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the tx reverts, fails, or mines with no, invalid, or unexpected contract address
+   * @throws {@link CCTParamsInvalidError} if `type` is unsupported or `tokenFactory` is invalid or zero
+   * @example
+   * ```typescript
+   * const { hash, contractAddress, verification } = await cct.deployMultiTokenPoolProvider({
+   *   type: 'FactoryTokenWithUIDPoolDataProvider',
+   *   tokenFactory: '0xTokenFactory...',
+   *   wallet,
+   * })
+   * ```
+   */
+  deployMultiTokenPoolProvider(
+    opts: EVMExecuteParams<DeployMultiTokenPoolProviderParams>,
+  ): Promise<DeployResult> {
+    return this.#deployMultiTokenPoolProvider.execute(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned deployment of multi-token pool hooks (`MultiTokenPoolHooks`, or `MultiTokenPoolHooksExternalBlocklist` with a `blocklist`). `authorizedCallers` are the pools that call them. The deployed address is only known once mined; use
+   * {@link deployMultiTokenPoolHooks} to receive `{ hash, contractAddress, verification }`.
+   * @remarks `2.1.0-dev`: bytecode pinned to chainlink-ccip `c950d9bc` until contracts-ccip ships
+   * MTTP. An empty `allowlist` disables the allowlist for the contract's life. A non-zero `policyEngine` (and `blocklist`) must have code: the constructor calls it.
+   * @throws {@link CCTParamsInvalidError} if `type` is unsupported, a list is invalid or duplicated, `blocklist` is given for the base hooks, or a non-zero `policyEngine`/`blocklist` has no code
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedDeployMultiTokenPoolHooks({
+   *   type: 'MultiTokenPoolHooks',
+   *   allowlist: [], // empty: disabled for the contract's life
+   *   authorizedCallers: ['0xMultiTokenPool...'],
+   *   sender: '0xDeployer...',
+   * })
+   * ```
+   */
+  generateUnsignedDeployMultiTokenPoolHooks(
+    opts: DeployMultiTokenPoolHooksParams,
+  ): Promise<UnsignedEVMTx> {
+    return this.#deployMultiTokenPoolHooks.generate(this.chain, opts)
+  }
+
+  /**
+   * Deploys multi-token pool hooks (`MultiTokenPoolHooks`, or `MultiTokenPoolHooksExternalBlocklist` with a `blocklist`). `authorizedCallers` are the pools that call them. Signs and submits with `opts.wallet`; resolves to the tx hash, the deployed
+   * address, and a `verification` ({@link ExplorerVerificationInput}) for a block explorer.
+   * @remarks `2.1.0-dev`: bytecode pinned to chainlink-ccip `c950d9bc` until contracts-ccip ships
+   * MTTP. An empty `allowlist` disables the allowlist for the contract's life. A non-zero `policyEngine` (and `blocklist`) must have code: the constructor calls it.
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCIPWalletChainMismatchError} if `wallet` is connected to a different chain
+   * @throws {@link CCTTxFailedError} if the tx reverts, fails, or mines with no, invalid, or unexpected contract address
+   * @throws {@link CCTParamsInvalidError} if `type` is unsupported, a list is invalid or duplicated, `blocklist` is given for the base hooks, or a non-zero `policyEngine`/`blocklist` has no code
+   * @example
+   * ```typescript
+   * const { hash, contractAddress, verification } = await cct.deployMultiTokenPoolHooks({
+   *   type: 'MultiTokenPoolHooks',
+   *   allowlist: [], // empty: disabled for the contract's life
+   *   authorizedCallers: ['0xMultiTokenPool...'],
+   *   wallet,
+   * })
+   * ```
+   */
+  deployMultiTokenPoolHooks(
+    opts: EVMExecuteParams<DeployMultiTokenPoolHooksParams>,
+  ): Promise<DeployResult> {
+    return this.#deployMultiTokenPoolHooks.execute(this.chain, opts)
   }
 
   // ── Pool, store and hook writes ──
