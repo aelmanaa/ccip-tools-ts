@@ -20,7 +20,9 @@ import type { ChainGetter } from '../../../../chain.ts'
 import { forkProvider, withForkRetry } from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import type { RateLimitConfig } from '../../../rate-limit.ts'
 import { EVMTokenManager } from '../../index.ts'
+import { ApplyMultiTokenPoolInlineRateLimitBucketUpdates } from './apply-multi-token-pool-inline-rate-limit-bucket-updates.ts'
 import { mined as minedOn } from './fork.test.helpers.ts'
 import {
   LiftMultiTokenPoolLaneStops,
@@ -231,5 +233,43 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     const after = await laneView(CORE_POOL, POLICY_TOKEN)
     assert.equal(after.sources.kind, 'policy')
     assert.deepEqual(after, before)
+  })
+
+  it('R3 B1 repro: re-enabling fast-finality on a stopped broken lane is judged and refused', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lane = { tokenAddress: V5V9_FUJI_TOKEN, remoteChainSelector: FUJI }
+    const wallet = await signer(V5V9_OPERATOR)
+    const bucket = new ApplyMultiTokenPoolInlineRateLimitBucketUpdates()
+    const ftf = (config: RateLimitConfig) => ({
+      poolAddress: V5V9_POOL,
+      getChain,
+      updates: [{ ...lane, direction: 'outbound' as const, fastFinality: true, config }],
+    })
+    // stop the lane outbound (both outbound buckets 0/0) unless an earlier case did
+    if (!(await laneView(V5V9_POOL, V5V9_FUJI_TOKEN)).stopped.outbound)
+      await mined(
+        stop.execute(chain, {
+          poolAddress: V5V9_POOL,
+          lanes: [lane],
+          direction: 'outbound',
+          wallet,
+        }),
+      )
+    // disabling the FTF bucket only makes FTF traffic use the stopped default bucket: still held
+    await mined(bucket.execute(chain, { ...ftf({ enabled: false }), wallet }))
+    assert.deepEqual((await laneView(V5V9_POOL, V5V9_FUJI_TOKEN)).stopped, {
+      outbound: true,
+      inbound: false,
+    })
+    // enabling it at 1e24 reopens FTF sends toward a chain with no pool: judged, refused
+    await assert.rejects(
+      bucket.generate(chain, {
+        ...ftf({ enabled: true, capacity: 10n ** 24n, rate: 10n ** 22n }),
+        sender: V5V9_OPERATOR,
+      }),
+      (e: unknown) =>
+        e instanceof CCTParamsInvalidError &&
+        (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
+    )
   })
 })

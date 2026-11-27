@@ -417,6 +417,24 @@ describe('MTTP post-state rules (cct/evm pool-config-manager)', () => {
     }
   })
 
+  it('R3 B1 repro: enabling the fast-finality bucket of a lane stopped through its default bucket is judged', () => {
+    const stop = { enabled: true, capacity: 0n, rate: 0n } as const
+    const off = { enabled: false } as const
+    const before = {
+      outbound: stop,
+      inbound: on(true),
+      fastFinalityOutbound: off,
+      fastFinalityInbound: off,
+    }
+    const after = {
+      ...before,
+      fastFinalityOutbound: { enabled: true, capacity: 10n ** 24n, rate: 10n ** 22n } as const,
+    }
+    assert.equal(isLaneStopped(before, 'outbound'), true) // the NO_REMOTE_POOL waiver applies before
+    assert.equal(isLaneStopped(after, 'outbound'), false) // FTF sends flow after
+    assert.equal(loosensRateLimits(before, after), true) // so the write is judged
+  })
+
   it('reports a lifted stop as going live (stops are part of liveness)', () => {
     const stop = { enabled: true, capacity: 0n, rate: 0n } as const
     const rateLimits = (outbound: RateLimitConfig): MultiTokenPoolRecordChange => ({
