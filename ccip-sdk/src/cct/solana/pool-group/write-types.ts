@@ -13,6 +13,7 @@ import type {
   MultiTokenPoolExpectedSnapshot,
   MultiTokenPoolInlineRemotePoolDrop,
   MultiTokenPoolLaneFinding,
+  MultiTokenPoolLaneKey,
   MultiTokenPoolSnapshot,
 } from '../../multi-token-pool.ts'
 import type { SolanaExecuteParams, SolanaGenerateParams } from '../operation.ts'
@@ -296,7 +297,7 @@ export type PoolGroupGuardOptions = {
    * (no notice). Without its entry such a lane is refused unless its effective CCVs stay the same
    * or it is paused (A23).
    */
-  confirmCCVChanges?: PoolGroupLaneKey[]
+  confirmCCVChanges?: MultiTokenPoolLaneKey[]
 }
 
 /**

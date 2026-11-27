@@ -342,6 +342,24 @@ describe('judgePoolGroupWrite', () => {
     await judge(chainFor(before, same), { instructions: ix, failsClosedSeverity: 'warning' })
   })
 
+  it('A23 (N1): a SECURITY source change that clears threshold CCVs needs a confirmation, base lists equal', async () => {
+    const thresholds = { amount: 1_000n, outbound: [CCV] }
+    const before = linked({ sources: [0, 0, 0, 0], thresholds }, groupChainData())
+    // the sync from the group default clears the thresholds; the base lists stay empty
+    const after = new Map([
+      [V2, chainConfigV2Data({ group: GROUP, slots: [POLICY], sources: [0, 0, 0, 1] })],
+    ])
+    await assert.rejects(
+      judge(chainFor(before, after), { instructions: [writeOf(V2)] }),
+      (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'confirmCCVChanges',
+    )
+    await judge(chainFor(before, after), {
+      instructions: [writeOf(V2)],
+      confirmCCVChanges: [laneKey],
+      failsClosedSeverity: 'warning',
+    })
+  })
+
   it('A23: the snapshot hashes a ChainConfig without its bucket state', async () => {
     const at = (tokens: number) =>
       linked({ sources: [0, 0, 0, 0] }, groupChainData()).set(CC_ADDR.toBase58(), {

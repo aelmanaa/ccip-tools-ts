@@ -86,6 +86,11 @@ export type PoolGroupChainConfigV2 = {
   mint: string
   /** The body's base CCV lists: on a lane with SECURITY from a policy, its synced copy. */
   ccvs: { outbound: string[]; inbound: string[] }
+  /**
+   * The body's threshold CCVs: required above `amount` (`CCVConfig.threshold_*`). A sync from a
+   * group or named record clears them (`sync_ccvs`, groups.rs:746-757).
+   */
+  thresholds: { amount: bigint; outbound: string[]; inbound: string[] }
   /** `null` on version 1 (no tail). */
   ext: PoolGroupLaneExt | null
 }
@@ -236,15 +241,20 @@ export function decodePoolGroupChainConfigV2(
   const mint = c.pubkey()
   c.bytes(4) // allowed_finality_config
   c.bytes(4 + 4 + 4 + 4 + 2 + 2 + 1) // token_transfer_fee_config
-  c.u64() // ccv threshold_amount
+  const thresholdAmount = c.u64()
   const outbound = c.vec(c.pubkey)
-  c.vec(c.pubkey) // threshold_outbound_ccvs
+  const thresholdOutbound = c.vec(c.pubkey)
   const inbound = c.vec(c.pubkey)
-  c.vec(c.pubkey) // threshold_inbound_ccvs
+  const thresholdInbound = c.vec(c.pubkey)
   const ccvs = { outbound, inbound }
+  const thresholds = {
+    amount: thresholdAmount,
+    outbound: thresholdOutbound,
+    inbound: thresholdInbound,
+  }
   if (version === CHAIN_CONFIG_V2_STANDARD) {
     c.end()
-    return { version, remoteChainSelector, mint, ccvs, ext: null }
+    return { version, remoteChainSelector, mint, ccvs, thresholds, ext: null }
   }
   if (version !== CHAIN_CONFIG_V2_WITH_EXT) c.fail(`unknown ChainConfigV2 version ${version}`)
   const group = c.pubkey()
@@ -279,6 +289,7 @@ export function decodePoolGroupChainConfigV2(
     remoteChainSelector,
     mint,
     ccvs,
+    thresholds,
     ext: {
       poolGroupAddress: group === DEFAULT_KEY ? null : group,
       classSource,

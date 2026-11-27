@@ -513,7 +513,8 @@ export async function firstTransactionItemCount(input: PackPoolGroupInput): Prom
 /**
  * One-transaction checks for sizing batched instructions, with the limits resolved once (S3b m7):
  * `fits` by bytes, locks, trace and heap (no simulation); `tooHeavy` simulates the items as one
- * transaction and answers whether compute, heap or the instruction trace runs out (S3b M6).
+ * transaction and answers whether compute, heap or the instruction trace runs out (S3b M6), with
+ * the Squads execute overhead counted under `'squads-v4'` (N6).
  * @throws {@link CCTParamsInvalidError} if a limit is invalid
  * @internal
  */
@@ -526,17 +527,22 @@ export async function oneTransactionChecks(input: PackPoolGroupInput): Promise<{
     fits: async (items) =>
       !misfit({ ...input, items }, limits, items, await prefundedPdas({ ...input, items })),
     tooHeavy: async (items) => {
+      const instructions = items.flatMap((i) => i.instructions)
       try {
-        await simulateTransaction(input.chain, {
+        const result = await simulateTransaction(input.chain, {
           payerKey: input.payer,
           instructions: [
             ...prefix(limits, MAX_COMPUTE_UNIT_LIMIT, 0, input.durableNonces?.[0]),
-            ...items.flatMap((i) => i.instructions),
+            ...instructions,
           ],
           addressLookupTableAccounts: limits.tables,
           allowV1: false,
         })
-        return false
+        // inside a Squads vault the execute instruction's own compute comes on top (S3b N6)
+        if (!limits.squads) return false
+        const overhead =
+          SQUADS_EXECUTE_CU.base + SQUADS_EXECUTE_CU.perInstruction * instructions.length
+        return (result.unitsConsumed ?? MAX_COMPUTE_UNIT_LIMIT) + overhead > MAX_COMPUTE_UNIT_LIMIT
       } catch (err) {
         if (!isBatchTooHeavy(err)) throw err
         return true
