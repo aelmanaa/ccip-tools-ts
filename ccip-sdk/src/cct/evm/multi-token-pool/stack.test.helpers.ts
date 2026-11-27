@@ -160,6 +160,8 @@ export type StackState = {
   timestamp?: number
   /** A node without archive state: historical `getCode` fails as pruned. */
   pruned?: boolean
+  /** The PCM-wide pause, as the lane views report it. */
+  globallyPaused?: boolean
 }
 
 /** A consistent default stack: one owner everywhere, PCM authorized on every store. */
@@ -333,6 +335,14 @@ export function stackChain(state: StackState = defaultStack()) {
               const [role, account] = args as [string, string]
               const name = Object.keys(pcm.roles).find((r) => roleId(r) === role)
               return [!!name && pcm.roles[name]!.includes(getAddress(account))]
+            }
+            // the pause reads: no connection, every flag clear but the global one
+            case 'getLaneConnectionBatch': {
+              const [lanes] = args as [unknown[]]
+              const g = !!state.globallyPaused
+              return [
+                lanes.map(() => [false, g, g, g, false, false, false, false, false, '0x', []]),
+              ]
             }
             case 'getAllConfiguredTokens': {
               const [start, max] = args as [bigint, bigint]

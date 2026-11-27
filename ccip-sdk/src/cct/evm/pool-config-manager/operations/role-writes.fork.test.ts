@@ -54,6 +54,7 @@ const CORE_POOL = '0x91b33bfc6B7E4ee5511BB654e9f93b6d3e72671b'
 const FEE_TOKEN = '0x6377325E0D7F2E0D2Bc770860F0eB3B6c62F7cEd' // an mttp-core token, used as a fee token
 const ALICE = getAddress('0x' + 'a1'.repeat(20))
 const BOB = getAddress('0x' + 'b0'.repeat(20))
+const ARBITRUM_SEPOLIA = 3478487238524512106n // a chain no mttp-core lane goes to
 const ERC20 = new Interface(['function balanceOf(address) view returns (uint256)'])
 
 describe('MTTP role, admin and fee writes (Sepolia fork)', { skip, timeout: 600_000 }, () => {
@@ -362,15 +363,28 @@ describe('MTTP role, admin and fee writes (Sepolia fork)', { skip, timeout: 600_
     await wait()
     // a pauser with no unpauser: after the renounce the next pause would be permanent (E7 M1)
     const { holders } = await cct.getMultiTokenPoolRoleHolders(target)
-    for (const account of holders.UNPAUSER_ROLE)
-      await mined(
-        cct.revokeMultiTokenPoolRole({
-          ...target,
-          role: 'UNPAUSER_ROLE',
-          account,
-          wallet: bobWallet,
-        }),
-      )
+    for (const role of ['UNPAUSER_ROLE', 'PAUSER_ROLE'] as const)
+      for (const account of holders[role])
+        await mined(cct.revokeMultiTokenPoolRole({ ...target, role, account, wallet: bobWallet }))
+    // a pause set now, with no pauser and no unpauser left: it would stay forever (E7 N1)
+    const pause = {
+      ...target,
+      remoteChainSelectors: [ARBITRUM_SEPOLIA],
+      direction: 'outbound' as const,
+    }
+    await mined(cct.pauseMultiTokenPoolChains({ ...pause, wallet: bobWallet }))
+    await assert.rejects(
+      cct.generateUnsignedRenounceMultiTokenPoolDefaultAdmin({
+        ...target,
+        sender: BOB,
+        confirmPermanentFreeze: true,
+      }),
+      refused(
+        'confirmPermanentPauses',
+        new RegExp(`pauses are set now \\(chain ${ARBITRUM_SEPOLIA} outbound\\)`),
+      ),
+    )
+    await mined(cct.unpauseMultiTokenPoolChains({ ...pause, wallet: bobWallet }))
     await mined(
       cct.grantMultiTokenPoolRole({
         ...target,
