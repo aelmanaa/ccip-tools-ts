@@ -218,7 +218,10 @@ describe('getPoolGroupLanes', () => {
     const chain = chainWith(accounts, {
       calls,
       getProgramAccounts: async (_program, config) => {
-        filters = (config as { filters: unknown }).filters
+        const asked = (config as { filters: { memcmp: { offset: number } }[] }).filters
+        // the members' listing (group at offset 10): no member records a payer here
+        if (asked.some((f) => f.memcmp.offset === 10 && asked.length === 2)) return []
+        filters = asked
         return tails.map(({ pubkey, data }) => ({
           pubkey,
           account: { data, owner: PROGRAM, lamports: 1, executable: false },

@@ -12,6 +12,11 @@ import {
   SolanaOperation,
 } from '../../operation.ts'
 import {
+  type ParsedLaneOpOptions,
+  type PoolGroupLaneOpOptions,
+  parseLaneOpOptions,
+} from '../../pool-group/lane-op-options.ts'
+import {
   createTokenPoolV2Program,
   deriveEventAuthorityPda,
   deriveTokenPoolConfigPda,
@@ -32,13 +37,17 @@ import {
 } from './chain-config-v2.ts'
 
 /** Parameters for unsigned Solana token pool chain config v2 replacement. */
-export type GenerateEditChainConfigV2Params = SolanaGenerateParams<ChainConfigV2Params>
+export type GenerateEditChainConfigV2Params = SolanaGenerateParams<
+  ChainConfigV2Params & PoolGroupLaneOpOptions
+>
 
 /** Unsigned Solana token pool chain config v2 replacement result. */
 export type GenerateEditChainConfigV2Result = UnsignedSolanaTx
 
 /** Parameters for executing Solana token pool chain config v2 replacement. */
-export type ExecuteEditChainConfigV2Params = SolanaExecuteParams<ChainConfigV2Params>
+export type ExecuteEditChainConfigV2Params = SolanaExecuteParams<
+  ChainConfigV2Params & PoolGroupLaneOpOptions
+>
 
 /** Result of executing Solana token pool chain config v2 replacement. */
 export type ExecuteEditChainConfigV2Result = TransactionResult
@@ -48,7 +57,7 @@ type ParsedEditChainConfigV2Params = Omit<
   ParsedChainConfigV2Params,
   keyof TokenPoolChainConfigV2Fields
 > &
-  Partial<TokenPoolChainConfigV2Fields>
+  Partial<TokenPoolChainConfigV2Fields> & { laneOptions: ParsedLaneOpOptions }
 
 /** Each config field of the edit params, with the param that sets it. */
 const CONFIG_FIELDS = [
@@ -77,7 +86,7 @@ function remoteNetworkName(selector: bigint): string {
  * must exist; create it with `initChainConfigV2`.
  */
 export class EditChainConfigV2 extends SolanaOperation<
-  ChainConfigV2Params,
+  ChainConfigV2Params & PoolGroupLaneOpOptions,
   UnsignedSolanaTx,
   ParsedEditChainConfigV2Params
 > {
@@ -87,7 +96,10 @@ export class EditChainConfigV2 extends SolanaOperation<
   protected override prepare(
     params: GenerateEditChainConfigV2Params,
   ): ParsedEditChainConfigV2Params {
-    const parsed: ParsedEditChainConfigV2Params = parseChainConfigV2Params(this.name, params)
+    const parsed: ParsedEditChainConfigV2Params = {
+      ...parseChainConfigV2Params(this.name, params),
+      laneOptions: parseLaneOpOptions(this.name, params),
+    }
     for (const [field, param] of CONFIG_FIELDS)
       if (params[param] === undefined) delete parsed[field]
     return parsed
@@ -152,7 +164,24 @@ export class EditChainConfigV2 extends SolanaOperation<
     chain.logger.debug(
       `${this.name}: token = ${mint.toBase58()}, poolProgram = ${poolProgram.toBase58()}, remoteChainSelector = ${opts.remoteChainSelector}`,
     )
-    return { family: ChainFamily.Solana, instructions: [instruction], mainIndex: 0 }
+    // a pool-group lane: governed fields refused, the accounts the program needs, the guard
+    // loaded on first use: the pool-group guard is never needed on a standard lane
+    const { guardPoolGroupLaneOp, markedLaneState } = await import('../../pool-group/lane-gate.ts')
+    const marked = opts.laneOptions.skip
+      ? null
+      : await markedLaneState(chain, poolProgram, mint, opts.remoteChainSelector)
+    const sent = marked
+      ? await guardPoolGroupLaneOp({
+          operation: this.name,
+          chain,
+          state: marked,
+          kind: 'editChainConfigV2',
+          payer: opts.payer,
+          instruction,
+          options: opts.laneOptions,
+        })
+      : instruction
+    return { family: ChainFamily.Solana, instructions: [sent], mainIndex: 0 }
   }
 
   /** Generate, sign, simulate, send, and confirm with the pool owner wallet. */

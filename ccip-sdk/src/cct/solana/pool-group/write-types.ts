@@ -11,11 +11,11 @@ import type { ChainGetter, TokenTransferFeeConfig } from '../../../chain.ts'
 import type { UnsignedSolanaTx } from '../../../solana/types.ts'
 import type {
   MultiTokenPoolExpectedSnapshot,
-  PoolDataFormat,
   MultiTokenPoolInlineRemotePoolDrop,
   MultiTokenPoolLaneFinding,
   MultiTokenPoolLaneKey,
   MultiTokenPoolSnapshot,
+  PoolDataFormat,
 } from '../../multi-token-pool.ts'
 import type { SolanaExecuteParams, SolanaGenerateParams } from '../operation.ts'
 import type { SolanaDurableNonce } from '../serialize.ts'
@@ -1379,7 +1379,8 @@ export type GenerateSetPoolGroupLanePoolDataParams = SolanaGenerateParams<
 /** Unsigned result of `setPoolGroupLanePoolData`. */
 export type GenerateSetPoolGroupLanePoolDataResult = PoolGroupUnsignedResult
 /** Signed params of `setPoolGroupLanePoolData`; durable nonces are refused here. */
-export type ExecuteSetPoolGroupLanePoolDataParams = SolanaExecuteParams<SetPoolGroupLanePoolDataParams>
+export type ExecuteSetPoolGroupLanePoolDataParams =
+  SolanaExecuteParams<SetPoolGroupLanePoolDataParams>
 /** Signed result of `setPoolGroupLanePoolData`. */
 export type ExecuteSetPoolGroupLanePoolDataResult = PoolGroupExecuteResult
 
@@ -1399,11 +1400,14 @@ export type GenerateSetPoolGroupMemberRemoteTokensParams = SolanaGenerateParams<
   SetPoolGroupMemberRemoteTokensParams & PoolGroupGenerateBatchOptions
 >
 /** Unsigned result of `setPoolGroupMemberRemoteTokens`. */
-export type GenerateSetPoolGroupMemberRemoteTokensResult = PoolGroupUnsignedResult & SetPoolGroupMemberRemoteTokensResult
+export type GenerateSetPoolGroupMemberRemoteTokensResult = PoolGroupUnsignedResult &
+  SetPoolGroupMemberRemoteTokensResult
 /** Signed params of `setPoolGroupMemberRemoteTokens`; durable nonces are refused here. */
-export type ExecuteSetPoolGroupMemberRemoteTokensParams = SolanaExecuteParams<SetPoolGroupMemberRemoteTokensParams>
+export type ExecuteSetPoolGroupMemberRemoteTokensParams =
+  SolanaExecuteParams<SetPoolGroupMemberRemoteTokensParams>
 /** Signed result of `setPoolGroupMemberRemoteTokens`. */
-export type ExecuteSetPoolGroupMemberRemoteTokensResult = PoolGroupExecuteResult & SetPoolGroupMemberRemoteTokensResult
+export type ExecuteSetPoolGroupMemberRemoteTokensResult = PoolGroupExecuteResult &
+  SetPoolGroupMemberRemoteTokensResult
 
 /** Unsigned params of `closePoolGroupMembers` (`close_group_members`). */
 export type GenerateClosePoolGroupMembersParams = SolanaGenerateParams<
@@ -1434,7 +1438,8 @@ export type GenerateMaterializePoolGroupLanesParams = SolanaGenerateParams<
 /** Unsigned result of `materializePoolGroupLanes`. */
 export type GenerateMaterializePoolGroupLanesResult = PoolGroupUnsignedResult
 /** Signed params of `materializePoolGroupLanes`; durable nonces are refused here. */
-export type ExecuteMaterializePoolGroupLanesParams = SolanaExecuteParams<MaterializePoolGroupLanesParams>
+export type ExecuteMaterializePoolGroupLanesParams =
+  SolanaExecuteParams<MaterializePoolGroupLanesParams>
 /** Signed result of `materializePoolGroupLanes`. */
 export type ExecuteMaterializePoolGroupLanesResult = PoolGroupExecuteResult
 

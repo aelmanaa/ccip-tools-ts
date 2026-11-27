@@ -40,6 +40,8 @@ function submitChain(): SolanaChain {
   return Object.assign(chain(), {
     connection: {
       getMultipleAccountsInfo: async () => [{}],
+      // a standard lane: no ChainConfig marker to read
+      getAccountInfo: async () => null,
       simulateTransaction: async () => ({ value: { err: null, logs: [], unitsConsumed: 1 } }),
       getLatestBlockhash: async () => ({
         blockhash: PublicKey.default.toBase58(),

@@ -92,6 +92,25 @@ export class InitFastFinalityRateLimit extends SolanaOperation<
     chain.logger.debug(
       `${this.name}: token = ${opts.tokenAddress.toBase58()}, poolProgram = ${poolProgram.toBase58()}, remoteChainSelector = ${opts.remoteChainSelector}`,
     )
+    // a pool-group lane whose RATE_LIMIT the group governs: its override is the group's (or ignored)
+    // loaded on first use: the pool-group guard is never needed on a standard lane
+    const { guardPoolGroupLaneOp, markedLaneState } = await import('../../pool-group/lane-gate.ts')
+    const marked = await markedLaneState(
+      chain,
+      poolProgram,
+      opts.tokenAddress,
+      opts.remoteChainSelector,
+    )
+    if (marked)
+      await guardPoolGroupLaneOp({
+        operation: this.name,
+        chain,
+        state: marked,
+        kind: 'fastFinalityRateLimit',
+        payer: opts.payer,
+        instruction,
+        options: {},
+      })
     return { family: ChainFamily.Solana, instructions: [instruction], mainIndex: 0 }
   }
 

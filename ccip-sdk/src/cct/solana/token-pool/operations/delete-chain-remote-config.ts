@@ -11,6 +11,11 @@ import {
   SolanaOperation,
 } from '../../operation.ts'
 import {
+  type ParsedLaneOpOptions,
+  type PoolGroupLaneOpOptions,
+  parseLaneOpOptions,
+} from '../../pool-group/lane-op-options.ts'
+import {
   type PoolProgramRef,
   createTokenPoolProgram,
   deriveTokenPoolChainConfigPda,
@@ -26,14 +31,15 @@ import {
   validateBigInt,
 } from '../../validate.ts'
 
-type DeleteChainRemoteConfigParams = PoolProgramRef & {
-  /** Token mint address managed by the local pool. */
-  tokenAddress: string
-  /** CCIP selector of the remote chain (`u64`). */
-  remoteChainSelector: bigint
-  /** Pool owner. Defaults to `payer` for single-signer transactions. */
-  authority?: string
-}
+type DeleteChainRemoteConfigParams = PoolProgramRef &
+  PoolGroupLaneOpOptions & {
+    /** Token mint address managed by the local pool. */
+    tokenAddress: string
+    /** CCIP selector of the remote chain (`u64`). */
+    remoteChainSelector: bigint
+    /** Pool owner. Defaults to `payer` for single-signer transactions. */
+    authority?: string
+  }
 
 type ParsedDeleteChainRemoteConfigParams = {
   tokenAddress: PublicKey
@@ -41,6 +47,7 @@ type ParsedDeleteChainRemoteConfigParams = {
   payer: PublicKey
   authority: PublicKey
   remoteChainSelector: bigint
+  laneOptions: ParsedLaneOpOptions
 }
 
 /** Parameters for unsigned Solana token pool remote configuration deletion. */
@@ -84,6 +91,7 @@ export class DeleteChainRemoteConfig extends SolanaOperation<
         params.authority === undefined
           ? payer
           : parsePublicKey(this.name, 'authority', params.authority),
+      laneOptions: parseLaneOpOptions(this.name, params),
       remoteChainSelector: params.remoteChainSelector,
     }
   }
@@ -116,7 +124,24 @@ export class DeleteChainRemoteConfig extends SolanaOperation<
     chain.logger.debug(
       `${this.name}: token = ${opts.tokenAddress.toBase58()}, poolProgram = ${poolProgram.toBase58()}, remoteChainSelector = ${opts.remoteChainSelector}`,
     )
-    return { family: ChainFamily.Solana, instructions: [instruction], mainIndex: 0 }
+    // a pool-group lane: governed fields refused, the accounts the program needs, the guard
+    // loaded on first use: the pool-group guard is never needed on a standard lane
+    const { guardPoolGroupLaneOp, markedLaneState } = await import('../../pool-group/lane-gate.ts')
+    const marked = opts.laneOptions.skip
+      ? null
+      : await markedLaneState(chain, poolProgram, opts.tokenAddress, opts.remoteChainSelector)
+    const sent = marked
+      ? await guardPoolGroupLaneOp({
+          operation: this.name,
+          chain,
+          state: marked,
+          kind: 'deleteChainConfig',
+          payer: opts.payer,
+          instruction,
+          options: opts.laneOptions,
+        })
+      : instruction
+    return { family: ChainFamily.Solana, instructions: [sent], mainIndex: 0 }
   }
 
   /** Generate, sign, simulate, send, and confirm with the pool owner wallet. */

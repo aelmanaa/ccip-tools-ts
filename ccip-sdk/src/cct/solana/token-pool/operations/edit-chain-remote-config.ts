@@ -16,6 +16,11 @@ import {
   SolanaOperation,
 } from '../../operation.ts'
 import {
+  type ParsedLaneOpOptions,
+  type PoolGroupLaneOpOptions,
+  parseLaneOpOptions,
+} from '../../pool-group/lane-op-options.ts'
+import {
   type PoolProgramRef,
   createTokenPoolProgram,
   deriveTokenPoolChainConfigPda,
@@ -33,26 +38,27 @@ import {
 } from '../../validate.ts'
 
 /** Parameters shared by Solana token pool remote-config editing generation and execution. */
-type EditChainRemoteConfigParams = PoolProgramRef & {
-  /** Token mint address managed by the local pool. */
-  tokenAddress: string
-  /** CCIP selector of the remote chain (`u64`). */
-  remoteChainSelector: bigint
-  /**
-   * Remote token address in the remote chain's own format (`0x…` for EVM, base58 for Solana, …),
-   * the family taken from `remoteChainSelector`. Left-padded to 32 bytes in the instruction.
-   */
-  remoteTokenAddress: string
-  /**
-   * Remote pool addresses in the remote chain's own format, like `remoteTokenAddress`; unique.
-   * Stored at native byte length; unlike `remoteTokenAddress`, they are not left-padded.
-   */
-  remotePoolAddresses: string[]
-  /** Remote token decimals (`u8`): an integer from 0 to 255; 0 is valid. */
-  remoteTokenDecimals: number
-  /** Pool owner. Defaults to `payer` for single-signer transactions. */
-  authority?: string
-}
+type EditChainRemoteConfigParams = PoolProgramRef &
+  PoolGroupLaneOpOptions & {
+    /** Token mint address managed by the local pool. */
+    tokenAddress: string
+    /** CCIP selector of the remote chain (`u64`). */
+    remoteChainSelector: bigint
+    /**
+     * Remote token address in the remote chain's own format (`0x…` for EVM, base58 for Solana, …),
+     * the family taken from `remoteChainSelector`. Left-padded to 32 bytes in the instruction.
+     */
+    remoteTokenAddress: string
+    /**
+     * Remote pool addresses in the remote chain's own format, like `remoteTokenAddress`; unique.
+     * Stored at native byte length; unlike `remoteTokenAddress`, they are not left-padded.
+     */
+    remotePoolAddresses: string[]
+    /** Remote token decimals (`u8`): an integer from 0 to 255; 0 is valid. */
+    remoteTokenDecimals: number
+    /** Pool owner. Defaults to `payer` for single-signer transactions. */
+    authority?: string
+  }
 
 type ParsedEditChainRemoteConfigParams = {
   tokenAddress: PublicKey
@@ -63,6 +69,7 @@ type ParsedEditChainRemoteConfigParams = {
   remoteTokenAddress: string
   remotePoolAddresses: string[]
   remoteTokenDecimals: number
+  laneOptions: ParsedLaneOpOptions
 }
 
 /** Parameters for unsigned Solana token pool remote configuration editing. */
@@ -128,6 +135,7 @@ export class EditChainRemoteConfig extends SolanaOperation<
         params.authority === undefined
           ? payer
           : parsePublicKey(this.name, 'authority', params.authority),
+      laneOptions: parseLaneOpOptions(this.name, params),
       remoteChainSelector: params.remoteChainSelector,
       remoteTokenAddress,
       remotePoolAddresses,
@@ -172,7 +180,24 @@ export class EditChainRemoteConfig extends SolanaOperation<
     chain.logger.debug(
       `${this.name}: token = ${opts.tokenAddress.toBase58()}, poolProgram = ${poolProgram.toBase58()}, remoteChainSelector = ${opts.remoteChainSelector}`,
     )
-    return { family: ChainFamily.Solana, instructions: [instruction], mainIndex: 0 }
+    // a pool-group lane: governed fields refused, the accounts the program needs, the guard
+    // loaded on first use: the pool-group guard is never needed on a standard lane
+    const { guardPoolGroupLaneOp, markedLaneState } = await import('../../pool-group/lane-gate.ts')
+    const marked = opts.laneOptions.skip
+      ? null
+      : await markedLaneState(chain, poolProgram, opts.tokenAddress, opts.remoteChainSelector)
+    const sent = marked
+      ? await guardPoolGroupLaneOp({
+          operation: this.name,
+          chain,
+          state: marked,
+          kind: 'editRemoteConfig',
+          payer: opts.payer,
+          instruction,
+          options: opts.laneOptions,
+        })
+      : instruction
+    return { family: ChainFamily.Solana, instructions: [sent], mainIndex: 0 }
   }
 
   /** Generate, sign, simulate, send, and confirm with the pool owner wallet. */

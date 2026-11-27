@@ -31,7 +31,6 @@ import { MAX_COMPUTE_UNIT_LIMIT } from '../../../solana/utils.ts'
 import { jsonStringify } from '../../../utils.ts'
 import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
-import { decodeRemoteAddress } from '../../remote-address.ts'
 import {
   assertDropsConfirmed,
   droppedRemotePools,
@@ -43,6 +42,7 @@ import type {
   MultiTokenPoolLaneFinding,
   MultiTokenPoolSnapshot,
 } from '../../multi-token-pool.ts'
+import { decodeRemoteAddress } from '../../remote-address.ts'
 import { deriveTokenPoolChainConfigPda } from '../programs/token-pool.ts'
 import { parsePublicKey } from '../validate.ts'
 import {
@@ -607,7 +607,11 @@ function sharedRemoteTokens(
       (o) => o.token === token,
     )
     if (!shared.length) return []
-    const before = lanes.find((l) => laneKey({ tokenAddress: l.r.mint.toBase58(), remoteChainSelector: l.r.selector }) === laneKey(key))?.s0
+    const before = lanes.find(
+      (l) =>
+        laneKey({ tokenAddress: l.r.mint.toBase58(), remoteChainSelector: l.r.selector }) ===
+        laneKey(key),
+    )?.s0
     const had =
       !!before &&
       !isUnread(before) &&

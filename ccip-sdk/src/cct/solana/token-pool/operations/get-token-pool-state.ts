@@ -11,6 +11,7 @@ import {
 } from '../../validate.ts'
 
 export type { PoolProgramRef } from '../../programs/token-pool.ts'
+import type { PoolGroupFeature } from '../../pool-group/types.ts'
 
 /** Parameters for reading a Solana token pool state. */
 export type GetTokenPoolStateParams = PoolProgramRef & {
@@ -34,6 +35,11 @@ type BaseConfig = {
 }
 
 type GetTokenPoolStateResultBase = {
+  /**
+   * The pool-group features of the program (`getPoolGroupFeatures`), when it has any; absent on a
+   * program without pool groups or when the probe cannot answer.
+   */
+  poolGroupFeatures?: PoolGroupFeature[]
   stateAddress: string
   /** Pool program owning the state: resolved on-chain, or the supplied `poolProgramAddress`. */
   programId: string
@@ -87,6 +93,23 @@ type ParsedGetTokenPoolStateParams = {
   poolProgramAddress?: PublicKey
 }
 
+/**
+ * The pool-group features of a pool program, best effort: a probe that cannot answer reports none
+ * (the additive field is then absent, as on a program without pool groups).
+ */
+async function poolGroupFeaturesOf(
+  chain: SolanaChain,
+  program: PublicKey,
+): Promise<PoolGroupFeature[]> {
+  try {
+    const { getPoolGroupProgramFeatures } = await import('../../pool-group/program.ts')
+    return await getPoolGroupProgramFeatures(chain, program)
+  } catch {
+    // the probe is informative only: the state read stands without it
+    return []
+  }
+}
+
 /** Reads the complete state of a Solana token pool. */
 export class GetTokenPoolState extends SolanaQuery<
   GetTokenPoolStateParams,
@@ -121,10 +144,12 @@ export class GetTokenPoolState extends SolanaQuery<
       mint,
       poolProgramAddress,
     )
+    const features = await poolGroupFeaturesOf(chain, poolProgram)
     const result = {
       stateAddress: state.toBase58(),
       programId: poolProgram.toBase58(),
       version,
+      ...(features.length && { poolGroupFeatures: features }),
     }
     const baseConfig = serializeBaseConfig(config)
 

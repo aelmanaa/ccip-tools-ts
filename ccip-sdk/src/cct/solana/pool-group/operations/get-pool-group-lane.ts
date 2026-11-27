@@ -1,5 +1,5 @@
 import { BorshAccountsCoder } from '@coral-xyz/anchor'
-import type { PublicKey } from '@solana/web3.js'
+import { PublicKey } from '@solana/web3.js'
 
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { toLeArray } from '../../../../utils.ts'
@@ -18,6 +18,7 @@ import type {
 } from '../types.ts'
 import {
   type ParsedPoolGroupRef,
+  listPoolGroupMembers,
   listProgramAccounts,
   memcmp,
   parsePoolGroupRef,
@@ -95,6 +96,37 @@ export class GetPoolGroupLanes extends SolanaQuery<
     const lanes = await listPoolGroupLaneRequests(this.name, chain, ref, {
       fix: 'listing lanes needs it; use an RPC that serves getProgramAccounts, or read each lane with getPoolGroupLane',
     })
+    // driven lanes also from the members' payer entries (§5.2): a lane the listing missed is
+    // added, and a driven lane whose member records no payer for it (it could not be closed) is
+    // reported
+    if (ref.kind !== 'linked') {
+      const members = await listPoolGroupMembers(this.name, chain, ref.program, ref.group, {
+        param: 'connection',
+        fix: 'listing lanes needs it; use an RPC that serves getProgramAccounts, or read each lane with getPoolGroupLane',
+      })
+      const known = new Set(lanes.map((l) => `${l.mint.toBase58()}:${l.selector}`))
+      for (const { member } of members)
+        for (const p of member.lanePayers) {
+          if (ref.selector !== undefined && p.remoteChainSelector !== ref.selector) continue
+          const key = `${member.mint}:${p.remoteChainSelector}`
+          if (known.has(key)) continue
+          known.add(key)
+          lanes.push({ mint: new PublicKey(member.mint), selector: p.remoteChainSelector })
+        }
+      const payers = new Set(
+        members.flatMap(({ member }) =>
+          member.lanePayers.map((p) => `${member.mint}:${p.remoteChainSelector}`),
+        ),
+      )
+      for (const l of lanes)
+        if (l.v2) {
+          const v2 = decodePoolGroupChainConfigV2(l.v2.data, l.mint.toBase58())
+          if (v2.ext?.groupDriven && !payers.has(`${l.mint.toBase58()}:${l.selector}`))
+            chain.logger.warn(
+              `${this.name}: the driven lane of ${l.mint.toBase58()} toward ${l.selector} has no payer entry in its member, so close_group_lanes refuses it (InvalidGroupMember)`,
+            )
+        }
+    }
     // a tail whose ChainConfig is gone is no lane: transfers read the ChainConfig first
     const out = await readPoolGroupLanes(this.name, chain, ref.program, lanes, {
       skipMissing: true,

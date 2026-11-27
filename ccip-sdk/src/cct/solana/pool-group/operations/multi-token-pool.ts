@@ -274,6 +274,23 @@ export const POOL_GROUP_SNAPSHOT_RECHECKS: ReadonlyMap<string, PoolGroupRecheck>
     ],
     async () => (await import('./hook-writes.ts')).POOL_GROUP_HOOK_OPERATIONS,
   ),
+  ...lazyRechecks(
+    [
+      'linkPoolGroupLanes',
+      'unlinkPoolGroupLanes',
+      'initPoolGroupLanes',
+      'setPoolGroupLanePoolData',
+    ],
+    async () => (await import('./lanes.ts')).POOL_GROUP_LANE_OPERATIONS,
+  ),
+  ...lazyRechecks(
+    ['joinPoolGroup', 'setPoolGroupMemberRemoteTokens', 'closePoolGroupMembers'],
+    async () => (await import('./membership.ts')).POOL_GROUP_MEMBERSHIP_OPERATIONS,
+  ),
+  ...lazyRechecks(
+    ['setPoolGroupChainLanes', 'materializePoolGroupLanes', 'closePoolGroupLanes'],
+    async () => (await import('./driven-lanes.ts')).POOL_GROUP_DRIVEN_LANE_OPERATIONS,
+  ),
 ])
 
 /**

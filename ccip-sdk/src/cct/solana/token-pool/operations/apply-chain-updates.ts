@@ -19,6 +19,7 @@ import {
   SolanaOperation,
   refreshAccountState,
 } from '../../operation.ts'
+import { SKIP_POOL_GROUP_GATE } from '../../pool-group/lane-op-options.ts'
 import type { PoolProgramRef } from '../../programs/token-pool.ts'
 import { submit } from '../../submit.ts'
 import {
@@ -88,6 +89,8 @@ type PoolInstructionParams = {
   poolProgramAddress: string
   payer: string
   authority: string
+  /** The composed ops skip the pool-group gate. */
+  [SKIP_POOL_GROUP_GATE]: true
 }
 
 type ParsedApplyChainUpdatesParams = ApplyChainUpdatesParams & {
@@ -307,6 +310,8 @@ export class ApplyChainUpdates extends SolanaOperation<
       poolProgramAddress: poolProgram.toBase58(),
       payer: params.payer,
       authority: params.authority,
+      // the standard multi-chain flow reads nothing per chain (one program resolution per batch)
+      [SKIP_POOL_GROUP_GATE]: true,
     }
     const groups: InstructionGroup[] = []
 

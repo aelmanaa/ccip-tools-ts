@@ -13,6 +13,11 @@ import {
   SolanaOperation,
 } from '../../operation.ts'
 import {
+  type ParsedLaneOpOptions,
+  type PoolGroupLaneOpOptions,
+  parseLaneOpOptions,
+} from '../../pool-group/lane-op-options.ts'
+import {
   type PoolProgramRef,
   createTokenPoolProgram,
   deriveTokenPoolChainConfigPda,
@@ -91,18 +96,19 @@ export function parseRateLimitConfig(
 }
 
 /** Parameters shared by Solana token pool rate-limit generation and execution. */
-type SetChainRateLimitParams = PoolProgramRef & {
-  /** Token mint address managed by the local pool. */
-  tokenAddress: string
-  /** CCIP selector of the remote chain (`u64`). */
-  remoteChainSelector: bigint
-  /** Rate limit for tokens received from the remote chain. Disabled limits default omitted values to zero. */
-  inbound: RateLimitConfig
-  /** Rate limit for tokens sent to the remote chain. Disabled limits default omitted values to zero. */
-  outbound: RateLimitConfig
-  /** Pool owner or rate-limit admin. Defaults to `payer` for single-signer transactions. */
-  authority?: string
-}
+type SetChainRateLimitParams = PoolProgramRef &
+  PoolGroupLaneOpOptions & {
+    /** Token mint address managed by the local pool. */
+    tokenAddress: string
+    /** CCIP selector of the remote chain (`u64`). */
+    remoteChainSelector: bigint
+    /** Rate limit for tokens received from the remote chain. Disabled limits default omitted values to zero. */
+    inbound: RateLimitConfig
+    /** Rate limit for tokens sent to the remote chain. Disabled limits default omitted values to zero. */
+    outbound: RateLimitConfig
+    /** Pool owner or rate-limit admin. Defaults to `payer` for single-signer transactions. */
+    authority?: string
+  }
 
 type ParsedSetChainRateLimitParams = {
   tokenAddress: PublicKey
@@ -112,6 +118,7 @@ type ParsedSetChainRateLimitParams = {
   remoteChainSelector: bigint
   inbound: ParsedRateLimitConfig
   outbound: ParsedRateLimitConfig
+  laneOptions: ParsedLaneOpOptions
 }
 
 /** Parameters for unsigned Solana token pool rate-limit configuration. */
@@ -159,6 +166,7 @@ export class SetChainRateLimit extends SolanaOperation<
         params.authority === undefined
           ? payer
           : parsePublicKey(this.name, 'authority', params.authority),
+      laneOptions: parseLaneOpOptions(this.name, params),
       remoteChainSelector: params.remoteChainSelector,
       inbound,
       outbound,
@@ -206,7 +214,24 @@ export class SetChainRateLimit extends SolanaOperation<
     chain.logger.debug(
       `${this.name}: token = ${opts.tokenAddress.toBase58()}, poolProgram = ${poolProgram.toBase58()}, remoteChainSelector = ${opts.remoteChainSelector}`,
     )
-    return { family: ChainFamily.Solana, instructions: [instruction], mainIndex: 0 }
+    // a pool-group lane: governed fields refused, the accounts the program needs, the guard
+    // loaded on first use: the pool-group guard is never needed on a standard lane
+    const { guardPoolGroupLaneOp, markedLaneState } = await import('../../pool-group/lane-gate.ts')
+    const marked = opts.laneOptions.skip
+      ? null
+      : await markedLaneState(chain, poolProgram, opts.tokenAddress, opts.remoteChainSelector)
+    const sent = marked
+      ? await guardPoolGroupLaneOp({
+          operation: this.name,
+          chain,
+          state: marked,
+          kind: 'setRateLimit',
+          payer: opts.payer,
+          instruction,
+          options: opts.laneOptions,
+        })
+      : instruction
+    return { family: ChainFamily.Solana, instructions: [sent], mainIndex: 0 }
   }
 
   /** Generate, sign, simulate, send, and confirm with the pool owner or rate-limit admin wallet. */
