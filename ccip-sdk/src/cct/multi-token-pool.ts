@@ -275,14 +275,16 @@ export type MultiTokenPoolLane = {
  *   matching unpause.
  * - `LANE_STOPPED`: an EVM lane stop holds a direction: its rate limit bucket is enabled with no
  *   capacity and no rate. Not a pause: lift it by writing a non-zero bucket (`liftMultiTokenPoolLaneStops`).
- * - `REMOTE_UNREADABLE`: a fact the check needs could not be read (no `getChain`, or a remote family
- *   the SDK cannot read yet), so the check fails closed; pass `getChain`, or a `remoteAttestations`
- *   entry where one applies.
+ * - `REMOTE_UNREADABLE`: a remote fact the check needs could not be read (no `getChain`, or a remote
+ *   family the SDK cannot read yet), so the check fails closed; pass `getChain`, or a
+ *   `remoteAttestations` entry where one applies.
  * - `CCVS_NOT_SYNCED`, `LANE_NOT_ADMITTED`, `ACCOUNT_LOCKS_EXCEEDED`: Solana pool-group lane states.
  * - `REMOTE_ATTESTED`: a remote fact came from an attestation, not a read (a warning).
  * - `UID_MIGRATION_UNCHECKED`: a factory UID provider is set on a token whose registry shows a pool
  *   history (another pool serves it, or an admin transfer is pending) that the SDK cannot check yet;
  *   the write is refused. It is about the token: its `remoteChainSelector` is `0n`.
+ * - `LANE_UNREADABLE`: a local fact of the lane could not be read (e.g. a hook's authorized callers,
+ *   or a pool-group account), so the check fails closed. `REMOTE_UNREADABLE` is the remote side.
  */
 export const MULTI_TOKEN_POOL_LANE_CHECKS = [
   'TOKEN_NOT_REGISTERED',
@@ -312,6 +314,7 @@ export const MULTI_TOKEN_POOL_LANE_CHECKS = [
   'ACCOUNT_LOCKS_EXCEEDED',
   'REMOTE_ATTESTED',
   'UID_MIGRATION_UNCHECKED',
+  'LANE_UNREADABLE',
 ] as const
 
 /** One lane check code. */

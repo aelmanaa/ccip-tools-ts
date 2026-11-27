@@ -98,6 +98,12 @@ describe('snapshot serialization', () => {
 describe('shared runtime tuples', () => {
   it('lists unique lane checks and signer kinds', () => {
     assert.equal(new Set(MULTI_TOKEN_POOL_LANE_CHECKS).size, MULTI_TOKEN_POOL_LANE_CHECKS.length)
+    // appended codes keep the earlier indices: LANE_UNREADABLE (local) after REMOTE_UNREADABLE (remote)
+    assert.equal(MULTI_TOKEN_POOL_LANE_CHECKS.at(-1), 'LANE_UNREADABLE')
+    assert.ok(
+      MULTI_TOKEN_POOL_LANE_CHECKS.indexOf('REMOTE_UNREADABLE') <
+        MULTI_TOKEN_POOL_LANE_CHECKS.indexOf('LANE_UNREADABLE'),
+    )
     assert.equal(
       new Set(MULTI_TOKEN_POOL_STEP_SIGNER_KINDS).size,
       MULTI_TOKEN_POOL_STEP_SIGNER_KINDS.length,
