@@ -298,6 +298,31 @@ export type PolicyName = string
 const PRINTABLE = /^[\x20-\x7e]+$/
 
 /**
+ * Validates a policy record key (`{ policyName, remoteChainSelector }`) at `at`, before any RPC, and
+ * returns its canonical key (`<policy word>:<chain>`, as the projection's `recordKey`).
+ * @throws {@link CCTParamsInvalidError} if the name is invalid, the selector is not a uint64, or it
+ *   is `0` for a type with no default record (`ZeroChainSelectorNotAllowed`)
+ * @internal
+ */
+export function validatePolicyRecordKey(
+  operation: string,
+  at: string,
+  key: unknown,
+  { allowDefault = true }: { allowDefault?: boolean } = {},
+): string {
+  const { policyName, remoteChainSelector } = (key ?? {}) as Record<string, unknown>
+  const word = encodePolicyName(operation, `${at}.policyName`, policyName)
+  validateUint64(operation, `${at}.remoteChainSelector`, remoteChainSelector)
+  if (!allowDefault && remoteChainSelector === 0n)
+    throw new CCTParamsInvalidError(
+      operation,
+      `${at}.remoteChainSelector`,
+      'is 0: this record type has no default record; give a remote chain (ZeroChainSelectorNotAllowed)',
+    )
+  return `${word.toLowerCase()}:${String(remoteChainSelector)}`
+}
+
+/**
  * Encodes a {@link PolicyName} to its `bytes32`.
  * @throws {@link CCTParamsInvalidError} if the name is empty, longer than 31 bytes, not printable
  * ASCII, or the zero `bytes32` (which means "no policy")

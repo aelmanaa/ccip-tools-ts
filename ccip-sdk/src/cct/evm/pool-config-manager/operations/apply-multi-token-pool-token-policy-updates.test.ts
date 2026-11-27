@@ -29,7 +29,7 @@ describe('ApplyMultiTokenPoolTokenPolicyUpdates (cct/evm pool-config-manager)', 
           ...base,
           assignments: [base.assignments[0], { tokenAddress: T.toLowerCase(), policyName: null }],
         },
-        'assignments[1].tokenAddress',
+        'assignments[1]',
       ],
       [
         { ...base, assignments: [{ tokenAddress: T, policyName: 'x'.repeat(32) }] },

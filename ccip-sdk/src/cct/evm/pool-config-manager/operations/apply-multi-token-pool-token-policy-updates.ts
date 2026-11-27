@@ -19,7 +19,7 @@ import {
   getMultiTokenPoolInterface,
   poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
-import { validateAddress, validateArray, validateOneOf } from '../../validate.ts'
+import { assertUnique, validateAddress, validateArray, validateOneOf } from '../../validate.ts'
 import { type PolicyName, encodePolicyName } from '../contracts.ts'
 import { policyKey, tokenRecordsOf } from '../projection.ts'
 import {
@@ -66,7 +66,6 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
     // a closed union: JS callers get the same refusal the types give
     validateOneOf(this.name, 'recordType', params.recordType, LANE_RECORD_TYPES)
     validateArray(this.name, 'assignments', params.assignments, 1)
-    const seen = new Set<string>()
     Array.from(params.assignments, (a, i) => {
       validateAddress(
         this.name,
@@ -75,16 +74,15 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
       )
       if (a.policyName !== null)
         encodePolicyName(this.name, `assignments[${i}].policyName`, a.policyName)
-      const token = getAddress(a.tokenAddress)
-      if (seen.has(token))
-        throw new CCTParamsInvalidError(
-          this.name,
-          `assignments[${i}].tokenAddress`,
-          `assigns ${token} twice: the result would depend on order; give each token once`,
-          { context: { recordType: params.recordType } },
-        )
-      seen.add(token)
     })
+    assertUnique(
+      this.name,
+      'assignments',
+      params.assignments,
+      (a) => getAddress(a.tokenAddress),
+      'token',
+      { recordType: params.recordType },
+    )
     return params
   }
 

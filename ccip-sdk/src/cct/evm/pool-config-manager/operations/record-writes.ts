@@ -20,13 +20,14 @@ import {
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
-import { assertUnique, validateArray, validateUint64 } from '../../validate.ts'
+import { assertUnique, validateArray } from '../../validate.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PolicyName,
   encodePolicyName,
   toAbiLaneKey,
   validateLaneKeys,
+  validatePolicyRecordKey,
 } from '../contracts.ts'
 import { type MultiTokenPoolRecordState, laneKey, policyKey, recordKey } from '../projection.ts'
 import type { PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
@@ -71,18 +72,9 @@ export function validatePolicyRecordWrite(
 ): void {
   const keys = (list: unknown, param: string) => {
     validateArray(operation, param, list)
-    const words = Array.from(list, (k, i) => {
-      const { policyName, remoteChainSelector } = (k ?? {}) as Record<string, unknown>
-      const word = encodePolicyName(operation, `${param}[${i}].policyName`, policyName)
-      validateUint64(operation, `${param}[${i}].remoteChainSelector`, remoteChainSelector)
-      if (!allowDefault && remoteChainSelector === 0n)
-        throw new CCTParamsInvalidError(
-          operation,
-          `${param}[${i}].remoteChainSelector`,
-          'is 0: this record type has no default record; give a remote chain (ZeroChainSelectorNotAllowed)',
-        )
-      return `${word.toLowerCase()}:${String(remoteChainSelector)}`
-    })
+    const words = Array.from(list, (k, i) =>
+      validatePolicyRecordKey(operation, `${param}[${i}]`, k, { allowDefault }),
+    )
     assertUnique(operation, param, words, (w) => w, 'record')
   }
   if (recordsToRemove !== undefined) keys(recordsToRemove, 'recordsToRemove')

@@ -16,8 +16,8 @@ import {
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
-import { assertUnique, validateAddress, validateArray, validateUint64 } from '../../validate.ts'
-import { encodePolicyName } from '../contracts.ts'
+import { assertUnique, validateAddress, validateArray } from '../../validate.ts'
+import { encodePolicyName, validatePolicyRecordKey } from '../contracts.ts'
 import { policyKey, recordKey, subsetKey } from '../projection.ts'
 import type { PolicyRecordKey } from '../records.ts'
 import {
@@ -63,14 +63,10 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
       validateArray(this.name, list, entries)
       const keys = Array.from(entries as readonly unknown[], (e, i) => {
         const at = `${list}[${i}]`
-        const { policyName, remoteChainSelector, tokenAddress } = (e ?? {}) as Record<
-          string,
-          unknown
-        >
-        const word = encodePolicyName(this.name, `${at}.policyName`, policyName)
-        validateUint64(this.name, `${at}.remoteChainSelector`, remoteChainSelector)
+        const record = validatePolicyRecordKey(this.name, at, e)
+        const { tokenAddress } = (e ?? {}) as Record<string, unknown>
         validateAddress(this.name, `${at}.tokenAddress`, tokenAddress)
-        return `${word.toLowerCase()}:${String(remoteChainSelector)}:${getAddress(String(tokenAddress))}`
+        return `${record}:${getAddress(String(tokenAddress))}`
       })
       assertUnique(this.name, list, keys, (k) => k, 'membership')
     }

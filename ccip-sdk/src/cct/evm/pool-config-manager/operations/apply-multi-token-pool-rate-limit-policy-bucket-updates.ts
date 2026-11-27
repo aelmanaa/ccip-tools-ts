@@ -14,14 +14,8 @@ import {
   multiTokenPoolFunctionOf,
 } from '../../multi-token-pool/contracts.ts'
 import { parseRateLimitConfig, toAbiRateLimitConfig } from '../../token-pool/rate-limit.ts'
-import {
-  assertUnique,
-  validateArray,
-  validateBoolean,
-  validateOneOf,
-  validateUint64,
-} from '../../validate.ts'
-import { encodePolicyName } from '../contracts.ts'
+import { assertUnique, validateArray, validateBoolean, validateOneOf } from '../../validate.ts'
+import { encodePolicyName, validatePolicyRecordKey } from '../contracts.ts'
 import { MESSAGE_DIRECTIONS, policyKey, rateLimitBucketOf, recordKey } from '../projection.ts'
 import type { RateLimitPolicyBucketUpdate } from '../records.ts'
 import {
@@ -57,8 +51,7 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
     validateArray(this.name, 'updates', params.updates, 1)
     const updates = Array.from(params.updates, (u, i) => {
       const at = `updates[${i}]`
-      encodePolicyName(this.name, `${at}.policyName`, u.policyName)
-      validateUint64(this.name, `${at}.remoteChainSelector`, u.remoteChainSelector)
+      validatePolicyRecordKey(this.name, at, u)
       validateOneOf(this.name, `${at}.direction`, u.direction, MESSAGE_DIRECTIONS)
       validateBoolean(this.name, `${at}.fastFinality`, u.fastFinality)
       return { ...u, config: parseRateLimitConfig(this.name, `${at}.config`, u.config, null) }
