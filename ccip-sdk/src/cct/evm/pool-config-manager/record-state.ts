@@ -64,6 +64,8 @@ export type MultiTokenPoolRecordStateRead = {
   staticConfig: PoolConfigManagerStaticConfig
   /** The policy names of each record type, as lower-case words. */
   policyNames: Record<LaneRecordType, ReadonlySet<string>>
+  /** Each rate limit policy's stored decimals, by lower-case word (the store checks assignments against them). */
+  rateLimitPolicyDecimals: ReadonlyMap<string, number>
 }
 
 /**
@@ -130,6 +132,7 @@ export async function readMultiTokenPoolRecordState(
     { batchSize: LANE_BATCH_SIZE },
   )
 
+  const rateLimitPolicyDecimals = new Map<string, number>()
   // every policy of every type, with connection subsets and providers
   const policies: MultiTokenPoolPolicyRecords = {
     connection: [],
@@ -166,6 +169,8 @@ export async function readMultiTokenPoolRecordState(
           } else {
             const read = await POLICY_RECORD_READERS[type](pcm, word, at)
             ;(policies[type] as unknown[]).push(...read.records)
+            if ('localDecimals' in read && read.localDecimals !== null)
+              rateLimitPolicyDecimals.set(word.toLowerCase(), read.localDecimals)
           }
         }),
       )
@@ -201,7 +206,7 @@ export async function readMultiTokenPoolRecordState(
   LANE_RECORD_TYPES.forEach((type, t) => {
     policyNames[type] = new Set((nameLists[t] ?? []).map((w) => String(w).toLowerCase()))
   })
-  return { state, blockNumber, lanes, staticConfig, policyNames }
+  return { state, blockNumber, lanes, staticConfig, policyNames, rateLimitPolicyDecimals }
 }
 
 /**

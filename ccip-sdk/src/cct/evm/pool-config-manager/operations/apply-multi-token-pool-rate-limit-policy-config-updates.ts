@@ -7,7 +7,6 @@
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { poolConfigManagerContract } from '../../multi-token-pool/contracts.ts'
 import { validateUint8 } from '../../validate.ts'
 import { encodeRateLimits } from '../decode.ts'
 import { policyKey } from '../projection.ts'
@@ -73,21 +72,21 @@ export class ApplyMultiTokenPoolRateLimitPolicyConfigUpdates extends PolicyRecor
       recordsToSet = [],
       policiesToRemove = [],
     }: ApplyMultiTokenPoolRateLimitPolicyConfigUpdatesParams,
-    { address, version, blockTag, policyNames }: RecordWriteContext,
+    { policyNames, rateLimitPolicyDecimals }: RecordWriteContext,
   ): Promise<void> {
-    const pcm = poolConfigManagerContract(chain, address, version)
     const names = policyNames.rateLimit
     const removed = new Set(policiesToRemove.map((n) => policyKey(n, 'policyName')))
     for (const [i, r] of recordsToSet.entries()) {
       const word = policyKey(r.policyName, `recordsToSet[${i}].policyName`)
       // a new policy (or one this call removes first) takes the record's decimals
       if (!names.has(word) || removed.has(word)) continue
-      const [, decimals] = await pcm.getRateLimitPolicy(word, { blockTag })
-      if (Number(decimals) !== r.localDecimals)
+      // the stored decimals, from the build's one state read
+      const decimals = rateLimitPolicyDecimals.get(word)
+      if (decimals !== undefined && decimals !== r.localDecimals)
         throw new CCTParamsInvalidError(
           this.name,
           `recordsToSet[${i}].localDecimals`,
-          `is ${r.localDecimals}, but rate limit policy ${r.policyName} has ${Number(decimals)} decimals (InvalidRateLimitPolicyDecimals): its limits are raw amounts in those units; use the policy's decimals, or another policy`,
+          `is ${r.localDecimals}, but rate limit policy ${r.policyName} has ${decimals} decimals (InvalidRateLimitPolicyDecimals): its limits are raw amounts in those units; use the policy's decimals, or another policy`,
           { context: { recordType: 'rateLimit' } },
         )
     }

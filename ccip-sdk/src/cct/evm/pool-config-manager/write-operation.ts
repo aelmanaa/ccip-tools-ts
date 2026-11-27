@@ -108,7 +108,7 @@ export type MultiTokenPoolTransactionResult = TransactionResult &
  */
 export type PoolConfigManagerWriteContext = Pick<
   MultiTokenPoolRecordStateRead,
-  'state' | 'staticConfig' | 'policyNames'
+  'state' | 'staticConfig' | 'policyNames' | 'rateLimitPolicyDecimals'
 > & {
   /** The PCM. */
   address: string
@@ -184,6 +184,7 @@ export abstract class PoolConfigManagerWriteOperation<
       state: read.state,
       staticConfig: read.staticConfig,
       policyNames: read.policyNames,
+      rateLimitPolicyDecimals: read.rateLimitPolicyDecimals,
     })
     const context = this.errorContext(params)
     const result = await runMultiTokenPoolGuards({
