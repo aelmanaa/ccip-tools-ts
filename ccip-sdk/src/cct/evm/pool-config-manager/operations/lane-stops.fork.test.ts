@@ -17,7 +17,11 @@ import { Instance } from 'prool'
 
 import { reachableRpcEndpoint, rpcEndpoint } from '../../../../../../scripts/test-endpoints.ts'
 import type { ChainGetter } from '../../../../chain.ts'
-import { forkProvider, withForkRetry } from '../../../../evm/fork-retry.test.helpers.ts'
+import {
+  forkProvider,
+  rejectionOf,
+  withForkRetry,
+} from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { canonicalHash } from '../../../canonical.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../../errors.ts'
@@ -112,6 +116,12 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     )
     return { sources: sources.rateLimit, stopped, rateLimits }
   }
+  /**
+   * Asserts a build is refused as `expected` says. An upstream fork error is retried (it is never a
+   * test failure); only the SDK's own refusal is judged.
+   */
+  const refused = async (build: () => Promise<unknown>, expected: (e: unknown) => boolean) =>
+    assert.ok(expected(await withForkRetry(() => rejectionOf(build(), 'expected a refusal'))))
   const mined = async (write: Promise<{ hash: string }>) =>
     assert.equal(await minedOn(chain.provider as JsonRpcProvider, write), 1)
 
@@ -185,14 +195,15 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     await mined(
       stop.execute(chain, { poolAddress: V5V9_POOL, lanes, direction: 'outbound', wallet }),
     )
-    await assert.rejects(
-      lift.generate(chain, {
-        poolAddress: V5V9_POOL,
-        lanes,
-        direction: 'outbound',
-        sender: V5V9_OPERATOR,
-        getChain,
-      }),
+    await refused(
+      () =>
+        lift.generate(chain, {
+          poolAddress: V5V9_POOL,
+          lanes,
+          direction: 'outbound',
+          sender: V5V9_OPERATOR,
+          getChain,
+        }),
       (e: unknown) =>
         e instanceof CCTParamsInvalidError &&
         (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
@@ -207,8 +218,9 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     const target = { poolAddress: CORE_POOL, lanes, wallet, getChain }
     await mined(stop.execute(chain, { ...target, direction: 'both' }))
     // from chain state, removing the inline record would lift inbound too: refused
-    await assert.rejects(
-      lift.generate(chain, { poolAddress: CORE_POOL, lanes, direction: 'outbound', getChain }),
+    await refused(
+      () =>
+        lift.generate(chain, { poolAddress: CORE_POOL, lanes, direction: 'outbound', getChain }),
       (e: unknown) =>
         e instanceof CCTParamsInvalidError &&
         e.context.param === 'lanes[0]' &&
@@ -264,11 +276,12 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
       inbound: false,
     })
     // enabling it at 1e24 reopens FTF sends toward a chain with no pool: judged, refused
-    await assert.rejects(
-      bucket.generate(chain, {
-        ...ftf({ enabled: true, capacity: 10n ** 24n, rate: 10n ** 22n }),
-        sender: V5V9_OPERATOR,
-      }),
+    await refused(
+      () =>
+        bucket.generate(chain, {
+          ...ftf({ enabled: true, capacity: 10n ** 24n, rate: 10n ** 22n }),
+          sender: V5V9_OPERATOR,
+        }),
       (e: unknown) =>
         e instanceof CCTParamsInvalidError &&
         (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
@@ -284,10 +297,9 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
       lanes,
       direction: 'outbound',
     })
-    const policy = await cct.getMultiTokenPoolRateLimitPolicy({
-      poolAddress: CORE_POOL,
-      policyName: 'core-pol',
-    })
+    const policy = await withForkRetry(() =>
+      cct.getMultiTokenPoolRateLimitPolicy({ poolAddress: CORE_POOL, policyName: 'core-pol' }),
+    )
     const inbound = policy.records.find((r) => r.remoteChainSelector === FUJI)!.rateLimits.inbound
     assert.ok(inbound.enabled)
     // meanwhile the policy's inbound is clamped (a tightening: never judged)
@@ -307,12 +319,14 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
       }),
     )
     // executing the stop now would pin inbound back to the old, looser copy: the re-check says stale
-    const check = await cct.checkMultiTokenPoolSnapshot({
-      snapshot: built.snapshot,
-      transaction: built,
-      sender: CORE_CONFIG,
-      getChain,
-    })
+    const check = await withForkRetry(() =>
+      cct.checkMultiTokenPoolSnapshot({
+        snapshot: built.snapshot,
+        transaction: built,
+        sender: CORE_CONFIG,
+        getChain,
+      }),
+    )
     assert.equal(check.ok, false)
     assert.ok(check.changed.some((c) => c.path === 'guardInputsHash'))
   })
@@ -339,14 +353,15 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     // lifting a broken lane's own token pause makes it live: judged, refused (0x08f7: its lane is
     // not stopped, unlike 0x0a75's after the B1 case, which an unpause correctly does not judge)
     await mined(cct.unpauseMultiTokenPoolGlobally({ ...v5, getChain }))
-    await assert.rejects(
-      cct.generateUnsignedUnpauseMultiTokenPoolTokens({
-        poolAddress: V5V9_POOL,
-        sender: V5V9_OPERATOR,
-        tokenAddresses: ['0x08f749F5Ee026753e88920088bE5F54590A8B14f'],
-        direction: 'outbound',
-        getChain,
-      }),
+    await refused(
+      () =>
+        cct.generateUnsignedUnpauseMultiTokenPoolTokens({
+          poolAddress: V5V9_POOL,
+          sender: V5V9_OPERATOR,
+          tokenAddresses: ['0x08f749F5Ee026753e88920088bE5F54590A8B14f'],
+          direction: 'outbound',
+          getChain,
+        }),
       (e: unknown) =>
         e instanceof CCTParamsInvalidError &&
         (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
@@ -389,10 +404,9 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
     const lanes = [{ tokenAddress: POLICY_TOKEN, remoteChainSelector: FUJI }]
     const wallet = await signer(CORE_CONFIG)
     const clamp = async () => {
-      const policy = await cct.getMultiTokenPoolRateLimitPolicy({
-        poolAddress: CORE_POOL,
-        policyName: 'core-pol',
-      })
+      const policy = await withForkRetry(() =>
+        cct.getMultiTokenPoolRateLimitPolicy({ poolAddress: CORE_POOL, policyName: 'core-pol' }),
+      )
       const inbound = policy.records.find((r) => r.remoteChainSelector === FUJI)!.rateLimits.inbound
       assert.ok(inbound.enabled)
       await mined(
@@ -421,13 +435,14 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
         return unsigned
       }
     }
-    await assert.rejects(
-      new RacingStop().execute(chain, {
-        poolAddress: CORE_POOL,
-        lanes,
-        direction: 'outbound',
-        wallet,
-      }),
+    await refused(
+      () =>
+        new RacingStop().execute(chain, {
+          poolAddress: CORE_POOL,
+          lanes,
+          direction: 'outbound',
+          wallet,
+        }),
       (e: unknown) =>
         e instanceof CCTStateChangedError &&
         (e.context.changed as { path: string }[]).some((c) => c.path === 'calldataHash'),
@@ -448,13 +463,14 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
       expected: { ...built.snapshot.expected, 'stop.poolConfigManager': V5V9_POOL },
     }
     const foreign = { ...fields, hash: canonicalHash(fields) }
-    await assert.rejects(
-      lift.generate(chain, {
-        poolAddress: CORE_POOL,
-        lanes,
-        direction: 'outbound',
-        restore: foreign,
-      }),
+    await refused(
+      () =>
+        lift.generate(chain, {
+          poolAddress: CORE_POOL,
+          lanes,
+          direction: 'outbound',
+          restore: foreign,
+        }),
       (e: unknown) =>
         e instanceof CCTParamsInvalidError &&
         e.context.param === 'restore' &&
