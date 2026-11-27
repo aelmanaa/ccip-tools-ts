@@ -25,6 +25,8 @@ branch `mttp/notes` and is not part of any upstream PR.
 | X0 | `mttp/x0` 08a784cc | 8 | +295 / -79 | family-neutral shared types for the Solana track (`cct/rate-limit.ts`, planner inputs) |
 | E3c | `mttp/e3c` a927c496 | 32 | +1,929 / -467 | lane view, lane check, transfer quote; MTTP branch in `getFee`/`getTokenTransferFeeConfig`/`isSupportedToken`; review fixes |
 | E4 | `mttp/e4` 48d736c7 | 42 | +3,770 / -547 | write base, merged policy assignment op, profile op, provider-judged pool data, Solana remote facts, `setAllowedFinalityConfig` redirect, D22-D37, review fixes (Solana track's cherry-picks excluded) |
+| E5 | `mttp/e5` 2d5695de | 26 | +3,072 / -60 | connection, subset, provider and remote pool writes on two record bases; `addRemotePool`/`removeRemotePool` redirects; dropped-pool confirmation (A21); review fixes (Solana track excluded) |
+| E6 | `mttp/e6` 70212e55 | 66 | +5,540 / -904 | rate limit, fee, overhead, security, bucket, pause and lane stop writes (18 ops, 36 facade methods); three redirects; D38-D53; shared code for the Solana track (drops, lane helpers) |
 
 Effort: increment 1 (DOC0, C1-C4) took one review round with three reviewers; it found 3 majors
 (one real bug in a core send path), all fixed before acceptance. Increment 2 (E1a-E2c) took one
@@ -34,6 +36,10 @@ Increment 3 (E3a-E3c, A17, X0) took one review round with three reviewers plus a
 audit (16 findings, one major); from E3 on, fixes land as new commits on top, not folded. Increment 4
 (E4) took one round with three reviewers: 1 blocker (attested long lanes refused, hidden by a
 hand-built test shape), 22 majors, all fixed or decided (A18-A20), with live, fork and unit proofs.
+Increment 5 (E5) took one round with three reviewers; fixes on top (A21: `confirmDropped` as a guard
+option; outbound-only lanes refused permanently). E6 folded in the independent DRY audit of E4+E5
+(D38-D53, 16 findings, one major: up to four full state reads per signed write), each fix its own
+commit; review pending at the time of writing.
 
 ## Reuse map
 
@@ -184,6 +190,27 @@ token-pool ops, and the only MTTP site already uses `validateFinalityRequested`.
 | Solana remote | the S1a reader (`readSolanaRemoteLaneFacts`, `readSolanaRemotePoolFacts`), lazy-imported | the EVM mapping: byte-exact lane back, `failsClosed`, UID, admission, `sourcePoolAddressLength`, `remoteSendsData` |
 | Single-token op on an MTTP | `isMultiTokenPoolRefusal` | `redirectMultiTokenPool(err, op, how)`: same error class, reason names the MTTP op (§4.5); later redirects reuse it |
 
+### E5
+
+| Need | Reused / extended | New, and why |
+| --- | --- | --- |
+| A family of store-driven writes | `PoolConfigManagerWriteOperation`, the op map, `TOKEN_POLICY_ROLES` | `PolicyRecordWriteOperation` / `InlineRecordWriteOperation`: role and function derived from the tables (D39), `parseRecord` once, `checkState` hook; the stores' bookkeeping refusals (`PolicyRecordNotFound`, `PolicyInUse`, `PolicyHasRecords`, `InlineRecordNotFound`, `LocalTokenNotRegistered`) named before the eth_call |
+| Repeated entries | `parseUniqueRemoteAddresses` (remote addresses only) | `assertUnique(op, param, values, keyOf, noun)`, one keyed loop for the eight copies (D42) |
+| Dropped pools | the projection's before/after lanes | `confirmDropped` sealed in the snapshot (A21); since E6 the logic is family-neutral (`cct/multi-token-pool-drops.ts`) |
+| Same-address provider vs non-EVM records | `readContractTypeOrNull` | one `sameAddressProviderConflicts` checked from both sides (D45) |
+
+### E6
+
+| Need | Reused / extended | New, and why |
+| --- | --- | --- |
+| Rate limit, fee, overhead, security records | the E5 bases; core `toAbiRateLimitConfig` (exported) | value parsers and encoders (`record-values.ts`, `encodeRateLimits`, `encodeSecurityConfig`), `validateUint16` |
+| One read per build (D38) | `readMultiTokenPoolRecordState` | the state keeps decoded profiles and policy names; the base reads once and passes it to `encode` and to the guard (`stateRead`, cloned); a live test counts `getPolicyNames` and `getTokenConfigBatch` at one each |
+| Pauses | `PAUSE_STORE_CALLS` maps each PCM pause to its ConnectionPolicyStore setter for the no-sender path | the scope of lane judging, read from the calldata's function (`laneJudgingOf`): pauses none, rate limit writes only the lanes they loosen, the rest all |
+| Lane stops | the inline rate limit record, `isStop` (shared with Solana) | `stopMultiTokenPoolLanes` / `liftMultiTokenPoolLaneStops`; the stop seals the record it replaced and the buckets it copied, so `restore` is exact and refuses a record changed since |
+| Role pre-flight (D50) | main's `assert<Contract><Role>` convention | `assertPoolConfigManagerRole`, `readPoolConfigManagerRolesHeld` (the roles read pinned to one block) |
+| Provider pool data (D51) | `decodeError` | `readProviderPoolData` at three sites, each keeping its policy |
+| Shared with Solana | — | `abiWord`, `isStop`, `encodeRemoteAddress`, `locateRemoteRegistry`, `readContractTypeOrNull`, drops module, `LANE_UNREADABLE` |
+
 ### Main-behaviour changes (all additive)
 
 - C3/C4: `serializeUnsignedSolanaTx` serializes v0 messages with lookup tables, where main refused
@@ -193,6 +220,11 @@ token-pool ops, and the only MTTP site already uses `validateFinalityRequested`.
 - E3b: `simulateEVMTx` takes an optional `blockTag`.
 - E4: `setAllowedFinalityConfig` on a multi-token pool keeps `CCTContractTypeInvalidError` but its
   `reason` names `applyMultiTokenPoolTokenProfileUpdates` (main's 21 tests unchanged, one added).
+- E5/E6: `addRemotePool`, `removeRemotePool`, `setChainRateLimiterConfigs`,
+  `applyTokenTransferFeeConfigUpdates` and `applyCCVConfigUpdates` on a multi-token pool keep
+  `CCTContractTypeInvalidError`; the `reason` names the MTTP op (one live test covers all six).
+- E6: `getMultiTokenPoolProvider` (E2) reads a token with no `uid()` as having no UID (`null`); it
+  threw a raw ethers error.
 - E4: optional `blockTag` on `readAllAuthorizedCallers`, `readPoolConfigManagerStaticConfig` and
   `readTokenAdminRegistryConfig`; `validateAllowedFinality` and `validateLaneKeys` gain an optional
   trailing parameter (param name, `minLength`). Every main caller is unchanged.
@@ -253,6 +285,24 @@ token-pool ops, and the only MTTP site already uses `validateFinalityRequested`.
 21. **E4 — an unread Solana `sourcePoolAddressLength` is an `'unknown'` fact**, never an assumed 20.
 22. **E4 — the Solana track's commits are cherry-picked onto `mttp/e4`** (S0, S1a and its fixes); the
     history tidy before upstream merges the two tracks.
+23. **E5 — outbound-only lanes refused permanently**: a lane that trusts no remote pool is
+    `NO_REMOTE_POOL`, though the chain allows it; the SDK never opens what it cannot check.
+24. **E5 — `confirmDropped` is a guard option (A21)**, sealed and validated, not an op param.
+25. **E6 — bucket writes keep the guard options**, judged only on the lanes they loosen; the
+    interfaces gained the options (orchestrator decision).
+26. **E6 — every rate limit write judges only what it loosens** (68a5be75, provisionally accepted):
+    the lane stop is `applyInlineRateLimitConfigUpdates` calldata, and the scope must belong to the
+    function for the snapshot re-check to judge as the build did. A lane left with no limit counts as
+    loosened, so `RECORD_MISSING` is still judged.
+27. **E6 — the remote side is `'missing'` when its registry names no pool**, even while a token-scope
+    pause or stop waives it; an outbound stop waives as a token pause does (both families agree). On
+    EVM the stop needs the fast-finality outbound bucket stopped or disabled too.
+28. **E6 — a stop refuses a lane already stopped**, an unregistered token, and a lane with no resolved
+    rate limit; a lift without `restore` removes the inline record only for a token with a rate limit
+    policy, else needs `rateLimits`.
+29. **E6 — D43/D51 helpers live in existing contracts files**: the audit's
+    `multi-token-pool-providers/contracts.ts` does not exist. Core's `'legacy' | 'long'` literal stays
+    (core never imports cct); `POOL_DATA_FORMATS` is in `cct/multi-token-pool.ts`.
 10. **Interface TSDoc typo**: the six per-policy reads' docs in `interfaces/evm.ts` are garbled
     ("Reads a c policy and its records.onnection"); the implementation has correct text.
 
@@ -324,3 +374,15 @@ token-pool ops, and the only MTTP site already uses `validateFinalityRequested`.
 - **Docs lint flags inferred return types of `protected` methods** on exported classes (an inline
   object type's properties): annotate the return type.
 - **Under full-suite load, TON unit tests time out** (pass alone, 117/117), like the `sleep` test.
+- **A guard scope chosen by the op is bypassed by any path that re-runs the guard from calldata**
+  (a snapshot re-check, a direct guard call): a pause judged nowhere in the build was judged there.
+  Derive what depends on the write from the calldata's function.
+- **ethers answers a repeated request from its 250 ms cache (`cacheTimeout`)**: a read right after
+  a mined write can pin to the block before it. Wait it out in tests that read their own writes.
+- **A test-only interface leaking into the shared stack stub** fails the test that pins the stub to the
+  vendored ABIs (`uid()` is the token's `IHasUID`, not an MTTP ABI): answer it in the test itself.
+- **A data-less revert from a provider can mean "no such function on the token"** (`IHasUID.uid()`),
+  not a failure: probe the token before reporting it.
+- **Fork tests under full-suite concurrency** can miss the transaction confirmation timeout (one run
+  of the lane stops fork test, 62 s; passes alone and on rerun).
+
