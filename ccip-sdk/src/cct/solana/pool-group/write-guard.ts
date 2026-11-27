@@ -365,8 +365,9 @@ async function simulateWrite(
       { context: { transactionError: value.err, errorCode: code, logs: value.logs } },
     )
   }
+  // an account the write closes reads back with no lamports (system-owned, empty): it is gone
   const accounts = (value.accounts ?? []).map((a) =>
-    a
+    a && a.lamports > 0
       ? {
           data: Buffer.from(a.data[0] ?? '', 'base64'),
           owner: new PublicKey(a.owner),
