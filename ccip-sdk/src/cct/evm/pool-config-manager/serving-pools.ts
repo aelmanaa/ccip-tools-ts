@@ -7,7 +7,7 @@
 
 import { getAddress } from 'ethers'
 
-import type { Chain } from '../../../chain.ts'
+import type { Chain, RegistryTokenConfig } from '../../../chain.ts'
 import { CCIPTokenNotConfiguredError, CCIPTokenNotInRegistryError } from '../../../errors/index.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import { resultToObject } from '../../../evm/types.ts'
@@ -23,8 +23,25 @@ import { readInBatches } from './contracts.ts'
 const REGISTRY_BATCH_SIZE = 16
 
 /**
- * The pool the registry names for a token, or `null` when it names none: a token the registry does
- * not list and one with no pool set read the same. Any other failure propagates.
+ * The registry's entry for a token, or `null` when it lists none: a token the registry does not list
+ * and one it never configured read the same. Any other failure propagates.
+ * @internal
+ */
+export async function readRegistryEntry(
+  chain: Pick<Chain, 'getRegistryTokenConfig'>,
+  tokenAdminRegistry: string,
+  token: string,
+): Promise<RegistryTokenConfig | null> {
+  return chain.getRegistryTokenConfig(tokenAdminRegistry, token).catch((err: unknown) => {
+    if (err instanceof CCIPTokenNotConfiguredError || err instanceof CCIPTokenNotInRegistryError)
+      return null
+    throw err
+  })
+}
+
+/**
+ * The pool the registry names for a token, or `null` when it names none (or lists no entry). Any
+ * other failure propagates.
  * @internal
  */
 export async function readRegistryPool(
@@ -32,14 +49,8 @@ export async function readRegistryPool(
   tokenAdminRegistry: string,
   token: string,
 ): Promise<string | null> {
-  return chain.getRegistryTokenConfig(tokenAdminRegistry, token).then(
-    ({ tokenPool }) => (tokenPool ? getAddress(tokenPool) : null),
-    (err: unknown) => {
-      if (err instanceof CCIPTokenNotConfiguredError || err instanceof CCIPTokenNotInRegistryError)
-        return null
-      throw err
-    },
-  )
+  const entry = await readRegistryEntry(chain, tokenAdminRegistry, token)
+  return entry?.tokenPool ? getAddress(entry.tokenPool) : null
 }
 
 /**

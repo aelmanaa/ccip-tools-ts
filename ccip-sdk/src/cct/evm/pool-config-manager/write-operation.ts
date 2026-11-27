@@ -11,11 +11,12 @@ import type { EVMChain } from '../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
-import type {
-  MultiTokenPoolExpectedSnapshot,
-  MultiTokenPoolLaneFinding,
-  MultiTokenPoolRemoteCheckOptions,
-  MultiTokenPoolSnapshot,
+import {
+  type MultiTokenPoolExpectedSnapshot,
+  type MultiTokenPoolLaneFinding,
+  type MultiTokenPoolRemoteCheckOptions,
+  type MultiTokenPoolSnapshot,
+  sortFindings,
 } from '../../multi-token-pool.ts'
 import type { TransactionResult } from '../../operation.ts'
 import {
@@ -116,6 +117,8 @@ export type PoolConfigManagerWrite = {
   data: string
   /** Values the write keeps, merges or replaces, by dotted path. */
   expected?: Record<string, unknown>
+  /** Warnings the op's own checks found (beyond the lane guard's), returned with the guard's. */
+  warnings?: MultiTokenPoolLaneFinding[]
 }
 
 /**
@@ -158,7 +161,11 @@ export abstract class PoolConfigManagerWriteOperation<
     const blockTag = await chain.provider.getBlockNumber()
     if (params.sender !== undefined)
       await this.#preflightGate(chain, address, version, params, blockTag)
-    const { data, expected } = await this.encode(chain, params, { address, version, blockTag })
+    const { data, expected, warnings } = await this.encode(chain, params, {
+      address,
+      version,
+      blockTag,
+    })
     const context = this.errorContext(params)
     const result = await runMultiTokenPoolGuards({
       chain,
@@ -195,7 +202,7 @@ export abstract class PoolConfigManagerWriteOperation<
       projectionVerified: result.projectionVerified,
       affectedLanes: result.affectedLanes,
       goingLive: result.goingLive,
-      warnings: result.warnings,
+      warnings: sortFindings([...(warnings ?? []), ...result.warnings]),
       snapshot: result.snapshot,
     }
   }

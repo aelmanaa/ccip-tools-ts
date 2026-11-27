@@ -115,3 +115,9 @@ export {
   type TokenPolicyAssignment,
   ApplyMultiTokenPoolTokenPolicyUpdates,
 } from './apply-multi-token-pool-token-policy-updates.ts'
+export {
+  type ApplyMultiTokenPoolTokenProfileUpdatesParams,
+  type TokenProfile,
+  type TokenProfileUpdate,
+  ApplyMultiTokenPoolTokenProfileUpdates,
+} from './apply-multi-token-pool-token-profile-updates.ts'

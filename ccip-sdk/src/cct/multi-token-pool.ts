@@ -303,6 +303,7 @@ export const MULTI_TOKEN_POOL_LANE_CHECKS = [
   'LANE_NOT_ADMITTED',
   'ACCOUNT_LOCKS_EXCEEDED',
   'REMOTE_ATTESTED',
+  'UID_MIGRATION_UNCHECKED',
 ] as const
 
 /** One lane check code. */

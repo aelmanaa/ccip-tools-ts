@@ -98,6 +98,7 @@ import {
 import type { PoolConfigManagerTarget } from './pool-config-manager/contracts.ts'
 import {
   type ApplyMultiTokenPoolTokenPolicyUpdatesParams,
+  type ApplyMultiTokenPoolTokenProfileUpdatesParams,
   type CheckMultiTokenPoolSnapshotParams,
   type GetMultiTokenPoolChainPausesParams,
   type GetMultiTokenPoolChainPausesResult,
@@ -133,6 +134,7 @@ import {
   type GetPoolConfigManagerStateResult,
   type MultiTokenPoolTokenConfig,
   ApplyMultiTokenPoolTokenPolicyUpdates,
+  ApplyMultiTokenPoolTokenProfileUpdates,
   CheckMultiTokenPoolLane,
   CheckMultiTokenPoolSnapshot,
   GetMultiTokenPoolChainPauses,
@@ -492,6 +494,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   readonly #checkMultiTokenPoolLane = new CheckMultiTokenPoolLane()
   readonly #getMultiTokenPoolTransferQuote = new GetMultiTokenPoolTransferQuote()
   readonly #applyMultiTokenPoolTokenPolicyUpdates = new ApplyMultiTokenPoolTokenPolicyUpdates()
+  readonly #applyMultiTokenPoolTokenProfileUpdates = new ApplyMultiTokenPoolTokenProfileUpdates()
   readonly #getMultiTokenPoolHooksState = new GetMultiTokenPoolHooksState()
   readonly #getMultiTokenPoolProvider = new GetMultiTokenPoolProvider()
   readonly #getMultiTokenPoolPolicyNames = new GetMultiTokenPoolPolicyNames()
@@ -5296,6 +5299,107 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
     opts: GetMultiTokenPoolTransferQuoteParams,
   ): Promise<MultiTokenPoolTransferQuote> {
     return this.#getMultiTokenPoolTransferQuote.query(this.chain, opts)
+  }
+
+  /**
+   * Builds an unsigned `applyTokenProfileUpdates` transaction: registers, updates and deregisters
+   * tokens on a PoolConfigManager.
+   * @remarks Removals run first, as on chain, so a token can be deregistered and re-registered in one
+   * call. The profile guards, beyond the lane guard every PCM write runs:
+   * - decimals are the token's own on registration and never change while registered;
+   * - a flavor, `lockOrBurnAddress` or provider change on a token with lanes needs
+   *   `allowLiveProfileChange` (F1), and its lanes are judged again with the new profile: the remote
+   *   token's provider must accept what the lane sends, and the new provider what arrives;
+   * - a `'burn-to-address'` target other than `0x…dEaD` must be repeated in `confirmBurnAddress`;
+   *   `address(0)` is refused;
+   * - a flavor the serving pool does not serve (`'lock'` on `BurnMintMultiTokenPool`) is refused (F13);
+   * - a token is deregistered only with no policy and no inline record left.
+   *
+   * The SDK does not read a token's pool migration history yet: setting a provider on a token the
+   * registry serves from another pool, or with an admin transfer pending, returns a
+   * `UID_MIGRATION_UNCHECKED` warning (its `remoteChainSelector` is `0n`: it is about the token).
+   *
+   * Gate: `CONFIG_ROLE` or `TOKEN_MANAGER_ROLE` (`PoolConfigManager.applyTokenProfileUpdates`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), a profile guard or a
+   * lane guard refuses, or `sender` holds neither gate role; `context.param` names the field
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` was given and the state it records
+   * has moved
+   * @example
+   * ```typescript
+   * const unsigned = await cct.generateUnsignedApplyMultiTokenPoolTokenProfileUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   profilesToSet: [
+   *     {
+   *       tokenAddress: '0xToken...',
+   *       lockOrBurnFlavor: 'burn',
+   *       allowedFinality: { finalityDepth: 0 },
+   *       lockOrBurnAddress: null,
+   *       additionalPoolDataProvider: null,
+   *     },
+   *   ],
+   *   sender: '0xSafe...',
+   *   getChain,
+   * })
+   * ```
+   */
+  generateUnsignedApplyMultiTokenPoolTokenProfileUpdates(
+    opts: ApplyMultiTokenPoolTokenProfileUpdatesParams,
+  ): Promise<MultiTokenPoolUnsignedTx> {
+    return this.#applyMultiTokenPoolTokenProfileUpdates.generate(this.chain, opts)
+  }
+
+  /**
+   * Signs and submits `applyTokenProfileUpdates` with `opts.wallet`: registers, updates and
+   * deregisters tokens on a PoolConfigManager. `sender` defaults to the wallet, so the gate always
+   * runs; the state is re-read right before sending. Use
+   * {@link generateUnsignedApplyMultiTokenPoolTokenProfileUpdates} for multisig or offline signing.
+   * @remarks Removals run first, as on chain, so a token can be deregistered and re-registered in one
+   * call. The profile guards, beyond the lane guard every PCM write runs:
+   * - decimals are the token's own on registration and never change while registered;
+   * - a flavor, `lockOrBurnAddress` or provider change on a token with lanes needs
+   *   `allowLiveProfileChange` (F1), and its lanes are judged again with the new profile: the remote
+   *   token's provider must accept what the lane sends, and the new provider what arrives;
+   * - a `'burn-to-address'` target other than `0x…dEaD` must be repeated in `confirmBurnAddress`;
+   *   `address(0)` is refused;
+   * - a flavor the serving pool does not serve (`'lock'` on `BurnMintMultiTokenPool`) is refused (F13);
+   * - a token is deregistered only with no policy and no inline record left.
+   *
+   * The SDK does not read a token's pool migration history yet: setting a provider on a token the
+   * registry serves from another pool, or with an admin transfer pending, returns a
+   * `UID_MIGRATION_UNCHECKED` warning (its `remoteChainSelector` is `0n`: it is about the token).
+   *
+   * Gate: `CONFIG_ROLE` or `TOKEN_MANAGER_ROLE` (`PoolConfigManager.applyTokenProfileUpdates`).
+   *
+   * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), a profile guard or a
+   * lane guard refuses, or `sender` holds neither gate role; `context.param` names the field
+   * @throws {@link CCTContractTypeInvalidError} if the target is not a PoolConfigManager (or a
+   * multi-token pool with one)
+   * @throws {@link CCTContractVersionUnsupportedError} if the target reports an unknown version
+   * @throws {@link CCTDataDecodeError} if `eth_simulateV1` disagrees with the projection (an SDK bug)
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` moved, or the state changed between
+   * the build and the send
+   * @throws {@link CCIPWalletInvalidError} if `wallet` is not a valid signer
+   * @throws {@link CCTTxFailedError} if the transaction fails before broadcast or mines without effect
+   * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
+   * @example
+   * ```typescript
+   * await cct.applyMultiTokenPoolTokenProfileUpdates({
+   *   poolAddress: '0xMultiTokenPool...',
+   *   profilesToUpdate: [{ tokenAddress: '0xToken...', allowedFinality: { finalityDepth: 5 } }],
+   *   getChain,
+   *   wallet,
+   * })
+   * ```
+   */
+  applyMultiTokenPoolTokenProfileUpdates(
+    opts: EVMExecuteParams<ApplyMultiTokenPoolTokenProfileUpdatesParams>,
+  ): Promise<MultiTokenPoolTransactionResult> {
+    return this.#applyMultiTokenPoolTokenProfileUpdates.execute(this.chain, opts)
   }
 
   /**

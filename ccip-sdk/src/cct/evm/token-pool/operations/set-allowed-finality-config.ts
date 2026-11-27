@@ -56,10 +56,11 @@ export type SetAllowedFinalityConfigParams = {
 export function validateAllowedFinality(
   operation: string,
   allowedFinality: unknown,
+  param = 'allowedFinality',
 ): asserts allowedFinality is FinalityAllowed {
   const { finalityDepth, finalitySafe } = parseRecord(
     operation,
-    'allowedFinality',
+    param,
     allowedFinality,
     'finality config',
   )
@@ -71,11 +72,10 @@ export function validateAllowedFinality(
   )
     throw new CCTParamsInvalidError(
       operation,
-      'allowedFinality.finalityDepth',
+      `${param}.finalityDepth`,
       'must be an integer in [0, 65535]',
     )
-  if (finalitySafe !== undefined)
-    validateBoolean(operation, 'allowedFinality.finalitySafe', finalitySafe)
+  if (finalitySafe !== undefined) validateBoolean(operation, `${param}.finalitySafe`, finalitySafe)
 }
 
 /** Encodes the v2.0.0 `setAllowedFinalityConfig(bytes4)` call. */
