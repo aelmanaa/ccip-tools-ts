@@ -538,6 +538,9 @@ class SimulationFailedError extends SendTransactionError {
  * @param params - Simulation parameters including connection and payer.
  * @returns Simulation result with estimated compute units.
  */
+/** The most compute units a transaction may request (`SetComputeUnitLimit`). */
+export const MAX_COMPUTE_UNIT_LIMIT = 1_400_000
+
 export async function simulateTransaction(
   { connection, logger = console }: { connection: Connection } & WithLogger,
   {
@@ -554,7 +557,7 @@ export async function simulateTransaction(
   } & ({ instructions: TransactionInstruction[] } | { tx: Transaction | VersionedTransaction }),
 ) {
   // Add max compute units for simulation
-  const maxComputeUnits = 1_400_000
+  const maxComputeUnits = MAX_COMPUTE_UNIT_LIMIT
   const recentBlockhash = '11111111111111111111111111111112'
   const computeUnitLimit = computeUnitsOverride || maxComputeUnits
 
@@ -953,7 +956,7 @@ export async function simulateAndSendTxs(
           recentBlockhash: blockhash.blockhash,
           instructions: ixs,
           computeUnitLimit:
-            computeUnitLimit ?? (simulated ? Math.ceil(simulated * 1.1) : 1_400_000),
+            computeUnitLimit ?? (simulated ? Math.ceil(simulated * 1.1) : MAX_COMPUTE_UNIT_LIMIT),
           loadedAccountsDataSizeLimit: loadedAccountsDataSize
             ? Math.min(Math.ceil(loadedAccountsDataSize * 1.1), MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES)
             : MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES,

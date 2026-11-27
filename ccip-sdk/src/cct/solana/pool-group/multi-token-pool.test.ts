@@ -52,7 +52,7 @@ import {
   GetMultiTokenPoolLane,
   GetMultiTokenPoolTransferQuote,
 } from './operations/index.ts'
-import { poolGroupInstructionsHash } from './snapshot.ts'
+import { poolGroupInstructionsHash, poolGroupTransactionsHash } from './snapshot.ts'
 
 const KEY = {
   tokenAddress: MINT.toBase58(),
@@ -150,17 +150,27 @@ type Opts = {
   mintAuthority?: PublicKey | null
   obs?: Obs
   feeEnabled?: boolean
+  /** The fallback's return data as the runtime records it (`null`: none); defaults to 12 untrimmed bytes. */
+  fallbackRet?: Buffer | null
+  /** A standard (unmarked) lane. */
+  standard?: boolean
 }
 /** A lane linked to `GROUP` (CONNECTION from the group when `long`), its mint, and the views. */
 function setup(opts: Opts = {}) {
   const accounts: Accounts = lane({
     iface: opts.iface ?? 2,
-    cc: chainConfigData(LANE_LINKED_MARKER, opts.pools ?? [hex(EVM_POOL)], opts.token),
-    v2: chainConfigV2Data({
-      group: GROUP,
-      sources: [opts.long ? 1 : 0, 0, 1, 2],
-      slots: [POLICY],
-    }),
+    cc: chainConfigData(
+      opts.standard ? undefined : LANE_LINKED_MARKER,
+      opts.pools ?? [hex(EVM_POOL)],
+      opts.token,
+    ),
+    v2: opts.standard
+      ? null
+      : chainConfigV2Data({
+          group: GROUP,
+          sources: [opts.long ? 1 : 0, 0, 1, 2],
+          slots: [POLICY],
+        }),
     extra: [
       [GCP, groupChainData({ format: opts.long ? 1 : 0, groupPaused: !!opts.groupPaused })],
       [RECORD, policyChainData(8, 0)],
@@ -196,17 +206,14 @@ function setup(opts: Opts = {}) {
       if (d.equals(ixDisc('observe_lane_group'))) return returning(observation(opts.obs))
       if (d.equals(ixDisc('get_pool_fee'))) return returning(poolFee(opts.feeEnabled ?? true))
       if (d.equals(ixDisc('get_fallback_token_transfer_fee_v2'))) {
-        const ret = Buffer.alloc(12)
-        ret.writeUInt32LE(50, 0)
-        ret.writeUInt32LE(90_000, 4)
-        ret.writeUInt32LE(32, 8)
+        const ret = opts.fallbackRet === undefined ? fallbackFee(50, 90_000, 32) : opts.fallbackRet
         return {
           context: { slot: 0 },
           value: {
             err: null,
             logs: [],
             unitsConsumed: 0,
-            returnData: {
+            returnData: ret && {
               programId: FEE_QUOTER.toBase58(),
               data: [ret.toString('base64'), 'base64'],
             },
@@ -220,6 +227,14 @@ function setup(opts: Opts = {}) {
   return chain
 }
 const FEE_QUOTER = Keypair.generate().publicKey
+/** `FallbackTokenTransferFeeV2`, 12 bytes. */
+function fallbackFee(flat: number, gas: number, bytes: number): Buffer {
+  const ret = Buffer.alloc(12)
+  ret.writeUInt32LE(flat, 0)
+  ret.writeUInt32LE(gas, 4)
+  ret.writeUInt32LE(bytes, 8)
+  return ret
+}
 
 describe('getMultiTokenPoolLane (Solana)', () => {
   it('the shared shape: sources, buckets, fee, CCVs, statuses', async () => {
@@ -521,6 +536,19 @@ describe('checkMultiTokenPoolLane (Solana): remote rules', () => {
     const stopped = judge(none, { stopped: { outbound: true, inbound: false } })
     assert.deepEqual(stopped.errors, [])
     assert.equal(stopped.remote, 'missing')
+    // an open fast-finality outbound bucket still sends: no waiver; a stopped one holds
+    const fast = (capacity: bigint, rate: bigint) =>
+      judge(none, {
+        stopped: { outbound: true, inbound: false },
+        rateLimits: {
+          outbound: { tokens: 0n, capacity: 0n, rate: 0n },
+          inbound: null,
+          fastFinalityOutbound: { tokens: capacity, capacity, rate },
+        },
+      })
+    assert.deepEqual(fast(10n, 1n).errors, ['NO_REMOTE_POOL'])
+    assert.equal(fast(10n, 1n).remote, 'missing')
+    assert.deepEqual(fast(0n, 0n).errors, [])
     // an inbound stop does not hold sends
     assert.deepEqual(judge(none, { stopped: { outbound: false, inbound: true } }).errors, [
       'NO_REMOTE_POOL',
@@ -581,6 +609,38 @@ describe('getMultiTokenPoolTransferQuote (Solana)', () => {
       CCTParamsInvalidError,
     )
   })
+
+  it('reads the fallback as the runtime records it: trailing zero bytes trimmed, or none', async () => {
+    const quote = (fallbackRet: Buffer | null) =>
+      new GetMultiTokenPoolTransferQuote().query(setup({ feeEnabled: false, fallbackRet }), {
+        ...KEY,
+        amount: 1n,
+      })
+    // 32 = 20 00 00 00: the last u32 trims to one byte, 9 bytes in all
+    const trimmed = fallbackFee(50, 90_000, 32).subarray(0, 9)
+    const q = await quote(trimmed)
+    assert.deepEqual([q.feeUSDCents, q.destGasOverhead, q.destBytesOverhead], [50n, 90_000, 32])
+    const zero = await quote(null)
+    assert.deepEqual([zero.feeUSDCents, zero.destGasOverhead, zero.destBytesOverhead], [0n, 0, 0])
+  })
+
+  it('interface 1: the router charges the FeeQuoter fallback; a marked lane is refused', async () => {
+    const q = await new GetMultiTokenPoolTransferQuote().query(
+      setup({ iface: 1, standard: true }),
+      {
+        ...KEY,
+        amount: 10_000n,
+      },
+    )
+    assert.equal(q.hasFeeRecord, false)
+    assert.equal(q.tokenFeeBps, 0)
+    assert.equal(q.netAmount, 10_000n)
+    assert.equal(q.feeUSDCents, 50n)
+    await assert.rejects(
+      new GetMultiTokenPoolTransferQuote().query(setup({ iface: 1 }), { ...KEY, amount: 1n }),
+      /pool interface 1/,
+    )
+  })
 })
 
 describe('checkPoolGroupSnapshot', () => {
@@ -617,13 +677,43 @@ describe('checkPoolGroupSnapshot', () => {
       new CheckPoolGroupSnapshot().query(setup(), {
         ...ref,
         snapshot,
-        transaction: { family: 'SVM', instructions: [other] },
+        transaction: { instructions: [other] },
       }),
       /covers other instructions/,
     )
     await assert.rejects(
       new CheckPoolGroupSnapshot().query(setup(), { ...ref, snapshot }),
-      /no Solana write op is registered yet/,
+      /not a Solana pool-group op that builds snapshots/,
+    )
+  })
+
+  it('a multi-transaction snapshot binds the ordered set: all of them, in order', async () => {
+    const second = new TransactionInstruction({
+      programId: PROGRAM,
+      keys: [],
+      data: Buffer.from([3]),
+    })
+    const set = {
+      ...fields,
+      calldataHash: poolGroupTransactionsHash([{ instructions: [ix] }, { instructions: [second] }]),
+    }
+    const snapshot: MultiTokenPoolSnapshot = { ...set, hash: canonicalHash(set) }
+    const { transaction: _, ...base } = ref
+    const query = (transactions: { instructions: TransactionInstruction[] }[]) =>
+      new CheckPoolGroupSnapshot().query(setup(), { ...base, snapshot, transactions })
+    // the whole set passes the hash check (then no re-check is registered for the op)
+    await assert.rejects(
+      query([{ instructions: [ix] }, { instructions: [second] }]),
+      /not a Solana pool-group op/,
+    )
+    await assert.rejects(query([{ instructions: [ix] }]), /covers other instructions/)
+    await assert.rejects(
+      query([{ instructions: [second] }, { instructions: [ix] }]),
+      /covers other instructions/,
+    )
+    await assert.rejects(
+      new CheckPoolGroupSnapshot().query(setup(), { ...ref, snapshot, transactions: [] } as never),
+      /exactly one of transaction and transactions/,
     )
   })
 })

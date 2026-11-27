@@ -40,7 +40,7 @@ import {
   quoteSolanaMultiTokenPoolTransfer,
   readSolanaMultiTokenPoolLane,
 } from '../multi-token-pool-lane.ts'
-import { poolGroupInstructionsHash } from '../snapshot.ts'
+import { poolGroupTransactionsHash } from '../snapshot.ts'
 import type { CheckPoolGroupSnapshotParams } from '../types.ts'
 import {
   type ParsedPoolGroupRef,
@@ -187,10 +187,12 @@ export class GetMultiTokenPoolTransferQuote extends SolanaQuery<
   }
 }
 
+/** The instructions of one proposal transaction, as the snapshot check takes them. @internal */
+export type PoolGroupProposalTx = Pick<UnsignedSolanaTx, 'instructions'>
+
 /**
  * The re-checks of the Solana ops that build snapshots, by operation name: each re-reads what its
- * snapshot recorded and re-runs its guard. Empty until the first Solana write op lands (S2): no
- * Solana op builds a snapshot yet.
+ * snapshot recorded and re-runs its guard on the exact transactions, in order.
  * @internal
  */
 export const POOL_GROUP_SNAPSHOT_RECHECKS: ReadonlyMap<
@@ -199,13 +201,48 @@ export const POOL_GROUP_SNAPSHOT_RECHECKS: ReadonlyMap<
     chain: SolanaChain,
     ref: ParsedPoolGroupRef,
     snapshot: MultiTokenPoolSnapshot,
-    transaction: UnsignedSolanaTx,
+    transactions: readonly PoolGroupProposalTx[],
   ) => Promise<MultiTokenPoolSnapshotCheck>
 > = new Map()
 
+/**
+ * The proposal's transactions: `transaction`, or `transactions` (every transaction of the write, in
+ * order); each must carry instructions.
+ * @throws {@link CCTParamsInvalidError} if neither or both are given, or one has no instructions
+ */
+function proposalTransactions(
+  operation: string,
+  params: CheckPoolGroupSnapshotParams,
+): PoolGroupProposalTx[] {
+  const one = params.transaction !== undefined
+  if (one === (params.transactions !== undefined))
+    throw new CCTParamsInvalidError(
+      operation,
+      'transaction',
+      "pass exactly one of transaction and transactions (the proposal's transactions, in order)",
+    )
+  const list: unknown[] = one
+    ? [params.transaction]
+    : Array.isArray(params.transactions)
+      ? params.transactions
+      : []
+  if (!list.length)
+    throw new CCTParamsInvalidError(operation, 'transactions', 'must be a non-empty array')
+  return list.map((tx, i) => {
+    const instructions = (tx as Partial<PoolGroupProposalTx> | undefined)?.instructions
+    if (!Array.isArray(instructions) || !instructions.length)
+      throw new CCTParamsInvalidError(
+        operation,
+        one ? 'transaction' : `transactions[${i}]`,
+        "must be a proposal's unsigned transaction, with its instructions",
+      )
+    return { instructions }
+  })
+}
+
 type ParsedSnapshot = ParsedPoolGroupRef & {
   snapshot: MultiTokenPoolSnapshot
-  transaction: UnsignedSolanaTx
+  transactions: PoolGroupProposalTx[]
 }
 
 /** Re-reads the values a snapshot recorded and reports which moved. */
@@ -235,26 +272,20 @@ export class CheckPoolGroupSnapshot extends SolanaQuery<
         { cause: cause instanceof Error ? cause : undefined },
       )
     }
-    const instructions = (params.transaction as Partial<UnsignedSolanaTx> | undefined)?.instructions
-    if (!Array.isArray(instructions) || !instructions.length)
+    const transactions = proposalTransactions(this.name, params)
+    if (poolGroupTransactionsHash(transactions) !== snapshot.calldataHash)
       throw new CCTParamsInvalidError(
         this.name,
-        'transaction',
-        "must be the proposal's unsigned transaction, with its instructions",
-      )
-    if (poolGroupInstructionsHash(instructions) !== snapshot.calldataHash)
-      throw new CCTParamsInvalidError(
-        this.name,
-        'snapshot',
-        'covers other instructions than the transaction: pass the snapshot returned with this transaction',
+        params.transactions !== undefined ? 'transactions' : 'transaction',
+        "covers other instructions than the snapshot: pass the snapshot returned with these transactions, and a multi-transaction write's transactions all, in order",
       )
     if (!POOL_GROUP_SNAPSHOT_RECHECKS.has(snapshot.operation))
       throw new CCTParamsInvalidError(
         this.name,
         'snapshot',
-        `was built by ${snapshot.operation}, which is not a Solana pool-group op that builds snapshots: no Solana write op is registered yet, so the state it recorded cannot be re-read`,
+        `was built by ${snapshot.operation}, which is not a Solana pool-group op that builds snapshots, so the state it recorded cannot be re-read`,
       )
-    return { ...parsePoolGroupRef(this.name, params), snapshot, transaction: params.transaction }
+    return { ...parsePoolGroupRef(this.name, params), snapshot, transactions }
   }
 
   /** Reads the pool group, then runs the building op's re-check. */
@@ -267,7 +298,7 @@ export class CheckPoolGroupSnapshot extends SolanaQuery<
       chain,
       ref,
       ref.snapshot,
-      ref.transaction,
+      ref.transactions,
     )
   }
 }

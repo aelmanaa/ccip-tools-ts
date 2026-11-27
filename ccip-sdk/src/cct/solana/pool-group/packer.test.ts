@@ -8,9 +8,12 @@ import {
   AddressLookupTableAccount,
   ComputeBudgetProgram,
   Keypair,
+  PACKET_DATA_SIZE,
   SystemProgram,
   TransactionInstruction,
+  VersionedTransaction as VersionedTransactionClass,
 } from '@solana/web3.js'
+import bs58 from 'bs58'
 
 import '../../../index.ts'
 import {
@@ -19,21 +22,22 @@ import {
   isComputeBudgetInstruction,
   readComputeUnitLimit,
 } from '../../../solana/compute-budget.ts'
-import { simulateTransaction } from '../../../solana/utils.ts'
-import { CCTParamsInvalidError } from '../../errors.ts'
+import { CCTParamsInvalidError, CCTTxFailedError } from '../../errors.ts'
 import {
   type PoolGroupPackItem,
-  SOLANA_PACKET_BYTES,
-  SQUADS_MESSAGE_MARGIN_BYTES,
+  SOLANA_MAX_TRACE_ENTRIES,
+  SQUADS_EXECUTE_TRACE_ENTRIES,
   executePoolGroupTransactions,
   measureTransaction,
   packPoolGroupTransactions,
 } from './packer.ts'
-import { poolGroupInstructionsHash } from './snapshot.ts'
+import { poolGroupInstructionsHash, poolGroupTransactionsHash } from './snapshot.ts'
 import { toPoolGroupSquadsBatch, toPoolGroupSquadsTransaction } from './squads.ts'
 import type { PoolGroupUnsignedTx } from './write-types.ts'
 
 const PROGRAM = Keypair.generate().publicKey
+const PublicKey_default = () => Keypair.generate().publicKey.toBase58()
+const VersionedTransactionOf = (raw: Uint8Array) => VersionedTransactionClass.deserialize(raw)
 const PAYER = Keypair.generate().publicKey
 const silent = { debug() {}, info() {}, warn() {}, error() {} }
 
@@ -138,7 +142,7 @@ describe('packPoolGroupTransactions', () => {
     )
     for (const tx of transactions) {
       const { bytes } = measureTransaction(PAYER, tx.instructions, [])
-      assert.ok(bytes <= SOLANA_PACKET_BYTES, `${bytes}`)
+      assert.ok(bytes <= PACKET_DATA_SIZE, `${bytes}`)
       assert.equal(tx.mainIndex, tx.instructions.length - 1)
       assert.equal(readComputeUnitLimit(tx.instructions), tx.computeUnitLimit)
       assert.equal(tx.computeUnitLimit, Math.ceil(ownIxs(tx).length * 10_000 * 1.1))
@@ -200,8 +204,8 @@ describe('packPoolGroupTransactions', () => {
     )
     for (const tx of transactions) {
       assert.equal(tx.instructions.length, ownIxs(tx).length)
-      const { bytes } = measureTransaction(PAYER, tx.instructions, [])
-      assert.ok(bytes <= SOLANA_PACKET_BYTES - SQUADS_MESSAGE_MARGIN_BYTES, `${bytes}`)
+      const { bytes } = measureTransaction(PAYER, tx.instructions, [], true)
+      assert.ok(bytes <= PACKET_DATA_SIZE, `${bytes}`)
       const units = Math.ceil(ownIxs(tx).length * 10_000 * 1.1)
       assert.equal(tx.computeUnitLimit, units + 25_000 + 5_000 * ownIxs(tx).length)
       assert.equal(readComputeUnitLimit(tx.outerInstructions!), tx.computeUnitLimit)
@@ -232,6 +236,66 @@ describe('packPoolGroupTransactions', () => {
     )
   })
 
+  it('durable nonces with their own authorities: every transaction still fits once its nonce is placed', async () => {
+    const own = (i: number) => ({
+      nonceAccount: Keypair.generate().publicKey.toBase58(),
+      nonceAuthority: i ? Keypair.generate().publicKey.toBase58() : PAYER.toBase58(),
+    })
+    // nonce 0 is the payer's, the others a separate signer each (64 B signature, 32 B key, 1 lock)
+    const items = Array.from({ length: 12 }, () => item(300))
+    const nonces = Array.from({ length: 12 }, (_, i) => own(i))
+    const { transactions } = await pack(items, { durableNonces: nonces })
+    assert.ok(transactions.length > 1)
+    for (const [i, tx] of transactions.entries()) {
+      assert.equal(tx.durableNonce, nonces[i])
+      const { bytes } = measureTransaction(PAYER, tx.instructions, [])
+      // the signature slots the measure leaves out: one per required signer beyond the payer
+      const signers = tx.requiredSigners.length
+      assert.ok(
+        bytes + 64 * (signers - 1) <= PACKET_DATA_SIZE || bytes <= PACKET_DATA_SIZE,
+        `${bytes}`,
+      )
+      assert.ok(bytes <= PACKET_DATA_SIZE, `transaction ${i}: ${bytes} B`)
+    }
+  })
+
+  it('refuses walletMayAddComputeBudget with durable nonces', async () => {
+    await assert.rejects(
+      pack([item()], {
+        budget: { walletMayAddComputeBudget: true },
+        durableNonces: [
+          {
+            nonceAccount: Keypair.generate().publicKey.toBase58(),
+            nonceAuthority: PAYER.toBase58(),
+          },
+        ],
+      }),
+      /AdvanceNonceAccount off instruction 0/,
+    )
+  })
+
+  it('squads: the trace entries of the execute itself are reserved, so an approved transaction executes', async () => {
+    // each item: 1 instruction + `cpis`; the wallet path counts its 2 compute-budget entries, the
+    // Squads path the execute's 3 (limit, price, execute)
+    const cpis = SOLANA_MAX_TRACE_ENTRIES - SQUADS_EXECUTE_TRACE_ENTRIES - 1
+    await pack([item(10, 1, { cpis })], { budget: { executor: 'squads-v4' } })
+    await assert.rejects(
+      pack([item(10, 1, { cpis: cpis + 1 })], { budget: { executor: 'squads-v4' } }),
+      /instruction trace entries/,
+    )
+    // the wallet path has one entry more room (2 compute-budget instructions)
+    await pack([item(10, 1, { cpis: cpis + 1 })])
+  })
+
+  it('heap is per item (each runs in its own invocation), not summed', async () => {
+    const { transactions } = await pack([
+      item(10, 1, { heapBytes: 20_000 }),
+      item(10, 1, { heapBytes: 20_000 }),
+    ])
+    assert.equal(transactions.length, 1)
+    await assert.rejects(pack([item(10, 1, { heapBytes: 40_000 })]), /heap bytes/)
+  })
+
   it('drops lookup-table entries extended in the current slot', async () => {
     const key = Keypair.generate().publicKey
     const addresses = Array.from({ length: 4 }, () => Keypair.generate().publicKey)
@@ -255,68 +319,163 @@ describe('packPoolGroupTransactions', () => {
 })
 
 describe('executePoolGroupTransactions', () => {
+  const signer = Keypair.generate()
   const wallet = {
-    publicKey: PAYER,
-    signTransaction: async <T>(t: T) => t,
+    publicKey: signer.publicKey,
+    signTransaction: async <T>(t: T) => {
+      ;(t as VersionedTransaction).sign([signer])
+      return t
+    },
     signAllTransactions: async <T>(t: T[]) => t,
   }
   const tx = (tokens: string[]): PoolGroupUnsignedTx => ({
     family: 'SVM',
-    instructions: [item().instructions[0]!],
-    requiredSigners: [{ address: PAYER.toBase58(), role: 'payer' }],
+    instructions: [
+      new TransactionInstruction({
+        programId: PROGRAM,
+        keys: [{ pubkey: signer.publicKey, isSigner: true, isWritable: true }],
+        data: Buffer.from(tokens[0]!),
+      }),
+    ],
+    requiredSigners: [{ address: signer.publicKey.toBase58(), role: 'payer' }],
     tokenAddresses: tokens,
     computeUnitLimit: 1,
     computeUnitPrice: 0,
   })
+  const tokenOf = (raw: Uint8Array) =>
+    (() => {
+      const t = VersionedTransactionOf(raw)
+      return Buffer.from(t.message.compiledInstructions.at(-1)!.data).toString()
+    })()
 
-  it('never resends a transaction that may have landed: it rebuilds from chain state', async () => {
-    const done = new Set<string>()
+  type Net = {
+    /** What a send of token `t` does: land, land but the transport fails, or never land. */
+    send: (t: string, attempt: number) => 'ok' | 'lost-after-landing' | 'lost' | 'failed-on-chain'
+    /** Simulations refused, by token. */
+    refuse?: string
+  }
+  /** A cluster: signatures that landed, a block height that passes expiry once polled twice. */
+  function cluster(net: Net) {
+    const landed = new Map<string, { err: unknown }>()
+    const sends: string[] = []
+    const attempts = new Map<string, number>()
+    let height = 100
+    const conn = {
+      simulateTransaction: async (t: VersionedTransaction) => ({
+        context: { slot: 1 },
+        value: {
+          err:
+            net.refuse &&
+            Buffer.from(t.message.compiledInstructions.at(-1)!.data).toString() === net.refuse
+              ? { InstructionError: [1, { Custom: 1 }] }
+              : null,
+          logs: [],
+          unitsConsumed: 1,
+          returnData: null,
+        },
+      }),
+      getLatestBlockhash: async () => ({
+        blockhash: PublicKey_default(),
+        lastValidBlockHeight: 150,
+      }),
+      sendRawTransaction: async (raw: Buffer) => {
+        const t = tokenOf(raw)
+        const n = (attempts.get(t) ?? 0) + 1
+        attempts.set(t, n)
+        sends.push(t)
+        const sig = bs58.encode(VersionedTransactionOf(raw).signatures[0]!)
+        const what = net.send(t, n)
+        if (what === 'ok' || what === 'lost-after-landing' || what === 'failed-on-chain')
+          landed.set(sig, {
+            err: what === 'failed-on-chain' ? { InstructionError: [0, { Custom: 7 }] } : null,
+          })
+        if (what === 'lost' || what === 'lost-after-landing') throw new Error('socket hang up')
+        return sig
+      },
+      confirmTransaction: async ({ signature }: { signature: string }) => ({
+        context: { slot: 1 },
+        value: { err: landed.get(signature)?.err ?? null },
+      }),
+      getBlockHeight: async () => (height += 30),
+      getSignatureStatuses: async (sigs: string[]) => ({
+        context: { slot: 1 },
+        value: sigs.map((s) =>
+          landed.has(s)
+            ? {
+                slot: 1,
+                confirmations: 1,
+                err: landed.get(s)!.err,
+                confirmationStatus: 'confirmed',
+              }
+            : null,
+        ),
+      }),
+    }
+    return { chain: { connection: conn as unknown as Connection, logger: silent }, sends, landed }
+  }
+  const run = (net: Net, done = new Set<string>(), tokens = ['a', 'b', 'c']) => {
+    const c = cluster(net)
     let builds = 0
-    const sent: string[][] = []
-    const r = await executePoolGroupTransactions({
+    const result = executePoolGroupTransactions({
       operation: 'test',
-      chain: connection().chain,
+      chain: c.chain,
       wallet,
+      pollMs: 0,
       build: async () => {
         builds++
-        return { transactions: ['a', 'b', 'c'].filter((t) => !done.has(t)).map((t) => tx([t])) }
-      },
-      send: async (_c, _w, unsigned) => {
-        const t = (unsigned as PoolGroupUnsignedTx).tokenAddresses
-        sent.push(t)
-        done.add(t[0]!) // it landed
-        if (t[0] === 'b' && sent.filter((s) => s[0] === 'b').length === 1)
-          throw new Error('block height exceeded') // ... but did not confirm
-        return { hash: `h-${t[0]}`, slices: [] }
+        // chain state: what landed is done
+        for (const t of tokens)
+          if ([...c.sends].includes(t) && net.send(t, 1) !== 'lost') done.add(t)
+        return { transactions: tokens.filter((t) => !done.has(t)).map((t) => tx([t])) }
       },
     })
-    assert.equal(builds, 2)
-    assert.deepEqual(sent, [['a'], ['b'], ['c']])
+    return { result, c, builds: () => builds }
+  }
+
+  it('X-1: a send whose transport fails after it landed is counted, never rebuilt or resent', async () => {
+    const { result, c, builds } = run({ send: (t) => (t === 'b' ? 'lost-after-landing' : 'ok') })
+    const r = await result
+    assert.equal(builds(), 1)
+    assert.deepEqual(c.sends, ['a', 'b', 'c'])
+    assert.equal(r.transactions.length, 3)
     assert.deepEqual(
-      r.transactions.map((t) => t.hash),
-      ['h-a', 'h-c'],
+      r.transactions.map((t) => t.tokenAddresses[0]),
+      ['a', 'b', 'c'],
     )
   })
 
-  it('a simulation refusal is thrown; a second signer is refused', async () => {
-    const { chain } = connection({ maxItems: 0 })
-    const refusal = await simulateTransaction(chain, {
-      payerKey: PAYER,
-      instructions: item().instructions,
-    }).catch((e: unknown) => e)
-    await assert.rejects(
-      executePoolGroupTransactions({
-        operation: 'test',
-        chain,
-        wallet,
-        build: async () => ({ transactions: [tx(['a'])] }),
-        send: async () => {
-          throw refusal
-        },
-      }),
-      (e: unknown) => e === refusal,
+  it('a send that never landed is rebuilt only after its blockhash expired', async () => {
+    const { result, c, builds } = run({ send: (t, n) => (t === 'b' && n === 1 ? 'lost' : 'ok') })
+    const r = await result
+    assert.equal(builds(), 2)
+    assert.deepEqual(c.sends, ['a', 'b', 'b', 'c'])
+    assert.deepEqual(
+      r.transactions.map((t) => t.tokenAddresses[0]),
+      ['a', 'b', 'c'],
     )
-    const other = tx(['a'])
+  })
+
+  it('a transaction that failed on chain is reported with what landed, never resent', async () => {
+    const { result, c } = run({ send: (t) => (t === 'b' ? 'failed-on-chain' : 'ok') })
+    await assert.rejects(result, (e: unknown) => {
+      assert.ok(e instanceof CCTTxFailedError)
+      assert.match(e.message, /failed on chain/)
+      assert.deepEqual(e.context.committedHashes, [[...c.landed.keys()][0]])
+      return true
+    })
+    assert.deepEqual(c.sends, ['a', 'b'])
+  })
+
+  it('a simulation refusal is thrown with what landed; signers are checked before the first send', async () => {
+    const refused = run({ send: () => 'ok', refuse: 'b' })
+    await assert.rejects(refused.result, (e: unknown) => {
+      assert.ok(e instanceof CCTTxFailedError)
+      assert.equal((e.context.committedHashes as string[]).length, 1)
+      return true
+    })
+    assert.deepEqual(refused.c.sends, ['a'])
+    const c = cluster({ send: () => 'ok' })
+    const other = tx(['z'])
     other.requiredSigners.push({
       address: Keypair.generate().publicKey.toBase58(),
       role: 'pool-owner',
@@ -324,12 +483,14 @@ describe('executePoolGroupTransactions', () => {
     await assert.rejects(
       executePoolGroupTransactions({
         operation: 'test',
-        chain,
+        chain: c.chain,
         wallet,
-        build: async () => ({ transactions: [other] }),
+        pollMs: 0,
+        build: async () => ({ transactions: [tx(['a']), other] }),
       }),
-      /also needs/,
+      /transaction 1 also needs/,
     )
+    assert.deepEqual(c.sends, [])
   })
 })
 
@@ -378,6 +539,25 @@ describe('Squads export', () => {
   })
 })
 
+describe('Squads multi-transaction step snapshot (B-4)', () => {
+  it('every transaction of a step carries its step id, and the set hashes in order', async () => {
+    const vault = PAYER.toBase58()
+    const [t1, t2] = [
+      (await pack([item()], { budget: { executor: 'squads-v4' } })).transactions[0]!,
+      (await pack([item()], { budget: { executor: 'squads-v4' } })).transactions[0]!,
+    ]
+    const { batches } = toPoolGroupSquadsBatch({
+      ready: [{ id: 'step', transactions: [t1, t2] }],
+      vault,
+    })
+    const inStep = batches[0]!.transactions.filter((t) => t.stepId === 'step')
+    assert.equal(inStep.length, 2)
+    assert.equal(poolGroupTransactionsHash(inStep), poolGroupTransactionsHash([t1, t2]))
+    assert.notEqual(poolGroupTransactionsHash([t2, t1]), poolGroupTransactionsHash([t1, t2]))
+    assert.equal(poolGroupTransactionsHash([t1]), poolGroupInstructionsHash(t1.instructions))
+  })
+})
+
 describe('poolGroupInstructionsHash', () => {
   it('leaves out compute budget and nonce instructions', () => {
     const own = item().instructions
@@ -388,6 +568,12 @@ describe('poolGroupInstructionsHash', () => {
       }),
       ComputeBudgetProgram.setComputeUnitLimit({ units: 1 }),
       ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }),
+      // SetLoadedAccountsDataSizeLimit (tag 4): any compute-budget instruction is the executor's
+      new TransactionInstruction({
+        programId: ComputeBudgetProgram.programId,
+        keys: [],
+        data: Buffer.from([4, 0, 0, 1, 0]),
+      }),
     ]
     assert.equal(poolGroupInstructionsHash([...extra, ...own]), poolGroupInstructionsHash(own))
     assert.notEqual(poolGroupInstructionsHash(own), poolGroupInstructionsHash(item().instructions))

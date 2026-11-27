@@ -55,15 +55,19 @@ function isEncoding(encoding: string): encoding is SerializedSolanaTxEncoding {
 // SystemProgram instruction index of `AdvanceNonceAccount` (u32 little-endian)
 const ADVANCE_NONCE_ACCOUNT_INDEX = 4
 
+/** Whether an instruction is a System program `AdvanceNonceAccount`. @internal */
+export function isAdvanceNonceInstruction(ix: TransactionInstruction): boolean {
+  return (
+    ix.programId.equals(SystemProgram.programId) &&
+    ix.data.length >= 4 &&
+    ix.data.readUInt32LE(0) === ADVANCE_NONCE_ACCOUNT_INDEX
+  )
+}
+
 /** The nonce account a leading `AdvanceNonceAccount` instruction advances, if the first one is one. */
 function advancedNonceAccount(instructions: readonly TransactionInstruction[]): string | undefined {
   const first = instructions[0]
-  if (
-    !first?.programId.equals(SystemProgram.programId) ||
-    first.data.length < 4 ||
-    first.data.readUInt32LE(0) !== ADVANCE_NONCE_ACCOUNT_INDEX
-  )
-    return
+  if (!first || !isAdvanceNonceInstruction(first)) return
   return first.keys[0]?.pubkey.toBase58()
 }
 

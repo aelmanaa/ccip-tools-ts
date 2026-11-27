@@ -165,6 +165,22 @@ function executeAccounts(
   ]
 }
 
+/**
+ * How a proposer's outer transaction is built: the Squads app adds a compute-unit limit and price by
+ * default, and a separate rent payer adds a signer. Both make `vaultTransactionCreate` and
+ * `batchAddTransaction` larger around the same vault message.
+ */
+export type SquadsOuter = { computeUnitPrice?: number; rentPayer?: Keypair }
+
+/** The outer compute budget a proposer adds (limit and price), or none. */
+const outerBudget = (outer: SquadsOuter) =>
+  outer.computeUnitPrice === undefined
+    ? []
+    : [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: outer.computeUnitPrice }),
+      ]
+
 /** A Squads v4 client for one multisig on a fork. */
 export class SquadsHarness {
   readonly program: Program
@@ -196,7 +212,8 @@ export class SquadsHarness {
     }).compileToV0Message(tables)
     const tx = new VersionedTransaction(message)
     tx.sign(signers)
-    const bytes = tx.serialize().length
+    // the wire size: signatures (shortvec count + 64 each) and the message
+    const bytes = 1 + 64 * message.header.numRequiredSignatures + message.serialize().length
     const locks =
       message.staticAccountKeys.length +
       message.addressTableLookups.reduce(
@@ -242,7 +259,11 @@ export class SquadsHarness {
   }
 
   /** Proposes one vault transaction; returns its index. */
-  async propose(member: Keypair, tx: PoolGroupSquadsTransaction): Promise<bigint> {
+  async propose(
+    member: Keypair,
+    tx: PoolGroupSquadsTransaction,
+    outer: SquadsOuter = {},
+  ): Promise<bigint> {
     const index = await this.nextIndex()
     const transaction = squadsPdas.transaction(this.multisig, index)
     const { bytes } = squadsTransactionMessage(this.vault, tx.instructions, tx.lookupTables)
@@ -256,11 +277,15 @@ export class SquadsHarness {
         multisig: this.multisig,
         transaction,
         creator: member.publicKey,
-        rentPayer: member.publicKey,
+        rentPayer: (outer.rentPayer ?? member).publicKey,
         systemProgram: SystemProgram.programId,
       })
       .instruction()
-    await this.send('vaultTransactionCreate', [member], [create])
+    await this.send(
+      'vaultTransactionCreate',
+      [member, ...(outer.rentPayer ? [outer.rentPayer] : [])],
+      [...outerBudget(outer), create],
+    )
     await this.proposal(member, index, false)
     return index
   }
@@ -316,7 +341,11 @@ export class SquadsHarness {
   }
 
   /** Proposes a batch: `batchCreate`, a draft proposal, one `batchAddTransaction` each, then activate. */
-  async proposeBatch(member: Keypair, transactions: PoolGroupSquadsTransaction[]): Promise<bigint> {
+  async proposeBatch(
+    member: Keypair,
+    transactions: PoolGroupSquadsTransaction[],
+    outer: SquadsOuter = {},
+  ): Promise<bigint> {
     const index = await this.nextIndex()
     const batch = squadsPdas.transaction(this.multisig, index)
     const create = await this.program.methods.batchCreate!({ vaultIndex: 0, memo: null })
@@ -342,11 +371,15 @@ export class SquadsHarness {
           batch,
           transaction: squadsPdas.batchTransaction(this.multisig, index, i + 1),
           member: member.publicKey,
-          rentPayer: member.publicKey,
+          rentPayer: (outer.rentPayer ?? member).publicKey,
           systemProgram: SystemProgram.programId,
         })
         .instruction()
-      await this.send('batchAddTransaction', [member], [add])
+      await this.send(
+        'batchAddTransaction',
+        [member, ...(outer.rentPayer ? [outer.rentPayer] : [])],
+        [...outerBudget(outer), add],
+      )
     }
     const activate = await this.program.methods.proposalActivate!()
       .accountsStrict({

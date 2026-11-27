@@ -17,7 +17,12 @@ import { type PublicKey, ComputeBudgetProgram } from '@solana/web3.js'
 import { getAddress, isAddress, zeroPadValue } from 'ethers'
 
 import type { Chain, LaneRecordType, RateLimiterState } from '../../../chain.ts'
-import { CCIPError, CCIPTokenPoolChainConfigNotFoundError } from '../../../errors/index.ts'
+import {
+  CCIPContractNotRouterError,
+  CCIPError,
+  CCIPTokenPoolChainConfigNotFoundError,
+} from '../../../errors/index.ts'
+import type { EVMChain } from '../../../evm/index.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { buildMessageForDest } from '../../../requests.ts'
 import type { SolanaChain } from '../../../solana/index.ts'
@@ -37,6 +42,7 @@ import {
   DEFAULT_MIN_DEST_GAS_OVERHEAD,
   HOOK_DEST_GAS_OVERHEAD,
   abiWord,
+  isStop,
   longPoolDataBytes,
   sortFindings,
 } from '../../multi-token-pool.ts'
@@ -50,6 +56,7 @@ import {
   readSolanaMultiTokenPoolLane,
 } from './multi-token-pool-lane.ts'
 import { isViewRefusal, orThrow } from './operations/common.ts'
+import { SOLANA_MAX_ACCOUNT_LOCKS } from './packer.ts'
 import { getPoolGroupProgramFeatures } from './program.ts'
 import {
   notTransient,
@@ -59,8 +66,6 @@ import {
 } from './remote-lane.ts'
 
 const DIRECTIONS = ['outbound', 'inbound'] as const
-/** The account locks a Solana transaction may take. */
-export const SOLANA_ACCOUNT_LOCK_LIMIT = 64
 
 /** The remote lane back, as the remote side reads it toward this chain. @internal */
 export type SolanaLaneRemoteBack = {
@@ -120,24 +125,60 @@ type Add = (
   recordType?: LaneRecordType,
 ) => void
 
+/** The EVM stack's reads {@link readEvmRemote} uses (injectable for tests). @internal */
+export type EvmRemoteReads = {
+  /** The pool an EVM registry names for a token (`null`: none). */
+  readRegistryPool: (remote: EVMChain, registry: string, token: string) => Promise<string | null>
+  /** The EVM multi-token pool lane view (`getMultiTokenPoolLane`). */
+  getMultiTokenPoolLane: (
+    remote: EVMChain,
+    params: { tokenAddress: string; remoteChainSelector: bigint; poolAddress: string },
+  ) => Promise<MultiTokenPoolLane>
+  /** The remote token provider's verdicts on what this lane sends (`readRemoteMultiTokenPoolSide`). */
+  readRemoteMultiTokenPoolSide: (
+    remote: EVMChain,
+    pool: string,
+    token: string,
+    localSelector: bigint,
+    sends: string,
+  ) => Promise<
+    NonNullable<Extract<SolanaLaneRemoteSide, { status: 'known' }>['multiTokenPoolSide']>
+  >
+}
+
+/** Loads the EVM stack's reads on first use, so Solana-only callers never load the EVM stack. */
+async function loadEvmRemoteReads(): Promise<EvmRemoteReads> {
+  const [{ readRegistryPool }, { GetMultiTokenPoolLane }, { readRemoteMultiTokenPoolSide }] =
+    await Promise.all([
+      import('../../evm/pool-config-manager/serving-pools.ts'),
+      import('../../evm/pool-config-manager/operations/get-multi-token-pool-lane.ts'),
+      import('../../evm/pool-config-manager/guard-facts.ts'),
+    ])
+  return {
+    readRegistryPool,
+    getMultiTokenPoolLane: (remote, params) => new GetMultiTokenPoolLane().query(remote, params),
+    readRemoteMultiTokenPoolSide,
+  }
+}
+
 /**
  * Reads the EVM side of a Solana lane with the EVM stack's reads: the registry of the first trusted
  * pool and the pool it names, its type, the remote lane back (`getMultiTokenPoolLane` on a
  * multi-token pool, core `getTokenPoolRemotes` on any other), its token provider's verdicts on what
  * this lane sends, and each trusted legacy pool's type.
+ * @internal
  */
-async function readEvmRemote(
+export async function readEvmRemote(
   remote: Chain,
   read: SolanaMultiTokenPoolLaneRead,
   localSelector: bigint,
+  reads?: EvmRemoteReads,
 ): Promise<SolanaLaneRemoteSide> {
-  const [{ EVMChain }, { readRegistryPool }, { reportsMultiTokenPool }, { isNotCcipContract }] =
-    await Promise.all([
-      import('../../../evm/index.ts'),
-      import('../../evm/pool-config-manager/serving-pools.ts'),
-      import('../../evm/multi-token-pool/contracts.ts'),
-      import('../../evm/query.ts'),
-    ])
+  const [{ EVMChain }, { reportsMultiTokenPool }, { isNotCcipContract }] = await Promise.all([
+    import('../../../evm/index.ts'),
+    import('../../evm/multi-token-pool/contracts.ts'),
+    import('../../evm/query.ts'),
+  ])
   if (!(remote instanceof EVMChain))
     return {
       status: 'unknown',
@@ -163,27 +204,46 @@ async function readEvmRemote(
   const legacyFromMultiTokenPools = legacyPools.filter((_, i) =>
     reportsMultiTokenPool(legacyTypes[i]!),
   )
-  const registry = await remote.getTokenAdminRegistryFor(trusted[0]!)
-  const registryPool = await readRegistryPool(remote, registry, remoteToken)
+  // the remote registry is found from the first trusted pool, as the EVM guard finds it; an address
+  // that does not answer as a CCIP pool leaves the remote side unlocated: fail closed, with the fix
+  const registry = await remote.getTokenAdminRegistryFor(trusted[0]!).catch((err: unknown) => {
+    if (isNotCcipContract(err) || err instanceof CCIPContractNotRouterError) return undefined
+    throw err
+  })
+  if (registry === undefined)
+    return {
+      status: 'missing',
+      reason: `the lane's first trusted remote pool ${trusted[0]} does not answer as a CCIP pool on the remote chain, so the remote registry cannot be found from it: trust the remote token's pool`,
+    }
+  const evm = reads ?? (await loadEvmRemoteReads())
+  const registryPool = await evm.readRegistryPool(remote, registry, remoteToken)
   if (registryPool === null)
     return { status: 'known', registryPool, readsLongData: false, legacyFromMultiTokenPools }
-  const [type] = await remote.typeAndVersion(registryPool)
+  // a registry pool that does not answer as a CCIP contract is a custom pool: unread, a finding
+  const type = await remote.typeAndVersion(registryPool).then(
+    ([t]) => t,
+    (err: unknown) => {
+      if (isNotCcipContract(err)) return undefined
+      throw err
+    },
+  )
+  if (type === undefined)
+    return {
+      status: 'unknown',
+      reason: `the remote registry's pool ${registryPool} does not report a CCIP typeAndVersion, so what it reads and sends cannot be judged`,
+    }
   const readsLongData = reportsMultiTokenPool(type)
   let back: SolanaLaneRemoteBack | undefined
   let multiTokenPoolSide
   if (readsLongData) {
-    const [{ GetMultiTokenPoolLane }, { readRemoteMultiTokenPoolSide }] = await Promise.all([
-      import('../../evm/pool-config-manager/operations/get-multi-token-pool-lane.ts'),
-      import('../../evm/pool-config-manager/guard-facts.ts'),
-    ])
     const sends = lane.poolDataFormat === 'long' && state?.ext?.uid ? state.ext.uid : '0x'
     const [view, side] = await Promise.all([
-      new GetMultiTokenPoolLane().query(remote, {
+      evm.getMultiTokenPoolLane(remote, {
         tokenAddress: remoteToken,
         remoteChainSelector: localSelector,
         poolAddress: registryPool,
       }),
-      readRemoteMultiTokenPoolSide(remote, registryPool, remoteToken, localSelector, sends),
+      evm.readRemoteMultiTokenPoolSide(remote, registryPool, remoteToken, localSelector, sends),
     ])
     multiTokenPoolSide = side
     if (view.exists && view.remoteToken !== null) {
@@ -347,10 +407,14 @@ export function evaluateSolanaLaneRemote(
   }
   if (side.registryPool === null) {
     // a token paused or stopped outbound whose remote side is not registered yet may wait
-    // (onboarding), as on EVM: remote stays `'missing'`, and `ok` may be true
+    // (onboarding), as on EVM: remote stays `'missing'`, and `ok` may be true. A stop holds sends
+    // only when the fast-finality outbound bucket (the lane's `ChainConfigOverride`) is disabled or
+    // stopped too, since an open fast bucket still sends; an inbound stop never waives
+    const fast = lane.rateLimits.fastFinalityOutbound
+    const fastHeld = !fast || isStop({ isEnabled: true, capacity: fast.capacity, rate: fast.rate })
     const waiting =
       (lane.outboundStatus.status === 'paused' && lane.outboundStatus.scope === 'token') ||
-      lane.stopped.outbound
+      (lane.stopped.outbound && fastHeld)
     if (!waiting)
       add(
         'NO_REMOTE_POOL',
@@ -757,11 +821,11 @@ export async function checkSolanaMultiTokenPoolLane(
             'warning',
             'the send lock budget was not measured: the lane has no CCIP 2.0 send path',
           )
-        else if (locks > SOLANA_ACCOUNT_LOCK_LIMIT)
+        else if (locks > SOLANA_MAX_ACCOUNT_LOCKS)
           add(
             'ACCOUNT_LOCKS_EXCEEDED',
             severity,
-            `a send of this token takes ${locks} account locks, above the ${SOLANA_ACCOUNT_LOCK_LIMIT} a transaction may take: the send cannot land`,
+            `a send of this token takes ${locks} account locks, above the ${SOLANA_MAX_ACCOUNT_LOCKS} a transaction may take: the send cannot land`,
           )
       } catch (err) {
         // the resolver's or the program's refusal is an answer; transport errors propagate

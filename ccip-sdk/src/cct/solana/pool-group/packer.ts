@@ -10,15 +10,19 @@
 import {
   type AccountInfo,
   type Connection,
+  type MessageV0,
   type TransactionInstruction,
   AddressLookupTableAccount,
   ComputeBudgetProgram,
+  Keypair,
+  PACKET_DATA_SIZE,
   PublicKey,
   SendTransactionError,
   SystemProgram,
   TransactionMessage,
   VersionedTransaction,
 } from '@solana/web3.js'
+import bs58 from 'bs58'
 
 import { ChainFamily } from '../../../networks.ts'
 import {
@@ -28,16 +32,17 @@ import {
 } from '../../../solana/compute-budget.ts'
 import type { Wallet } from '../../../solana/types.ts'
 import {
+  MAX_COMPUTE_UNIT_LIMIT,
   getInstructionError,
   getMultipleAccountsInfoPaged,
   isComputeBudgetError,
   isSimulationFailure,
-  simulateAndSendTxs,
   simulateTransaction,
 } from '../../../solana/utils.ts'
 import type { WithLogger } from '../../../types.ts'
-import { CCTParamsInvalidError } from '../../errors.ts'
+import { CCTParamsInvalidError, CCTTxFailedError } from '../../errors.ts'
 import type { SolanaDurableNonce } from '../serialize.ts'
+import { createCCTSubmitError } from '../submit.ts'
 import type {
   PoolGroupExecuteResult,
   PoolGroupRequiredSigner,
@@ -46,14 +51,18 @@ import type {
   SolanaTxBudget,
 } from './write-types.ts'
 
-/** The packet size a Solana transaction must fit. */
-export const SOLANA_PACKET_BYTES = 1_232
 /** The account locks a Solana transaction may take. */
 export const SOLANA_MAX_ACCOUNT_LOCKS = 64
 /** Bytes a wallet that prepends its own limit and price adds (`walletMayAddComputeBudget`). */
 export const WALLET_COMPUTE_BUDGET_RESERVE_BYTES = 52
-/** Bytes `vaultTransactionCreate` (and `batchAddTransaction`) add around the vault message. */
-export const SQUADS_MESSAGE_MARGIN_BYTES = 300
+/**
+ * Bytes the worst proposer transaction adds around a Squads-encoded vault message: a
+ * `batchAddTransaction` with a compute-unit limit and price and a rent payer other than the member
+ * (two signatures). Measured on the Squads v4 fork test (T1c): the outer transaction is this
+ * constant plus the Squads message, for any message over 114 B. `vaultTransactionCreate` adds 64 B
+ * less, so both fit.
+ */
+export const SQUADS_OUTER_BYTES = 500
 /**
  * Locks the Squads execute transaction adds: multisig, proposal, (batch,) transaction, member,
  * Squads program, ComputeBudget. The batch execute needs one more than `vaultTransactionExecute`;
@@ -68,8 +77,11 @@ export const DEFAULT_COMPUTE_UNIT_PRICE_FLOOR = 10_000
 export const SOLANA_HEAP_BYTES = 32 * 1024
 /** Instruction trace entries a transaction may take (top-level instructions and CPIs). */
 export const SOLANA_MAX_TRACE_ENTRIES = 64
-/** The CU a transaction may take. */
-const MAX_COMPUTE_UNITS = 1_400_000
+/**
+ * Trace entries the Squads execute transaction takes itself, ahead of the inner instructions (which
+ * run as its CPIs): `SetComputeUnitLimit`, `SetComputeUnitPrice` and the execute instruction.
+ */
+export const SQUADS_EXECUTE_TRACE_ENTRIES = 3
 
 /**
  * One item the packer places: the instructions of one lane or member, kept together and in order.
@@ -111,6 +123,7 @@ export type PackPoolGroupInput = {
 /** The limits a budget resolves to. */
 type Limits = {
   squads: boolean
+  /** Wallet: the transaction's bytes. Squads: the proposer transaction's (message + outer). */
   maxBytes: number
   maxLocks: number
   tables: AddressLookupTableAccount[]
@@ -173,6 +186,12 @@ async function resolveLimits(input: PackPoolGroupInput): Promise<Limits> {
       'durableNonces',
       'a Squads vault message cannot carry a nonce: AdvanceNonceAccount would not run as an inner instruction',
     )
+  if (budget.walletMayAddComputeBudget && input.durableNonces?.length)
+    throw new CCTParamsInvalidError(
+      operation,
+      'budget.walletMayAddComputeBudget',
+      'cannot go with durable nonces: a wallet that prepends its own compute budget moves AdvanceNonceAccount off instruction 0, and the transaction is then judged against a blockhash and fails',
+    )
   for (const name of ['maxBytes', 'maxAccountLocks'] as const) {
     const v = budget[name]
     if (v !== undefined && (!Number.isInteger(v) || v <= 0))
@@ -184,8 +203,7 @@ async function resolveLimits(input: PackPoolGroupInput): Promise<Limits> {
     budget.lookupTableAddresses ?? [],
   )
   const packet =
-    (budget.maxBytes ?? SOLANA_PACKET_BYTES) -
-    (squads ? SQUADS_MESSAGE_MARGIN_BYTES : 0) -
+    (budget.maxBytes ?? PACKET_DATA_SIZE) -
     (!squads && budget.walletMayAddComputeBudget ? WALLET_COMPUTE_BUDGET_RESERVE_BYTES : 0)
   const locks =
     (budget.maxAccountLocks ?? SOLANA_MAX_ACCOUNT_LOCKS) -
@@ -210,18 +228,52 @@ function prefix(limits: Limits, limit: number, price: number, nonce?: SolanaDura
   ]
 }
 
-/** Compiles the v0 message and measures it: serialized bytes and account locks. */
+/**
+ * The length of Squads v4's `TransactionMessage` encoding of a compiled vault message (what
+ * `vaultTransactionCreate` and `batchAddTransaction` carry): the 3 header counts, the keys (u8
+ * count), each instruction (program index, u8 account count and indexes, u16 data length and data)
+ * and each lookup (table, u8 counts and indexes). No signatures, version or blockhash.
+ * @internal
+ */
+export function squadsMessageBytes(message: MessageV0): number {
+  return (
+    3 +
+    1 +
+    32 * message.staticAccountKeys.length +
+    1 +
+    message.compiledInstructions.reduce(
+      (n, ix) => n + 1 + 1 + ix.accountKeyIndexes.length + 2 + ix.data.length,
+      0,
+    ) +
+    1 +
+    message.addressTableLookups.reduce(
+      (n, l) => n + 32 + 1 + l.writableIndexes.length + 1 + l.readonlyIndexes.length,
+      0,
+    )
+  )
+}
+
+/**
+ * Compiles the v0 message and measures it: account locks, and the serialized bytes, or with
+ * `squads` the bytes of the worst proposer transaction carrying it ({@link squadsMessageBytes} plus
+ * {@link SQUADS_OUTER_BYTES}).
+ * @internal
+ */
 export function measureTransaction(
   payer: PublicKey,
   instructions: TransactionInstruction[],
   tables: AddressLookupTableAccount[],
+  squads = false,
 ): { bytes: number; locks: number } {
   const message = new TransactionMessage({
     payerKey: payer,
     recentBlockhash: PublicKey.default.toBase58(),
     instructions,
   }).compileToV0Message(tables)
-  const bytes = new VersionedTransaction(message).serialize().length
+  // Squads: the proposer transaction around the vault message; else the transaction itself
+  const bytes = squads
+    ? squadsMessageBytes(message) + SQUADS_OUTER_BYTES
+    : new VersionedTransaction(message).serialize().length
   const locks =
     message.staticAccountKeys.length +
     message.addressTableLookups.reduce(
@@ -231,7 +283,11 @@ export function measureTransaction(
   return { bytes, locks }
 }
 
-/** Trace entries and heap of a chunk: top-level instructions, CPIs, PDA creations. */
+/**
+ * Trace entries and heap of a chunk: top-level instructions, CPIs, PDA creations. Each program
+ * invocation gets its own heap, and every item is its own instructions, so the heap that must fit is
+ * the largest item's, not the sum.
+ */
 function traceAndHeap(
   items: readonly PoolGroupPackItem[],
   prefunded: ReadonlySet<string>,
@@ -242,9 +298,38 @@ function traceAndHeap(
   for (const item of items) {
     trace += item.instructions.length + (item.cpis ?? 0)
     for (const pda of item.createdPdas ?? []) trace += prefunded.has(pda.toBase58()) ? 3 : 1
-    heap += item.heapBytes ?? 0
+    heap = Math.max(heap, item.heapBytes ?? 0)
   }
   return { trace, heap }
+}
+
+/**
+ * The nonce a chunk is measured with: a nonce account and an authority that are neither the payer
+ * nor any other key, the worst case of every nonce in the pool (one more signer, two more keys), so
+ * whichever nonce a transaction gets it still fits.
+ */
+const WORST_NONCE: SolanaDurableNonce = {
+  nonceAccount: Keypair.generate().publicKey.toBase58(),
+  nonceAuthority: Keypair.generate().publicKey.toBase58(),
+}
+
+/** Why an exact instruction list does not fit the bytes and locks, or `undefined`. */
+function sizeMisfit(
+  payer: PublicKey,
+  limits: Limits,
+  instructions: TransactionInstruction[],
+): string | undefined {
+  let measured
+  try {
+    measured = measureTransaction(payer, instructions, limits.tables, limits.squads)
+  } catch (err) {
+    // compileToV0Message refuses more than 256 accounts; serialize refuses an oversized message
+    return `the message does not compile (${err instanceof Error ? err.message : String(err)})`
+  }
+  if (measured.bytes > limits.maxBytes) return `${measured.bytes} bytes, above ${limits.maxBytes}`
+  if (measured.locks > limits.maxLocks)
+    return `${measured.locks} account locks, above ${limits.maxLocks}`
+  return undefined
 }
 
 /** Why a chunk does not fit, or `undefined` when it does. */
@@ -256,19 +341,17 @@ function misfit(
 ): string | undefined {
   if (input.maxItemsPerTransaction !== undefined && items.length > input.maxItemsPerTransaction)
     return `more than ${input.maxItemsPerTransaction} items`
-  const head = prefix(limits, MAX_COMPUTE_UNITS, 1, input.durableNonces?.[0])
-  const instructions = [...head, ...items.flatMap((i) => i.instructions)]
-  let measured
-  try {
-    measured = measureTransaction(input.payer, instructions, limits.tables)
-  } catch (err) {
-    // compileToV0Message refuses more than 256 accounts; serialize refuses an oversized message
-    return `the message does not compile (${err instanceof Error ? err.message : String(err)})`
-  }
-  if (measured.bytes > limits.maxBytes) return `${measured.bytes} bytes, above ${limits.maxBytes}`
-  if (measured.locks > limits.maxLocks)
-    return `${measured.locks} account locks, above ${limits.maxLocks}`
-  const { trace, heap } = traceAndHeap(items, prefunded, head.length)
+  const head = prefix(
+    limits,
+    MAX_COMPUTE_UNIT_LIMIT,
+    1,
+    input.durableNonces?.length ? WORST_NONCE : undefined,
+  )
+  const size = sizeMisfit(input.payer, limits, [...head, ...items.flatMap((i) => i.instructions)])
+  if (size) return size
+  // with Squads the items run as CPIs of the execute, which takes its own entries first
+  const own = limits.squads ? SQUADS_EXECUTE_TRACE_ENTRIES : head.length
+  const { trace, heap } = traceAndHeap(items, prefunded, own)
   if (trace > SOLANA_MAX_TRACE_ENTRIES)
     return `${trace} instruction trace entries, above ${SOLANA_MAX_TRACE_ENTRIES}`
   if (heap > SOLANA_HEAP_BYTES) return `${heap} heap bytes, above ${SOLANA_HEAP_BYTES}`
@@ -373,7 +456,7 @@ async function sizeBySimulation(
 ): Promise<{ items: PoolGroupPackItem[]; unitsConsumed: number }[]> {
   // simulation runs at price 0: the raised 1.4M limit is never charged
   const instructions = [
-    ...prefix(limits, MAX_COMPUTE_UNITS, 0, input.durableNonces?.[0]),
+    ...prefix(limits, MAX_COMPUTE_UNIT_LIMIT, 0, input.durableNonces?.[0]),
     ...items.flatMap((i) => i.instructions),
   ]
   try {
@@ -383,7 +466,7 @@ async function sizeBySimulation(
       addressLookupTableAccounts: limits.tables,
       allowV1: false,
     })
-    return [{ items, unitsConsumed: result.unitsConsumed ?? MAX_COMPUTE_UNITS }]
+    return [{ items, unitsConsumed: result.unitsConsumed ?? MAX_COMPUTE_UNIT_LIMIT }]
   } catch (err) {
     if (!isBatchTooHeavy(err)) throw err
     if (items.length === 1)
@@ -446,10 +529,18 @@ export async function packPoolGroupTransactions(
     ]
     const price = await priceFor(chain.connection, budget, writable)
     const nonce = nonces?.[i]
-    const limit = Math.min(MAX_COMPUTE_UNITS, Math.ceil(unitsConsumed * 1.1))
+    const limit = Math.min(MAX_COMPUTE_UNIT_LIMIT, Math.ceil(unitsConsumed * 1.1))
     const instructions = limits.squads ? body : [...prefix(limits, limit, price, nonce), ...body]
+    // the exact transaction, with its own nonce, limit and price: it must still fit
+    const over = sizeMisfit(payer, limits, instructions)
+    if (over)
+      throw new CCTParamsInvalidError(
+        input.operation,
+        'budget',
+        `transaction ${i} does not fit once its nonce and compute budget are placed: ${over}`,
+      )
     const outerLimit = Math.min(
-      MAX_COMPUTE_UNITS,
+      MAX_COMPUTE_UNIT_LIMIT,
       limit + SQUADS_EXECUTE_CU.base + SQUADS_EXECUTE_CU.perInstruction * body.length,
     )
     transactions.push({
@@ -484,6 +575,9 @@ export function hasComputeBudget(instructions: readonly TransactionInstruction[]
   )
 }
 
+/** How often the runner polls a signature whose send or confirmation failed in transport. */
+const SIGNATURE_POLL_MS = 2_000
+
 /** Input of {@link executePoolGroupTransactions}. @internal */
 export type ExecutePoolGroupInput = {
   /** The op, for errors. */
@@ -494,65 +588,176 @@ export type ExecutePoolGroupInput = {
   wallet: Wallet
   /**
    * Builds the remaining transactions from current chain state: items already done must not be in
-   * it. Called again after a transaction that may have landed failed to confirm.
+   * it. Called again only after a transaction is known not to have landed (its blockhash expired).
    */
   build: () => Promise<PoolGroupUnsignedResult>
-  /** Rebuilds allowed after unconfirmed transactions; defaults to 3. */
+  /** Rebuilds allowed after transactions that expired unlanded; defaults to 3. */
   maxRebuilds?: number
-  /** The sender; defaults to core `simulateAndSendTxs` (atomic). */
-  send?: typeof simulateAndSendTxs
+  /** Poll interval while a signature's fate is unknown; defaults to 2 s (tests set 0). */
+  pollMs?: number
+}
+
+/** What became of one sent transaction. */
+type SendOutcome = { landed: true; hash: string } | { landed: false; reason: string }
+
+/**
+ * Whether a signature landed, after a send or confirmation that failed in transport: polls
+ * `getSignatureStatuses` (with history) until the signature is found, or the block height passes
+ * the blockhash's `lastValidBlockHeight` with it still absent (then it can never land).
+ * @returns the status's `err` (`null`: success) when found, `undefined` when expired unlanded
+ */
+async function resolveSignature(
+  connection: Connection,
+  signature: string,
+  lastValidBlockHeight: number,
+  pollMs: number,
+): Promise<{ err: unknown } | undefined> {
+  for (;;) {
+    // read the height first: a signature absent at a height past expiry can no longer land
+    const height = await connection.getBlockHeight('confirmed')
+    const { value } = await connection.getSignatureStatuses([signature], {
+      searchTransactionHistory: true,
+    })
+    const status = value[0]
+    if (status && status.confirmationStatus !== 'processed') return { err: status.err ?? null }
+    if (!status && height > lastValidBlockHeight) return undefined
+    await new Promise((resolve) => setTimeout(resolve, pollMs))
+  }
 }
 
 /**
- * Signs and sends a pool-group write, transaction by transaction. A transaction the simulation
- * refuses was not sent: its error is thrown. A transaction that may have been sent but did not
- * confirm is never resent: the write re-reads chain state through `build` and sends what is left,
- * since `join_group`, `close_group_lanes`, `link_lanes` and `init_group_lanes` fail on a repeat.
- * @throws {@link CCTParamsInvalidError} if a transaction needs a signer other than the wallet, or
- *   carries a durable nonce (signed writes sign at once)
- * @throws the last error when the rebuilds run out
+ * Simulates, signs locally (the first signature is the transaction id, known before sending),
+ * sends and confirms one transaction. A transport failure of the send or the confirmation is
+ * resolved by the signature's status, never by a resend.
+ * @throws {@link CCTTxFailedError} if the simulation refuses it, or it landed and failed on chain
+ */
+async function sendOne(
+  input: ExecutePoolGroupInput,
+  tx: PoolGroupUnsignedTx,
+  committedHashes: readonly string[],
+): Promise<SendOutcome> {
+  const { operation, chain, wallet, pollMs = SIGNATURE_POLL_MS } = input
+  const { connection } = chain
+  const context = { committedHashes: [...committedHashes] }
+  try {
+    await simulateTransaction(chain, {
+      payerKey: wallet.publicKey,
+      instructions: tx.instructions,
+      addressLookupTableAccounts: tx.lookupTables ?? [],
+      allowV1: false,
+    })
+  } catch (err) {
+    // refused before sending: nothing landed, the write fails as it would on chain
+    throw createCCTSubmitError(operation, err, context)
+  }
+  const blockhash = await connection.getLatestBlockhash('confirmed')
+  const message = new TransactionMessage({
+    payerKey: wallet.publicKey,
+    recentBlockhash: blockhash.blockhash,
+    instructions: tx.instructions,
+  }).compileToV0Message(tx.lookupTables ?? [])
+  const signed = await wallet.signTransaction(new VersionedTransaction(message))
+  const signature = bs58.encode(signed.signatures[0]!)
+  let err: unknown
+  try {
+    // the simulation above ran the preflight; a duplicate send of these bytes is the same tx
+    await connection.sendRawTransaction(signed.serialize(), { skipPreflight: true })
+    const confirmation = await connection.confirmTransaction(
+      { signature, ...blockhash },
+      'confirmed',
+    )
+    err = confirmation.value.err
+  } catch (transport) {
+    chain.logger?.warn(
+      `${operation}: the send of ${signature} failed in transport (${transport instanceof Error ? transport.message : String(transport)}); waiting for its status`,
+    )
+    const found = await resolveSignature(
+      connection,
+      signature,
+      blockhash.lastValidBlockHeight,
+      pollMs,
+    )
+    if (!found) return { landed: false, reason: `${signature} expired without landing` }
+    err = found.err
+  }
+  if (err)
+    throw new CCTTxFailedError(operation, `transaction ${signature} failed on chain`, {
+      context: { ...context, txHash: signature, transactionError: err },
+    })
+  return { landed: true, hash: signature }
+}
+
+/**
+ * Refuses a build the wallet cannot send alone: a durable nonce, or a signer other than the wallet.
+ * Checked on the whole build before the first send.
+ * @throws {@link CCTParamsInvalidError} naming the transaction and the signer
+ */
+function assertWalletSendable(
+  operation: string,
+  wallet: Wallet,
+  transactions: readonly PoolGroupUnsignedTx[],
+  committedHashes: readonly string[],
+): void {
+  for (const [i, tx] of transactions.entries()) {
+    if (tx.durableNonce)
+      throw new CCTParamsInvalidError(
+        operation,
+        'durableNonces',
+        'a signed write signs at once: durable nonces exist only on generateUnsigned*',
+        { context: { committedHashes: [...committedHashes] } },
+      )
+    const other = tx.requiredSigners.find((s) => s.address !== wallet.publicKey.toBase58())
+    if (other)
+      throw new CCTParamsInvalidError(
+        operation,
+        'wallet',
+        `transaction ${i} also needs ${other.address} (${other.role}) to sign: use the generateUnsigned form and sign it with every signer`,
+        { context: { committedHashes: [...committedHashes] } },
+      )
+  }
+}
+
+/**
+ * Signs and sends a pool-group write, transaction by transaction. Each transaction is signed
+ * locally first, so its signature is known before it is sent. When a send or its confirmation fails
+ * in transport, the runner polls that signature until it is found (landed: counted, or thrown if it
+ * failed on chain) or its blockhash expires unlanded; only then does it re-read chain state through
+ * `build` and send what is left. A transaction that may still land is never followed by a rebuild,
+ * so no write is applied twice.
+ * @throws {@link CCTParamsInvalidError} if any transaction of a build needs a signer other than the
+ *   wallet, or carries a durable nonce (checked before the first send of that build)
+ * @throws {@link CCTTxFailedError} if a simulation refuses a transaction, a transaction failed on
+ *   chain, or the rebuilds run out; `context.committedHashes` lists the transactions that landed
  * @internal
  */
 export async function executePoolGroupTransactions(
   input: ExecutePoolGroupInput,
 ): Promise<PoolGroupExecuteResult> {
-  const { operation, chain, wallet, maxRebuilds = 3, send = simulateAndSendTxs } = input
+  const { operation, wallet, maxRebuilds = 3 } = input
   const landed: PoolGroupExecuteResult['transactions'] = []
-  let result: PoolGroupUnsignedResult | undefined
-  let lastError: unknown
+  const hashes = () => landed.map((t) => t.hash)
+  let lastReason = ''
   for (let round = 0; round <= maxRebuilds; round++) {
-    result = await input.build()
-    let interrupted = false
+    const result = await input.build()
+    assertWalletSendable(operation, wallet, result.transactions, hashes())
+    let expired = false
     for (const tx of result.transactions) {
-      if (tx.durableNonce)
-        throw new CCTParamsInvalidError(
-          operation,
-          'durableNonces',
-          'a signed write signs at once: durable nonces exist only on generateUnsigned*',
-        )
-      const other = tx.requiredSigners.find((s) => s.address !== wallet.publicKey.toBase58())
-      if (other)
-        throw new CCTParamsInvalidError(
-          operation,
-          'wallet',
-          `the transaction also needs ${other.address} (${other.role}) to sign: use the generateUnsigned form and sign it with every signer`,
-        )
-      try {
-        const { hash } = await send(chain, wallet, tx, { split: 'atomic' })
-        landed.push({ hash, tokenAddresses: tx.tokenAddresses })
-      } catch (err) {
-        // refused before sending: nothing landed, the write fails as it would on chain
-        if (isSimulationFailure(err)) throw err
-        // it may have landed: never resend it; rebuild the rest from chain state
-        lastError = err
-        interrupted = true
+      const outcome = await sendOne(input, tx, hashes())
+      if (!outcome.landed) {
+        lastReason = outcome.reason
+        expired = true
         break
       }
+      landed.push({ hash: outcome.hash, tokenAddresses: tx.tokenAddresses })
     }
-    if (!interrupted) {
+    if (!expired) {
       const { transactions: _t, noncesUsed: _n, ...rest } = result
       return { ...rest, transactions: landed }
     }
   }
-  throw lastError
+  throw new CCTTxFailedError(
+    operation,
+    `transactions kept expiring without landing (${lastReason}) after ${maxRebuilds} rebuilds`,
+    { isTransient: true, context: { committedHashes: hashes() } },
+  )
 }

@@ -595,12 +595,27 @@ export type GetPoolGroupRequiredCCVsResult = {
 export type CheckPoolGroupSnapshotParams = PoolGroupRef & {
   /** The snapshot a pool-group op returned with the proposal. */
   snapshot: MultiTokenPoolSnapshot
-  /**
-   * The proposal's transaction, so the instruction hash bound into the snapshot is checked (mirrors
-   * EVM's `transaction`). Compute-budget and nonce instructions are not part of the hash.
-   */
-  transaction: UnsignedSolanaTx
-}
+} & (
+    | {
+        /**
+         * The proposal's transaction, so the instruction hash bound into the snapshot is checked
+         * (mirrors EVM's `transaction`). Compute-budget and nonce instructions are not part of the
+         * hash.
+         */
+        transaction: Pick<UnsignedSolanaTx, 'instructions'>
+        /** Not with `transaction`. */
+        transactions?: never
+      }
+    | {
+        /**
+         * Every transaction of a multi-transaction write (or Squads batch step), in order: the
+         * snapshot binds them as one ordered set.
+         */
+        transactions: Pick<UnsignedSolanaTx, 'instructions'>[]
+        /** Not with `transactions`. */
+        transaction?: never
+      }
+  )
 /** Params of `getTokenPoolGlobalConfig`. */
 export type GetTokenPoolGlobalConfigParams = PoolGroupProgramRef
 /** Result of `getTokenPoolGlobalConfig`: the deployment's defaults. */

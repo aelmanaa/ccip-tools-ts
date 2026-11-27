@@ -19,6 +19,7 @@ import { BN } from '@coral-xyz/anchor'
 import {
   Keypair,
   LAMPORTS_PER_SOL,
+  PACKET_DATA_SIZE,
   PublicKey,
   SystemProgram,
   TransactionInstruction,
@@ -40,11 +41,11 @@ import { poolGroupPdas } from './accounts.ts'
 import { GetPoolGroup } from './operations/index.ts'
 import {
   SOLANA_MAX_ACCOUNT_LOCKS,
-  SOLANA_PACKET_BYTES,
   SQUADS_EXECUTE_LOCKS,
-  SQUADS_MESSAGE_MARGIN_BYTES,
+  SQUADS_OUTER_BYTES,
   measureTransaction,
   packPoolGroupTransactions,
+  squadsMessageBytes,
 } from './packer.ts'
 import { createPoolGroupProgram } from './program.ts'
 import { SquadsHarness, squadsTransactionMessage } from './squads.test.helpers.ts'
@@ -145,14 +146,14 @@ describe(
       const message = squadsTransactionMessage(squads.vault, tx.instructions, tx.lookupTables).bytes
       console.log('squads margins', { inner, messageBytes: message.length, create, execute })
       assert.ok(
-        create.bytes - inner.bytes <= SQUADS_MESSAGE_MARGIN_BYTES,
-        `create adds ${create.bytes - inner.bytes} B`,
+        create.bytes - squadsMessage(tx) <= SQUADS_OUTER_BYTES,
+        `create adds ${create.bytes - squadsMessage(tx)} B`,
       )
       assert.ok(
         execute.locks - inner.locks <= SQUADS_EXECUTE_LOCKS,
         `execute adds ${execute.locks - inner.locks} locks`,
       )
-      assert.ok(create.bytes <= SOLANA_PACKET_BYTES && execute.locks <= SOLANA_MAX_ACCOUNT_LOCKS)
+      assert.ok(create.bytes <= PACKET_DATA_SIZE && execute.locks <= SOLANA_MAX_ACCOUNT_LOCKS)
     })
 
     it('a batch of ready steps: toPoolGroupSquadsBatch, one approval round, every step executed', async () => {
@@ -184,7 +185,98 @@ describe(
       const add = squads.sizes.get('batchAddTransaction')!
       const execute = squads.sizes.get('batchExecuteTransaction')!
       console.log('squads batch margins', { add, execute })
-      assert.ok(add.bytes <= SOLANA_PACKET_BYTES && execute.locks <= SOLANA_MAX_ACCOUNT_LOCKS)
+      assert.ok(add.bytes <= PACKET_DATA_SIZE && execute.locks <= SOLANA_MAX_ACCOUNT_LOCKS)
+    })
+
+    /** The Squads message of a vault transaction, checked against the packer's computed length. */
+    function squadsMessage(tx: ReturnType<typeof toPoolGroupSquadsTransaction>) {
+      const { bytes, message } = squadsTransactionMessage(
+        squads.vault,
+        tx.instructions,
+        tx.lookupTables,
+      )
+      assert.equal(squadsMessageBytes(message), bytes.length)
+      return bytes.length
+    }
+
+    /** The largest item the packer accepts for Squads (a create_group plus a memo), and one byte more. */
+    async function packedMaximum() {
+      const MEMO = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr')
+      const memo = (n: number) =>
+        new TransactionInstruction({ programId: MEMO, keys: [], data: Buffer.alloc(n, 0x61) })
+      const { group, item } = await createGroupItem()
+      const packWith = (n: number) =>
+        packPoolGroupTransactions({
+          operation: 'test',
+          chain,
+          payer: squads.vault,
+          items: [{ ...item, instructions: [...item.instructions, memo(n)] }],
+          budget: { executor: 'squads-v4' },
+        })
+      let [lo, hi] = [0, 1_000]
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2)
+        const fits = await packWith(mid).then(
+          () => true,
+          (err: unknown) => {
+            if (err instanceof CCTParamsInvalidError) return false
+            throw err
+          },
+        )
+        if (fits) lo = mid
+        else hi = mid - 1
+      }
+      return { group, packWith, lo }
+    }
+
+    it('the worst proposer transaction at the computed maximum: limit, price and a separate rent payer', async () => {
+      const rentPayer = Keypair.generate()
+      const sig = await fork.connection!.requestAirdrop(rentPayer.publicKey, 10 * LAMPORTS_PER_SOL)
+      await fork.connection!.confirmTransaction(sig)
+      const worst = { computeUnitPrice: 10_000, rentPayer }
+      // one vault transaction
+      {
+        const { group, packWith, lo } = await packedMaximum()
+        const tx = toPoolGroupSquadsTransaction(
+          (await packWith(lo)).transactions[0]!,
+          squads.vault.toBase58(),
+        )
+        const inner = measureTransaction(squads.vault, tx.instructions, tx.lookupTables)
+        const index = await squads.propose(m1, tx, worst).catch((err: unknown) => {
+          console.log('worst create', { inner, create: squads.sizes.get('vaultTransactionCreate') })
+          throw err
+        })
+        const create = squads.sizes.get('vaultTransactionCreate')!
+        const message = squadsMessage(tx)
+        console.log('worst create', { inner, message, create, outer: create.bytes - message })
+        assert.ok(create.bytes <= PACKET_DATA_SIZE, `create ${create.bytes} B`)
+        assert.ok(create.bytes - message <= SQUADS_OUTER_BYTES)
+        await squads.approve(index, m1, m2)
+        await squads.execute(m3, index, tx)
+        assert.equal(await ownerOf(group), squads.vault.toBase58())
+      }
+      // one batch transaction
+      {
+        const { group, packWith, lo } = await packedMaximum()
+        const tx = toPoolGroupSquadsTransaction(
+          (await packWith(lo)).transactions[0]!,
+          squads.vault.toBase58(),
+        )
+        const inner = measureTransaction(squads.vault, tx.instructions, tx.lookupTables)
+        const index = await squads.proposeBatch(m1, [tx], worst).catch((err: unknown) => {
+          console.log('worst batch add', { inner, add: squads.sizes.get('batchAddTransaction') })
+          throw err
+        })
+        const add = squads.sizes.get('batchAddTransaction')!
+        const message = squadsMessage(tx)
+        console.log('worst batch add', { inner, message, add, outer: add.bytes - message })
+        // the packer's maximum fills the worst batch add exactly
+        assert.equal(add.bytes, PACKET_DATA_SIZE)
+        assert.equal(add.bytes - message, SQUADS_OUTER_BYTES)
+        await squads.approve(index, m2, m3)
+        await squads.executeBatch(m1, index, [tx])
+        assert.equal(await ownerOf(group), squads.vault.toBase58())
+      }
     })
 
     it('the computed maximum proposes and executes; one byte more is refused by the packer', async () => {
@@ -218,7 +310,7 @@ describe(
       const { transactions } = await packWith(lo)
       const tx = toPoolGroupSquadsTransaction(transactions[0]!, squads.vault.toBase58())
       const inner = measureTransaction(squads.vault, tx.instructions, tx.lookupTables)
-      assert.equal(inner.bytes, SOLANA_PACKET_BYTES - SQUADS_MESSAGE_MARGIN_BYTES)
+      assert.equal(squadsMessage(tx) + SQUADS_OUTER_BYTES, PACKET_DATA_SIZE)
       const index = await squads.propose(m1, tx)
       await squads.approve(index, m1, m2)
       await squads.execute(m3, index, tx)

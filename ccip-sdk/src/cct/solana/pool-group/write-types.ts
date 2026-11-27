@@ -25,10 +25,12 @@ export type SolanaExecutor = 'wallet' | 'squads-v4'
 export type SolanaTxBudget = {
   /**
    * `'wallet'` (default): 1,232 B, 64 locks, compute-budget instructions inside the transaction.
-   * `'squads-v4'`: the vault message must fit `vaultTransactionCreate` (or `batchAddTransaction`)
-   * and its execute transaction: 300 B are reserved, and 7 locks (multisig, proposal, batch,
-   * transaction, member, Squads program, ComputeBudget) plus 1 per lookup table; no compute-budget
-   * or nonce instruction goes inside (they would not run as inner instructions); the CU estimate adds
+   * `'squads-v4'`: the vault message must fit the worst proposer transaction and its execute: the
+   * Squads encoding of the message plus 500 B must fit 1,232 B (a `batchAddTransaction` with a
+   * compute-unit limit and price and a separate rent payer, measured by the Squads fork test), and 7
+   * locks (multisig, proposal, batch, transaction, member, Squads program, ComputeBudget) plus 1 per
+   * lookup table are reserved, as are the execute's own 3 trace entries; no compute-budget or nonce
+   * instruction goes inside (they would not run as inner instructions); the CU estimate adds
    * Squads' execute overhead (25,000 + 5,000 per inner instruction). Read-then-write ops merge
    * exactly as on the wallet path and return the snapshot.
    */
@@ -205,8 +207,14 @@ export type PoolGroupSquadsTransaction = {
   requiredSigners: PoolGroupRequiredSigner[]
   /** The mints the transaction covers. */
   tokenAddresses: string[]
-  /** The op's snapshot; store it next to the proposal and run `checkPoolGroupSnapshot` before execution. */
+  /**
+   * The op's snapshot; store it next to the proposal and run `checkPoolGroupSnapshot` before
+   * execution. A multi-transaction step's snapshot binds all its transactions in order: pass every
+   * transaction with the same `stepId` as `transactions`.
+   */
   snapshot?: MultiTokenPoolSnapshot
+  /** The ready step this transaction belongs to, in a batch from `toPoolGroupSquadsBatch`. */
+  stepId?: string
 }
 
 /** A ready step to batch into Squads proposals: its id and its transactions, in order. */

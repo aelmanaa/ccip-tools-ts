@@ -35,6 +35,9 @@ function otherSigner(unsigned: PoolGroupUnsignedTx, vault: string): string | und
 function squadsRefusal(unsigned: PoolGroupUnsignedTx, vault: string): string | undefined {
   if (unsigned.outerInstructions === undefined || hasComputeBudget(unsigned.instructions))
     return "it was not built for Squads: build it with budget.executor 'squads-v4'"
+  const payer = unsigned.requiredSigners.find((s) => s.role === 'payer')?.address
+  if (payer !== vault)
+    return `it was built with payer ${payer ?? 'none'}, not the vault: build it with payer set to the vault, which pays inner rent`
   if (unsigned.durableNonce)
     return 'it carries a durable nonce, which a vault message cannot advance'
   const other = otherSigner(unsigned, vault)
@@ -50,9 +53,10 @@ function squadsRefusal(unsigned: PoolGroupUnsignedTx, vault: string): string | u
  * @param unsigned - A transaction of a pool-group op, built with `budget.executor: 'squads-v4'`.
  * @param vault - The Squads vault (the transaction's payer and only inner signer).
  * @param snapshot - The op's snapshot, to store with the proposal.
+ * @param stepId - The ready step it belongs to (set by `toPoolGroupSquadsBatch`).
  * @returns The Squads transaction data.
- * @throws {@link CCTParamsInvalidError} if the transaction was not built for `'squads-v4'`, carries a
- *   nonce, or any inner instruction has a signer other than the vault (a crank or lookup-table payer,
+ * @throws {@link CCTParamsInvalidError} if the transaction was not built for `'squads-v4'` with the
+ *   vault as payer, carries a nonce, or any inner instruction has a signer other than the vault (a crank or lookup-table payer,
  *   a second vault)
  * @example
  * ```ts
@@ -65,6 +69,7 @@ export function toPoolGroupSquadsTransaction(
   unsigned: PoolGroupUnsignedTx,
   vault: string,
   snapshot?: MultiTokenPoolSnapshot,
+  stepId?: string,
 ): PoolGroupSquadsTransaction {
   let vaultKey
   try {
@@ -84,6 +89,7 @@ export function toPoolGroupSquadsTransaction(
     requiredSigners: [{ address: vaultKey, role: 'payer' }],
     tokenAddresses: unsigned.tokenAddresses,
     ...(snapshot && { snapshot }),
+    ...(stepId !== undefined && { stepId }),
   }
 }
 
@@ -146,7 +152,7 @@ export function toPoolGroupSquadsBatch(
     const snapshot = params.snapshots?.[step.id]
     current.stepIds.push(step.id)
     current.transactions.push(
-      ...step.transactions.map((tx) => toPoolGroupSquadsTransaction(tx, vault, snapshot)),
+      ...step.transactions.map((tx) => toPoolGroupSquadsTransaction(tx, vault, snapshot, step.id)),
     )
   }
   return {

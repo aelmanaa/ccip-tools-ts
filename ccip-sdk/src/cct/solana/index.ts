@@ -3493,10 +3493,10 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   /**
    * Re-reads the values a snapshot recorded and reports which moved.
    * @remarks Run it right before a Squads proposal executes; the program cannot compare on chain.
-   * `transaction` is the proposal's: its instructions (compute budget and nonce aside) must hash to
-   * the snapshot's `calldataHash`. The snapshot's op then re-reads its state and re-runs its guard;
-   * no Solana op builds snapshots yet, so every snapshot is refused until the first pool-group write
-   * op registers its re-check.
+   * `transaction` is the proposal's (or `transactions`, every transaction of a multi-transaction
+   * write or Squads batch step, in order): their instructions (compute budget and nonce aside) must
+   * hash to the snapshot's `calldataHash`. The snapshot's op then re-reads its state and re-runs its
+   * guard on those exact transactions.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the snapshot covers
    *   other instructions, or it was not built by a Solana pool-group op
    * @throws {@link CCTDataDecodeError} if an account cannot be decoded

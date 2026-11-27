@@ -1,6 +1,6 @@
 /**
  * The instruction hash a pool-group snapshot binds (`MultiTokenPoolSnapshot.calldataHash` on
- * Solana): keccak256 over the transaction's instructions without compute budget or nonce
+ * Solana): keccak256 over the transactions' instructions without compute-budget or nonce
  * instructions, which the executor (wallet, Squads) adds or moves.
  *
  * @packageDocumentation
@@ -8,22 +8,14 @@
 
 import { Buffer } from 'buffer'
 
-import { type TransactionInstruction, SystemProgram } from '@solana/web3.js'
-import { keccak256 } from 'ethers'
+import { type TransactionInstruction, ComputeBudgetProgram } from '@solana/web3.js'
+import { concat, keccak256 } from 'ethers'
 
-import { isComputeBudgetInstruction } from '../../../solana/compute-budget.ts'
+import { isAdvanceNonceInstruction } from '../serialize.ts'
 
-/** `SystemProgram` instruction index of `AdvanceNonceAccount` (u32 little-endian). */
-const ADVANCE_NONCE = 4
-
-/** Whether an instruction is the executor's: a compute-budget limit/price/heap, or a nonce advance. */
+/** Whether an instruction is the executor's: any compute-budget instruction, or a nonce advance. */
 function isExecutorInstruction(ix: TransactionInstruction): boolean {
-  if ([1, 2, 3].some((tag) => isComputeBudgetInstruction(ix, tag))) return true
-  return (
-    ix.programId.equals(SystemProgram.programId) &&
-    ix.data.length >= 4 &&
-    ix.data.readUInt32LE(0) === ADVANCE_NONCE
-  )
+  return ix.programId.equals(ComputeBudgetProgram.programId) || isAdvanceNonceInstruction(ix)
 }
 
 /**
@@ -55,4 +47,19 @@ export function poolGroupInstructionsHash(instructions: readonly TransactionInst
     )
   }
   return keccak256(Buffer.concat(parts))
+}
+
+/**
+ * The hash a snapshot binds for the ordered transactions of one write: the instruction hash of a
+ * single transaction, else keccak256 over each transaction's instruction hash, in order. A
+ * multi-transaction step is therefore checked as its whole ordered set.
+ * @param transactions - The write's transactions, in order.
+ * @returns The `0x` hash.
+ * @internal
+ */
+export function poolGroupTransactionsHash(
+  transactions: readonly { instructions: readonly TransactionInstruction[] }[],
+): string {
+  const hashes = transactions.map((tx) => poolGroupInstructionsHash(tx.instructions))
+  return hashes.length === 1 ? hashes[0]! : keccak256(concat(hashes))
 }

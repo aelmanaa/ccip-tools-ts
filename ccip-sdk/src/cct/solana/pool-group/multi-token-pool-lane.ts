@@ -61,6 +61,7 @@ import {
   type SolanaRemoteLanePool,
   laneRemotePools,
   poolState,
+  readRegistry,
   registryOf,
 } from './remote-lane.ts'
 
@@ -316,15 +317,24 @@ export async function readSolanaMultiTokenPoolLane(
 
 // ─── The transfer quote ──────────────────────────────────────────────────────────────────────
 
-/** `InvalidRequestedFinality` of the base token pool errors. */
-const INVALID_REQUESTED_FINALITY = 6028
+/** `InvalidRequestedFinality` of the base token pool errors, by name and number. */
+const INVALID_REQUESTED_FINALITY = { code: 'InvalidRequestedFinality', number: 6028 } as const
 
-/** The custom program error code of a refused view, however anchor or core reported it. */
-function viewErrorCode(err: unknown): number | undefined {
-  if (err instanceof AnchorError) return err.error.errorCode.number
-  if (err instanceof ProgramError) return err.code
-  return customInstructionErrorCode(err)
+/**
+ * Whether a refused `get_pool_fee` view is the pool's `InvalidRequestedFinality`: by the error's
+ * name when anchor decoded it, else by its number. Every program's error enum starts at 6000, so the
+ * number alone is only read where it can come from the pool: the view is the only instruction and
+ * makes no CPI.
+ */
+function isInvalidRequestedFinality(err: unknown): boolean {
+  if (err instanceof AnchorError)
+    return err.error.errorCode.code === INVALID_REQUESTED_FINALITY.code
+  if (err instanceof ProgramError) return err.code === INVALID_REQUESTED_FINALITY.number
+  return customInstructionErrorCode(err) === INVALID_REQUESTED_FINALITY.number
 }
+
+/** Bytes of `FallbackTokenTransferFeeV2`: three `u32`s. */
+const FALLBACK_FEE_BYTES = 12
 
 /**
  * The FeeQuoter fallback the router charges for a token transfer when the pool has no enabled fee
@@ -365,13 +375,23 @@ async function readFeeQuoterFallback(
   } catch (err) {
     return simulationRefused(operation, err, 'get_fallback_token_transfer_fee_v2')
   }
+  // the runtime records return data without its trailing zero bytes (and none at all when every
+  // byte is zero), so the struct is padded back to its length
   const ret = result.returnData
-  const bytes =
-    ret?.programId === feeQuoter.toBase58() ? Buffer.from(ret.data[0], 'base64') : Buffer.alloc(0)
-  if (bytes.length < 12)
+  if (ret && ret.programId !== feeQuoter.toBase58())
     throw new CCTDataDecodeError(feeQuoter.toBase58(), {
-      context: { reason: 'get_fallback_token_transfer_fee_v2 returned no fee' },
+      context: {
+        reason: `get_fallback_token_transfer_fee_v2 returned data from ${ret.programId}, not the FeeQuoter`,
+      },
     })
+  const raw = ret ? Buffer.from(ret.data[0], 'base64') : Buffer.alloc(0)
+  if (raw.length > FALLBACK_FEE_BYTES)
+    throw new CCTDataDecodeError(feeQuoter.toBase58(), {
+      context: {
+        reason: `get_fallback_token_transfer_fee_v2 returned ${raw.length} bytes, not 12`,
+      },
+    })
+  const bytes = Buffer.concat([raw, Buffer.alloc(FALLBACK_FEE_BYTES - raw.length)])
   // FallbackTokenTransferFeeV2 { flat_fee: u32 cents, dest_gas_limit: u32, dest_bytes_overhead: u32 }
   return {
     flatFee: bytes.readUInt32LE(0),
@@ -388,10 +408,11 @@ const GET_FALLBACK_TOKEN_TRANSFER_FEE_V2 = Buffer.from(
 /**
  * Quotes a transfer by simulating `get_pool_fee` with the lane's group and named records, the way
  * the router forwards them.
- * @remarks Without an enabled pool fee record the router charges the FeeQuoter fallback: the
- *   quote then has `hasFeeRecord: false` and the fallback's fee and overheads, with no token fee.
- * @throws {@link CCTParamsInvalidError} if the lane does not exist, the lane does not allow the
- *   requested finality, or it sends long data without a fee record covering it (a send would revert)
+ * @remarks Without an enabled pool fee record, or on a token registered on pool interface 1 (where
+ *   the router never asks the pool), the router charges the FeeQuoter fallback: the quote then has
+ *   `hasFeeRecord: false` and the fallback's fee and overheads, with no token fee.
+ * @throws {@link CCTParamsInvalidError} if the lane does not exist, the mint is not registered, a
+ *   marked lane is served on interface 1, the lane does not allow the requested finality, or it sends long data without a fee record covering it (a send would revert)
  * @throws {@link CCTOperationUnsupportedError} if the program refuses the simulation otherwise
  * @internal
  */
@@ -411,6 +432,38 @@ export async function quoteSolanaMultiTokenPoolTransfer(
     )
   const where = `the lane of ${mint.toBase58()} toward ${selector}`
   const state = orThrow(read, where)
+  // the router picks the token pool interface from the registry: on interface 1 it never consults
+  // the pool's fee and always charges the FeeQuoter fallback (`TokenTransferContext::new`, Legacy)
+  const pool = await readPoolState(operation, chain, program, mint)
+  const router = await registryOf(chain, pool.state.router)
+  if (isUnread(router))
+    throw new CCTDataDecodeError(pool.state.router.toBase58(), {
+      context: { reason: router.reason },
+    })
+  const registry = await readRegistry(chain, router, mint)
+  if (isUnread(registry))
+    throw new CCTParamsInvalidError(operation, 'tokenAddress', registry.reason)
+  const fallbackQuote = async (): Promise<MultiTokenPoolTransferQuote> => {
+    const fallback = await readFeeQuoterFallback(operation, chain, router, selector, mint)
+    return {
+      feeUSDCents: BigInt(fallback.flatFee),
+      destGasOverhead: fallback.destGasOverhead,
+      destBytesOverhead: fallback.destBytesOverhead,
+      tokenFeeBps: 0,
+      feeDeducted: 0n,
+      netAmount: params.amount,
+      hasFeeRecord: false,
+    }
+  }
+  if (registry.interfaceVersion === 1) {
+    if (state.kind !== 'standard')
+      throw new CCTParamsInvalidError(
+        operation,
+        'tokenAddress',
+        `the registry serves ${mint.toBase58()} on pool interface 1, where a ${state.kind} lane refuses every transfer: set interface 2`,
+      )
+    return fallbackQuote()
+  }
   const finality = encodeFinality(params.finality ?? 'finalized')
   const remaining = [
     ...(state.groupChain ? [state.groupChain.address] : []),
@@ -435,7 +488,7 @@ export async function quoteSolanaMultiTokenPoolTransfer(
       .remainingAccounts(remaining)
       .view()
   } catch (err) {
-    if (viewErrorCode(err) === INVALID_REQUESTED_FINALITY)
+    if (isInvalidRequestedFinality(err))
       throw new CCTParamsInvalidError(
         operation,
         'finality',
@@ -454,25 +507,8 @@ export async function quoteSolanaMultiTokenPoolTransfer(
         `the lane of ${mint.toBase58()} to ${selector} sends long pool data ${fee.isEnabled ? `with destBytesOverhead ${fee.destBytesOverhead}, below ${needed}` : 'without a fee record'}, so a send would revert (LongPoolDataNeedsDestBytesOverhead): set an enabled fee record covering ${needed} bytes`,
       )
   }
-  if (!fee.isEnabled) {
-    // the router charges the FeeQuoter fallback; the pool takes no basis-point fee
-    const pool = await readPoolState(operation, chain, program, mint)
-    const router = await registryOf(chain, pool.state.router)
-    if (isUnread(router))
-      throw new CCTDataDecodeError(pool.state.router.toBase58(), {
-        context: { reason: router.reason },
-      })
-    const fallback = await readFeeQuoterFallback(operation, chain, router, selector, mint)
-    return {
-      feeUSDCents: BigInt(fallback.flatFee),
-      destGasOverhead: fallback.destGasOverhead,
-      destBytesOverhead: fallback.destBytesOverhead,
-      tokenFeeBps: 0,
-      feeDeducted: 0n,
-      netAmount: params.amount,
-      hasFeeRecord: false,
-    }
-  }
+  // the router charges the FeeQuoter fallback; the pool takes no basis-point fee
+  if (!fee.isEnabled) return fallbackQuote()
   const feeDeducted = bpsFeeDeducted(params.amount, fee.tokenFeeBps)
   return {
     feeUSDCents: BigInt(fee.fee),
