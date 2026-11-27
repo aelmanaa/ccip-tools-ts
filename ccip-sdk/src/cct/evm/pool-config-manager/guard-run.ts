@@ -324,9 +324,7 @@ export async function runMultiTokenPoolGuards(
     ? await crossCheckWithSimulateV1(chain, input, bundle, afterLanes, blockNumber)
     : false
 
-  // the chain's other lanes feed only the lane rules: a write that judges nothing (a pause, a stop,
-  // a clamp) seals just its own lanes, so an unrelated edit on the chain never makes it stale
-  const guardInputsHash = hashGuardInputs(lanes, judge ? chainLanes : [], facts)
+  const guardInputsHash = guardInputsHashOf(judge, lanes, chainLanes, facts)
   // the thresholds and confirmations the write was judged with travel in the snapshot, under its
   // hash, so a re-check of the proposal applies the same ones
   const expected = {
@@ -504,6 +502,22 @@ function profileLanes(
 }
 
 /** Every input the rules read, canonically hashed: equal when nothing they read has moved. */
+/**
+ * The hash of every input the guard judged on. The chain's other lanes feed only the lane rules
+ * (F3's shared remote tokens, for one), so a judged write seals them; a write that judges nothing (a
+ * pause, a stop, a clamp) seals just its own lanes, so an unrelated edit on the chain never makes it
+ * stale.
+ * @internal
+ */
+export function guardInputsHashOf(
+  judge: boolean,
+  lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
+  chainLanes: readonly ProjectedMultiTokenPoolLane[],
+  facts: MultiTokenPoolGuardFacts,
+): string {
+  return hashGuardInputs(lanes, judge ? chainLanes : [], facts)
+}
+
 function hashGuardInputs(
   lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
   chainLanes: readonly ProjectedMultiTokenPoolLane[],

@@ -10,11 +10,17 @@ import { ChainFamily } from '../../../networks.ts'
 import type {
   MultiTokenPoolExpectedSnapshot,
   MultiTokenPoolRemoteCheckOptions,
+  MultiTokenPoolSnapshot,
+  MultiTokenPoolSnapshotCheck,
 } from '../../multi-token-pool.ts'
 import {
+  type MultiTokenPoolSingleFunctionOperation,
   type MultiTokenPoolVersion,
   type PoolConfigManagerRole,
+  POOL_CONFIG_MANAGER_TYPE,
   assertPoolConfigManagerRole,
+  getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
 } from '../multi-token-pool/contracts.ts'
 import {
   type MultiTokenPoolUnsignedTx,
@@ -26,7 +32,7 @@ import {
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from './contracts.ts'
-import { runMultiTokenPoolGuards } from './guard-run.ts'
+import { runMultiTokenPoolGuards, snapshotChanges } from './guard-run.ts'
 import {
   type MultiTokenPoolRecordStateRead,
   readMultiTokenPoolRecordState,
@@ -40,8 +46,12 @@ export type {
   MultiTokenPoolWriteImpact,
 } from '../multi-token-pool/write-operation.ts'
 export type { MultiTokenPoolGuardOptions } from './guards.ts'
+import type { Result } from 'ethers'
+
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
+import { CCTDataDecodeError, CCTParamsInvalidError } from '../../errors.ts'
 import { latestBlock } from '../mined-block.ts'
+import { NO_RECORD_CHANGE_FUNCTIONS } from './calldata.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
 /** Common fields of every PoolConfigManager write. */
@@ -72,6 +82,8 @@ export type PoolConfigManagerWriteContext = Pick<
   MultiTokenPoolRecordStateRead,
   'state' | 'staticConfig' | 'policyNames' | 'rateLimitPolicyDecimals'
 > & {
+  /** A record-free write's facts ({@link PoolConfigManagerWriteOperation.readFacts}); `{}` otherwise. */
+  facts: PoolConfigManagerFacts
   /** The PCM. */
   address: string
   /** Its version. */
@@ -79,6 +91,12 @@ export type PoolConfigManagerWriteContext = Pick<
   /** The block every read is pinned to. */
   blockTag: number
 }
+
+/**
+ * What a record-free write is judged on: the chain facts it reads and seals (role membership, the
+ * admin state, the balances it moves), by dotted path. @internal
+ */
+export type PoolConfigManagerFacts = Record<string, unknown>
 
 /** What an op encodes: the PCM calldata, and the values it keeps, merges or replaces. @internal */
 export type PoolConfigManagerWrite = {
@@ -114,6 +132,107 @@ export abstract class PoolConfigManagerWriteOperation<
    */
   protected changesRecords(): boolean {
     return true
+  }
+
+  /**
+   * The chain facts a record-free write is judged on, read at `ctx.blockTag`. No lane covers them, so
+   * they are sealed into the snapshot, and the snapshot check re-reads them through this same method
+   * ({@link recheck}): a record-free op seals at least one, and its `encode` judges on
+   * `ctx.facts`, never on a second read.
+   */
+  protected readFacts(
+    _chain: EVMChain,
+    _params: Parsed,
+    _ctx: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
+  ): Promise<PoolConfigManagerFacts> | PoolConfigManagerFacts {
+    return {}
+  }
+
+  /**
+   * This op's params recovered from its own calldata, for the snapshot check; `undefined` when the
+   * op is not re-checked by {@link recheck} (a record write: its guard re-reads the records).
+   * @param args - The decoded calldata.
+   * @param target - The PCM, or the pool the proposal was built for.
+   * @param sender - The account that will execute.
+   * @param sealed - The values the proposal sealed (a confirmation it was built with, e.g.
+   *   `confirm.*`).
+   */
+  paramsFromCalldata(
+    _args: Result,
+    _target: PoolConfigManagerTarget,
+    _sender: string,
+    _sealed: Record<string, unknown>,
+  ): P | undefined {
+    return undefined
+  }
+
+  /**
+   * Re-checks a proposal of this record-free op on current state: re-reads its facts with the params
+   * recovered from the calldata and reports every sealed fact that moved; when none did, rebuilds the
+   * op from `sender`, so every check it makes now (a renounce's maturity, the gate, the simulation)
+   * runs again, and compares the rebuilt snapshot.
+   * @returns `undefined` when the op is not re-checked this way (see {@link paramsFromCalldata})
+   * @throws {@link CCTParamsInvalidError} if the calldata is not this op's, or the op refuses the
+   *   current state
+   * @internal
+   */
+  async recheck(
+    chain: EVMChain,
+    {
+      data,
+      target,
+      sender,
+      snapshot,
+    }: {
+      data: string
+      target: PoolConfigManagerTarget
+      sender: string
+      snapshot: MultiTokenPoolSnapshot
+    },
+  ): Promise<MultiTokenPoolSnapshotCheck | undefined> {
+    const { address, version } = await resolvePoolConfigManagerTarget(chain, target)
+    let args: Result
+    try {
+      args = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).decodeFunctionData(
+        multiTokenPoolFunctionOf(this.name as MultiTokenPoolSingleFunctionOperation),
+        data,
+      )
+    } catch (cause) {
+      throw new CCTParamsInvalidError(
+        this.name,
+        'transaction',
+        `is not a ${this.name} call, which the snapshot was built for`,
+        { cause: cause instanceof Error ? cause : undefined },
+      )
+    }
+    const raw = this.paramsFromCalldata(args, target, sender, snapshot.expected)
+    if (raw === undefined) return
+    const params = this.prepare({ ...raw, sender })
+    const facts = await this.readFacts(chain, params, {
+      address,
+      version,
+      blockTag: await latestBlock(chain),
+    })
+    // the facts only: the guard options and the confirmations travel with the proposal
+    const sealed = Object.fromEntries(
+      Object.entries(snapshot.expected).filter(
+        ([path]) => !path.startsWith('guard.') && !path.startsWith('confirm.'),
+      ),
+    )
+    const moved = snapshotChanges(
+      { ...snapshot, expected: sealed },
+      { guardInputsHash: snapshot.guardInputsHash, expected: facts },
+    )
+    if (moved.length) return { ok: false, changed: moved, findings: [] }
+    const rebuilt = await this.generate(chain, { ...raw, sender })
+    const changed = snapshotChanges(snapshot, rebuilt.snapshot)
+    if (rebuilt.snapshot.calldataHash !== snapshot.calldataHash)
+      changed.unshift({
+        path: 'calldataHash',
+        expected: snapshot.calldataHash,
+        actual: rebuilt.snapshot.calldataHash,
+      })
+    return { ok: !changed.length, changed, findings: rebuilt.warnings }
   }
 
   /**
@@ -154,6 +273,10 @@ export abstract class PoolConfigManagerWriteOperation<
     const blockTag = await latestBlock(chain)
     if (params.sender !== undefined)
       await this.preflight(chain, params, { address, version, blockTag }, params.sender)
+    // a record-free write's facts: sealed, and judged on by `encode` (no second read)
+    const facts = this.changesRecords()
+      ? {}
+      : await this.readFacts(chain, params, { address, version, blockTag })
     // the stored records, read once: the op checks and encodes from them, the guard judges on them
     const read = this.changesRecords()
       ? await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
@@ -169,7 +292,10 @@ export abstract class PoolConfigManagerWriteOperation<
       staticConfig: read.staticConfig,
       policyNames: read.policyNames,
       rateLimitPolicyDecimals: read.rateLimitPolicyDecimals,
+      facts,
     })
+    if (!this.changesRecords()) assertRecordFree(this.name, address, version, data)
+    const sealed = { ...facts, ...expected }
     const context = this.errorContext(params)
     const result = await runMultiTokenPoolGuards({
       chain,
@@ -181,7 +307,7 @@ export abstract class PoolConfigManagerWriteOperation<
       stateRead: read,
       ...(params.poolAddress !== undefined && { poolAddress: params.poolAddress }),
       ...(params.sender !== undefined && { sender: params.sender }),
-      ...(expected && { expected }),
+      ...(Object.keys(sealed).length && { expected: sealed }),
       ...(context && { errorContext: context }),
       ...writeGuardsOf(params),
     })
@@ -253,4 +379,30 @@ function emptyRecordStateRead(
     policyNames,
     rateLimitPolicyDecimals: new Map(),
   }
+}
+
+/**
+ * The tripwire of the record-free path: a write that skips the record state read must call a
+ * function that changes no record, or it would be judged on an empty state with no lane rules.
+ * @throws {@link CCTDataDecodeError} if it does not (an SDK bug)
+ */
+function assertRecordFree(
+  operation: string,
+  address: string,
+  version: MultiTokenPoolVersion,
+  data: string,
+): void {
+  const fn = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).parseTransaction({
+    data,
+  })?.name
+  if (fn !== undefined && NO_RECORD_CHANGE_FUNCTIONS.has(fn)) return
+  throw new CCTDataDecodeError(address, {
+    recovery:
+      'An SDK bug: this write skips the record state read, but its calldata changes records. Report it; do not send the transaction.',
+    context: {
+      operation,
+      function: fn ?? null,
+      reason: 'a record-free write encodes a record change',
+    },
+  })
 }

@@ -7825,8 +7825,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   role: 'RATE_LIMIT_ROLE', account: '0xOperator...',
    *   sender: '0xSafe...',
    * })
-   * // for the proposal reviewer: what it changes, and the state it was judged on
-   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * // for the proposal reviewer: re-check it on current state before signing
+   * const { ok, changed } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot,
+   *   transaction: unsigned,
+   *   sender: '0xSafe...',
+   * })
    * ```
    */
   generateUnsignedGrantMultiTokenPoolRole(
@@ -7863,7 +7867,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
-   * const { hash, affectedLanes } = await cct.grantMultiTokenPoolRole({
+   * const { hash, blockNumber } = await cct.grantMultiTokenPoolRole({
    *   poolAddress: '0xMultiTokenPool...',
    *   role: 'RATE_LIMIT_ROLE', account: '0xOperator...',
    *   wallet,
@@ -7904,8 +7908,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   role: 'RATE_LIMIT_ROLE', account: '0xOperator...',
    *   sender: '0xSafe...',
    * })
-   * // for the proposal reviewer: what it changes, and the state it was judged on
-   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * // for the proposal reviewer: re-check it on current state before signing
+   * const { ok, changed } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot,
+   *   transaction: unsigned,
+   *   sender: '0xSafe...',
+   * })
    * ```
    */
   generateUnsignedRevokeMultiTokenPoolRole(
@@ -7941,7 +7949,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
-   * const { hash, affectedLanes } = await cct.revokeMultiTokenPoolRole({
+   * const { hash, blockNumber } = await cct.revokeMultiTokenPoolRole({
    *   poolAddress: '0xMultiTokenPool...',
    *   role: 'RATE_LIMIT_ROLE', account: '0xOperator...',
    *   wallet,
@@ -7961,10 +7969,6 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * `sender` is required: OpenZeppelin checks `callerConfirmation == msg.sender`. For the default
    * admin use {@link generateUnsignedRenounceMultiTokenPoolDefaultAdmin}.
    *
-   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
-   * write simulated from it; without it the write is not simulated (`simulatedFrom: 'none'`), since
-   * it calls no store the PoolConfigManager could be simulated against.
-   *
    * Gate: the role's holder.
    *
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the PoolConfigManager's
@@ -7983,8 +7987,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   role: 'PAUSER_ROLE',
    *   sender: '0xSafe...',
    * })
-   * // for the proposal reviewer: what it changes, and the state it was judged on
-   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * // for the proposal reviewer: re-check it on current state before signing
+   * const { ok, changed } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot,
+   *   transaction: unsigned,
+   *   sender: '0xSafe...',
+   * })
    * ```
    */
   generateUnsignedRenounceMultiTokenPoolRole(
@@ -8021,9 +8029,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
-   * const { hash, affectedLanes } = await cct.renounceMultiTokenPoolRole({
+   * const { hash, blockNumber } = await cct.renounceMultiTokenPoolRole({
    *   poolAddress: '0xMultiTokenPool...',
    *   role: 'PAUSER_ROLE',
+   *   sender: '0xPauser...',
    *   wallet,
    * })
    * ```
@@ -8040,11 +8049,15 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @remarks
    * Refused unless `confirmPermanentFreeze` is `true`, `sender` is the default admin, and a renounce
    * is scheduled ({@link generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer} with `ZeroAddress`)
-   * and its delay passed. Role management, pauses and unpauses then freeze forever.
+   * and its delay passed. Role management and admin-only actions then freeze forever: the current
+   * holders of each role keep it. A `PAUSER_ROLE` holder with no `UNPAUSER_ROLE` holder (the next
+   * pause would be permanent), or holders that cannot be read in full, need `confirmPermanentPauses`.
+   * A cancel invalidates a prepared renounce only until someone schedules another: the old calldata
+   * is valid again once the new one matures, so re-check a held proposal with
+   * {@link checkMultiTokenPoolSnapshot} (it reports `admin.pending` as moved) before signing.
    *
-   * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
-   * write simulated from it; without it the write is not simulated (`simulatedFrom: 'none'`), since
-   * it calls no store the PoolConfigManager could be simulated against.
+   * `sender` is required (OpenZeppelin checks `callerConfirmation == msg.sender`): the gate is
+   * pre-flighted and the write simulated from it.
    *
    * Gate: the default admin, after a scheduled renounce matured.
    *
@@ -8064,8 +8077,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   confirmPermanentFreeze: true,
    *   sender: '0xSafe...',
    * })
-   * // for the proposal reviewer: what it changes, and the state it was judged on
-   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * // for the proposal reviewer: re-check it on current state before signing
+   * const { ok, changed } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot,
+   *   transaction: unsigned,
+   *   sender: '0xSafe...',
+   * })
    * ```
    */
   generateUnsignedRenounceMultiTokenPoolDefaultAdmin(
@@ -8082,7 +8099,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @remarks
    * Refused unless `confirmPermanentFreeze` is `true`, `sender` is the default admin, and a renounce
    * is scheduled ({@link generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer} with `ZeroAddress`)
-   * and its delay passed. Role management, pauses and unpauses then freeze forever.
+   * and its delay passed. Role management and admin-only actions then freeze forever: the current
+   * holders of each role keep it. A `PAUSER_ROLE` holder with no `UNPAUSER_ROLE` holder (the next
+   * pause would be permanent), or holders that cannot be read in full, need `confirmPermanentPauses`.
+   * A cancel invalidates a prepared renounce only until someone schedules another: the old calldata
+   * is valid again once the new one matures, so re-check a held proposal with
+   * {@link checkMultiTokenPoolSnapshot} (it reports `admin.pending` as moved) before signing.
    *
    * Gate: the default admin, after a scheduled renounce matured.
    *
@@ -8103,9 +8125,10 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
-   * const { hash, affectedLanes } = await cct.renounceMultiTokenPoolDefaultAdmin({
+   * const { hash, blockNumber } = await cct.renounceMultiTokenPoolDefaultAdmin({
    *   poolAddress: '0xMultiTokenPool...',
    *   confirmPermanentFreeze: true,
+   *   sender: '0xAdmin...',
    *   wallet,
    * })
    * ```
@@ -8145,8 +8168,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   newAdmin: '0xNewAdmin...',
    *   sender: '0xSafe...',
    * })
-   * // for the proposal reviewer: what it changes, and the state it was judged on
-   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * // for the proposal reviewer: re-check it on current state before signing
+   * const { ok, changed } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot,
+   *   transaction: unsigned,
+   *   sender: '0xSafe...',
+   * })
    * ```
    */
   generateUnsignedBeginMultiTokenPoolDefaultAdminTransfer(
@@ -8183,7 +8210,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
-   * const { hash, affectedLanes } = await cct.beginMultiTokenPoolDefaultAdminTransfer({
+   * const { hash, blockNumber } = await cct.beginMultiTokenPoolDefaultAdminTransfer({
    *   poolAddress: '0xMultiTokenPool...',
    *   newAdmin: '0xNewAdmin...',
    *   wallet,
@@ -8226,8 +8253,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   poolAddress: '0xMultiTokenPool...',
    *   sender: '0xSafe...',
    * })
-   * // for the proposal reviewer: what it changes, and the state it was judged on
-   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * // for the proposal reviewer: re-check it on current state before signing
+   * const { ok, changed } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot,
+   *   transaction: unsigned,
+   *   sender: '0xSafe...',
+   * })
    * ```
    */
   generateUnsignedAcceptMultiTokenPoolDefaultAdminTransfer(
@@ -8266,7 +8297,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
-   * const { hash, affectedLanes } = await cct.acceptMultiTokenPoolDefaultAdminTransfer({
+   * const { hash, blockNumber } = await cct.acceptMultiTokenPoolDefaultAdminTransfer({
    *   poolAddress: '0xMultiTokenPool...',
    *   wallet,
    * })
@@ -8305,8 +8336,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   poolAddress: '0xMultiTokenPool...',
    *   sender: '0xSafe...',
    * })
-   * // for the proposal reviewer: what it changes, and the state it was judged on
-   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * // for the proposal reviewer: re-check it on current state before signing
+   * const { ok, changed } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot,
+   *   transaction: unsigned,
+   *   sender: '0xSafe...',
+   * })
    * ```
    */
   generateUnsignedCancelMultiTokenPoolDefaultAdminTransfer(
@@ -8342,7 +8377,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
-   * const { hash, affectedLanes } = await cct.cancelMultiTokenPoolDefaultAdminTransfer({
+   * const { hash, blockNumber } = await cct.cancelMultiTokenPoolDefaultAdminTransfer({
    *   poolAddress: '0xMultiTokenPool...',
    *   wallet,
    * })
@@ -8383,8 +8418,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   newDelay: 86_400,
    *   sender: '0xSafe...',
    * })
-   * // for the proposal reviewer: what it changes, and the state it was judged on
-   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * // for the proposal reviewer: re-check it on current state before signing
+   * const { ok, changed } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot,
+   *   transaction: unsigned,
+   *   sender: '0xSafe...',
+   * })
    * ```
    */
   generateUnsignedChangeMultiTokenPoolDefaultAdminDelay(
@@ -8421,7 +8460,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
-   * const { hash, affectedLanes } = await cct.changeMultiTokenPoolDefaultAdminDelay({
+   * const { hash, blockNumber } = await cct.changeMultiTokenPoolDefaultAdminDelay({
    *   poolAddress: '0xMultiTokenPool...',
    *   newDelay: 86_400,
    *   wallet,
@@ -8461,8 +8500,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   poolAddress: '0xMultiTokenPool...',
    *   sender: '0xSafe...',
    * })
-   * // for the proposal reviewer: what it changes, and the state it was judged on
-   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * // for the proposal reviewer: re-check it on current state before signing
+   * const { ok, changed } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot,
+   *   transaction: unsigned,
+   *   sender: '0xSafe...',
+   * })
    * ```
    */
   generateUnsignedRollbackMultiTokenPoolDefaultAdminDelay(
@@ -8498,7 +8541,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
-   * const { hash, affectedLanes } = await cct.rollbackMultiTokenPoolDefaultAdminDelay({
+   * const { hash, blockNumber } = await cct.rollbackMultiTokenPoolDefaultAdminDelay({
    *   poolAddress: '0xMultiTokenPool...',
    *   wallet,
    * })
@@ -8540,8 +8583,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    *   feeTokens: ['0xLINK...'], recipient: '0xTreasury...',
    *   sender: '0xSafe...',
    * })
-   * // for the proposal reviewer: what it changes, and the state it was judged on
-   * console.log(unsigned.affectedLanes, unsigned.goingLive, unsigned.warnings)
+   * // for the proposal reviewer: re-check it on current state before signing
+   * const { ok, changed } = await cct.checkMultiTokenPoolSnapshot({
+   *   snapshot: unsigned.snapshot,
+   *   transaction: unsigned,
+   *   sender: '0xSafe...',
+   * })
    * ```
    */
   generateUnsignedWithdrawMultiTokenPoolFeeTokens(
@@ -8579,7 +8626,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * @throws {@link CCIPExecTxRevertedError} if it reverts on chain
    * @example
    * ```typescript
-   * const { hash, affectedLanes } = await cct.withdrawMultiTokenPoolFeeTokens({
+   * const { hash, withdrawn } = await cct.withdrawMultiTokenPoolFeeTokens({
    *   poolAddress: '0xMultiTokenPool...',
    *   feeTokens: ['0xLINK...'], recipient: '0xTreasury...',
    *   wallet,

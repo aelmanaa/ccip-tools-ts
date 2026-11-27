@@ -7,6 +7,7 @@
 import { getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
+import { latestBlock } from '../../mined-block.ts'
 import {
   type MultiTokenPoolVersion,
   poolConfigManagerContract,
@@ -81,10 +82,12 @@ export class GetPoolConfigManagerState extends EVMQuery<
   ): Promise<GetPoolConfigManagerStateResult> {
     const { address, version } = await resolvePoolConfigManagerTarget(chain, target)
     const pcm = poolConfigManagerContract(chain, address, version)
+    // one block for every getter: the five admin getters must not straddle a transfer (E7 m7)
+    const blockTag = await latestBlock(chain)
     const [[, , typeAndVersion], staticConfig, admin] = await Promise.all([
       chain.typeAndVersion(address),
-      readPoolConfigManagerStaticConfig(chain, address, version),
-      readPoolConfigManagerAdmin(pcm),
+      readPoolConfigManagerStaticConfig(chain, address, version, { blockTag }),
+      readPoolConfigManagerAdmin(pcm, blockTag),
     ])
     return {
       poolConfigManager: getAddress(address),

@@ -6,6 +6,8 @@
  * @packageDocumentation
  */
 
+import type { TransactionReceipt } from 'ethers'
+
 import type { EVMChain } from '../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../evm/types.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
@@ -126,10 +128,19 @@ export abstract class MultiTokenPoolWriteOperation<
    * Builds, then (for a build that seals a snapshot) rebuilds with the first build's snapshot right
    * before sending: any movement in between throws `CCTStateChangedError`. Then signs and submits.
    */
-  override async execute(
+  override execute(chain: EVMChain, params: EVMExecuteParams<P>): Promise<SignedResultOf<Tx>> {
+    return this.executeWith(chain, params, () => ({}))
+  }
+
+  /**
+   * {@link execute}, with result fields of the op's own derived from the mined receipt `submit`
+   * returns: no RPC runs after the send, so nothing that could fail without the hash.
+   */
+  protected async executeWith<X extends object>(
     chain: EVMChain,
     params: EVMExecuteParams<P>,
-  ): Promise<SignedResultOf<Tx>> {
+    fromReceipt: (receipt: TransactionReceipt) => X,
+  ): Promise<SignedResultOf<Tx> & X> {
     const sender = await this.resolveWalletSender(params.wallet, params.sender)
     const first = await this.generate(chain, { ...params, sender })
     const unsigned = first.snapshot ? await this.rebuild(chain, params, sender, first) : first
@@ -141,7 +152,8 @@ export abstract class MultiTokenPoolWriteOperation<
       hash: response.hash,
       blockNumber: receipt.blockNumber,
       ...impact,
-    } as SignedResultOf<Tx>
+      ...fromReceipt(receipt),
+    } as SignedResultOf<Tx> & X
   }
 
   /**

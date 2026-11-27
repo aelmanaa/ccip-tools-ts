@@ -77,11 +77,25 @@ export const AUX_IFACE = new Interface([
   'function getTokenFactory() view returns (address)',
   'function getAdditionalPoolData(address localToken, uint64 remoteChainSelector, bytes4 finality, bytes extraArgs) view returns (bytes)',
 ])
+/** The ERC20 view a fee withdrawal reads (a token in `others`, answered through `state.views`). */
+export const ERC20_IFACE = new Interface([
+  'function balanceOf(address account) view returns (uint256)',
+])
 /**
- * The owner-gated writes of the pool, the stores and the hooks, as a simulation sees them: served by
- * `state.writes` (a throw reverts), else they succeed.
+ * The writes a simulation sends: the PCM's role, admin and withdrawal writes, and the owner-gated
+ * writes of the pool, the stores and the hooks. Served by `state.writes` (a throw reverts), else
+ * they succeed.
  */
 export const WRITE_IFACE = new Interface([
+  'function grantRole(bytes32 role, address account)',
+  'function revokeRole(bytes32 role, address account)',
+  'function renounceRole(bytes32 role, address account)',
+  'function beginDefaultAdminTransfer(address newAdmin)',
+  'function acceptDefaultAdminTransfer()',
+  'function cancelDefaultAdminTransfer()',
+  'function changeDefaultAdminDelay(uint48 newDelay)',
+  'function rollbackDefaultAdminDelay()',
+  'function withdrawFeeTokens(address pool, address[] feeTokens, address recipient)',
   'function transferOwnership(address to)',
   'function acceptOwnership()',
   'function setRouter(address newRouter)',
@@ -148,10 +162,14 @@ export type StackState = {
   /** Raw logs served by `getLogs` besides the role logs. */
   logs: { address: string; topics: string[]; data: string; blockNumber: number }[]
   /**
-   * Simulated owner-gated writes ({@link WRITE_IFACE}), keyed by function name: throwing reverts the
-   * call; a write with no entry succeeds.
+   * Simulated writes ({@link WRITE_IFACE}), keyed by function name: throwing reverts the call; a
+   * write with no entry succeeds.
    */
   writes?: Record<string, (args: readonly unknown[], to: string, from: string | undefined) => void>
+  /** The timestamp of every block (`getBlock`); defaults to 0. */
+  timestamp?: number
+  /** A node without archive state: historical `getCode` fails as pruned. */
+  pruned?: boolean
   /** Addresses with no code at any block (EOAs). */
   eoas?: string[]
 }
@@ -358,11 +376,15 @@ export function stackChain(state: StackState = defaultStack()) {
         })
       // auxiliary contracts (hooks, providers): every answer comes from `state.views`
       if (state.others[addr])
-        return answer(AUX_IFACE, data, (name, args) => {
-          const view = state.views[name]
-          if (!view) throw callException()
-          return view(args, addr)
-        })
+        return answer(
+          AUX_IFACE.getFunction(data.slice(0, 10)) ? AUX_IFACE : ERC20_IFACE,
+          data,
+          (name, args) => {
+            const view = state.views[name]
+            if (!view) throw callException()
+            return view(args, addr)
+          },
+        )
       throw callException()
     },
     getStorage: async (address: string, slot: bigint) => {
@@ -374,6 +396,8 @@ export function stackChain(state: StackState = defaultStack()) {
     },
     getCode: async (address: string, block?: number) => {
       calls.push(`getCode:${getAddress(address)}:${block}`)
+      if (state.pruned && block !== undefined && block < state.latestBlock)
+        throw makeError('missing trie node', 'SERVER_ERROR')
       if (state.eoas?.includes(getAddress(address))) return '0x'
       return (block ?? state.latestBlock) >= state.deploymentBlock ? '0x60806040' : '0x'
     },
@@ -381,11 +405,20 @@ export function stackChain(state: StackState = defaultStack()) {
       calls.push('getBlockNumber')
       return state.latestBlock
     },
+    getBlock: async (tag: number) => {
+      calls.push(`getBlock:${tag}`)
+      return { number: tag, timestamp: state.timestamp ?? 0 }
+    },
+    // no eth_simulateV1: the projection is not cross-checked
+    send: async (method: string) => {
+      throw makeError(`the method ${method} does not exist`, 'UNSUPPORTED_OPERATION')
+    },
   }
   const chain = {
     provider,
     // Ethereum Sepolia: `generate` pins every transaction to it
     network: { chainId: 11155111 },
+    logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
     typeAndVersion: async (address: string) => {
       const addr = getAddress(address)
       calls.push(`typeAndVersion:${addr}`)
