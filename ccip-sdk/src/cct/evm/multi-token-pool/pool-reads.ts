@@ -37,6 +37,25 @@ export function isMultiTokenPoolRefusal(err: unknown): err is CCTContractTypeInv
 }
 
 /**
+ * Rethrows `resolveTokenPool`'s refusal of a multi-token pool with a reason naming the multi-token
+ * pool op to use instead; any other error propagates unchanged. A single-token op keeps its target
+ * contract and authorization model, so it never silently becomes a PCM write (design §4.5).
+ * @throws {@link CCTContractTypeInvalidError} always
+ * @internal
+ */
+export function redirectMultiTokenPool(err: unknown, instead: string, how: string): never {
+  if (!isMultiTokenPoolRefusal(err)) throw err
+  const { address, expected, actual } = err.context
+  throw new CCTContractTypeInvalidError(
+    String(address),
+    String(expected),
+    String(actual),
+    `a multi-token pool configures this per token: use ${instead} (${how})`,
+    { cause: err },
+  )
+}
+
+/**
  * The multi-token pool and its version, requiring the local token those pools key every lane by.
  * @throws {@link CCIPLocalTokenRequiredError} if `tokenAddress` is omitted
  * @internal

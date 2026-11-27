@@ -18,6 +18,7 @@ import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
 import { type FinalityAllowed, encodeFinality } from '../../../../extra-args.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { redirectMultiTokenPool } from '../../multi-token-pool/pool-reads.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import { parseRecord, validateBoolean, validateNonZeroAddress } from '../../validate.ts'
 import {
@@ -47,8 +48,12 @@ export type SetAllowedFinalityConfigParams = {
   sender?: string
 }
 
-/** Validates the SDK's semantic representation before encoding its `bytes4` contract value. */
-function validateAllowedFinality(
+/**
+ * Validates the SDK's semantic representation before encoding its `bytes4` contract value; shared
+ * with the multi-token pool profile op.
+ * @internal
+ */
+export function validateAllowedFinality(
   operation: string,
   allowedFinality: unknown,
 ): asserts allowedFinality is FinalityAllowed {
@@ -117,7 +122,14 @@ export class SetAllowedFinalityConfig extends EVMOperation<SetAllowedFinalityCon
     chain: EVMChain,
     params: SetAllowedFinalityConfigParams,
   ): Promise<UnsignedEVMTx> {
-    const { type, version } = await resolveTokenPool(chain, params.poolAddress)
+    const { type, version } = await resolveTokenPool(chain, params.poolAddress).catch(
+      (err: unknown) =>
+        redirectMultiTokenPool(
+          err,
+          'applyMultiTokenPoolTokenProfileUpdates',
+          'profilesToUpdate: [{ tokenAddress, allowedFinality }]',
+        ),
+    )
     const encode = resolveEncoder(this.encoders, version, this.name)
     const unsigned = encode(getTokenPoolInterface(type, version), params)
     if (params.sender !== undefined)
