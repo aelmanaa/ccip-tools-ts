@@ -4,7 +4,13 @@ import { describe, it } from 'node:test'
 import { ZeroAddress, getAddress } from 'ethers'
 
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import { OWNER, PCM, defaultStack, stackChain } from '../../multi-token-pool/stack.test.helpers.ts'
+import {
+  CPS,
+  OWNER,
+  PCM,
+  defaultStack,
+  stackChain,
+} from '../../multi-token-pool/stack.test.helpers.ts'
 import { CheckMultiTokenPoolSnapshot } from './check-multi-token-pool-snapshot.ts'
 import { RenounceMultiTokenPoolDefaultAdmin } from './role-writes.ts'
 
@@ -217,6 +223,18 @@ describe('renounceMultiTokenPoolDefaultAdmin', () => {
         check.changed.map((c) => c.path),
         ['pauses.active'],
       )
+    })
+  })
+
+  it('fails closed when the chain pauses cannot be read in full (no archive for the store, n1)', async () => {
+    const { state } = scheduled(Number(SCHEDULE) + 1)
+    // the role holders read in full (the PCM's history is served), the store's pause logs not
+    state.pruned = [CPS]
+    await assert.rejects(renounce(stackChain(state).chain), (e: unknown) => {
+      assert.ok(e instanceof CCTParamsInvalidError)
+      assert.equal(e.context.param, 'confirmPermanentPauses')
+      assert.match(String(e.context.reason), /chain pauses cannot be read in full/)
+      return true
     })
   })
 })

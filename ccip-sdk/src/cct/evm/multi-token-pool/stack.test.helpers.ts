@@ -105,6 +105,8 @@ export const WRITE_IFACE = new Interface([
   'function setPolicyEngine(address newPolicyEngine)',
   'function setPolicyEngineAllowFailedDetach(address newPolicyEngine)',
   'function setBlocklist(address blocklist)',
+  'function pauseGlobally()',
+  'function unpauseGlobally()',
 ])
 /** The TokenAdminRegistry view the registry reads use. */
 export const TAR_IFACE = new Interface([
@@ -168,8 +170,11 @@ export type StackState = {
   writes?: Record<string, (args: readonly unknown[], to: string, from: string | undefined) => void>
   /** The timestamp of every block (`getBlock`); defaults to 0. */
   timestamp?: number
-  /** A node without archive state: historical `getCode` fails as pruned. */
-  pruned?: boolean
+  /**
+   * A node without archive state: historical `getCode` fails as pruned (for every address, or only
+   * for the ones listed).
+   */
+  pruned?: boolean | string[]
   /** Addresses with no code at any block (EOAs). */
   eoas?: string[]
   /** The PCM-wide pause, as the lane views report it. */
@@ -406,7 +411,10 @@ export function stackChain(state: StackState = defaultStack()) {
     },
     getCode: async (address: string, block?: number) => {
       calls.push(`getCode:${getAddress(address)}:${block}`)
-      if (state.pruned && block !== undefined && block < state.latestBlock)
+      const pruned = Array.isArray(state.pruned)
+        ? state.pruned.includes(getAddress(address))
+        : !!state.pruned
+      if (pruned && block !== undefined && block < state.latestBlock)
         throw makeError('missing trie node', 'SERVER_ERROR')
       if (state.eoas?.includes(getAddress(address))) return '0x'
       return (block ?? state.latestBlock) >= state.deploymentBlock ? '0x60806040' : '0x'

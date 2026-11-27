@@ -7,10 +7,17 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { ZeroAddress, getAddress } from 'ethers'
+import { ZeroAddress, getAddress, keccak256 } from 'ethers'
 
+import { sealMultiTokenPoolSnapshot } from '../../../canonical.ts'
+import { CCTParamsInvalidError } from '../../../errors.ts'
 import type { MultiTokenPoolSnapshotCheck } from '../../../multi-token-pool.ts'
-import { MULTI_TOKEN_POOL_OPERATIONS } from '../../multi-token-pool/contracts.ts'
+import {
+  MULTI_TOKEN_POOL_OPERATIONS,
+  MultiTokenPoolVersion,
+  POOL_CONFIG_MANAGER_TYPE,
+  getMultiTokenPoolInterface,
+} from '../../multi-token-pool/contracts.ts'
 import {
   type StackState,
   OWNER,
@@ -22,6 +29,7 @@ import {
 import { NO_RECORD_CHANGE_FUNCTIONS } from '../calldata.ts'
 import type { MultiTokenPoolUnsignedTx } from '../write-operation.ts'
 import { CheckMultiTokenPoolSnapshot, RECORD_FREE_OPS } from './check-multi-token-pool-snapshot.ts'
+import { PauseMultiTokenPoolGlobally } from './pause-multi-token-pool.ts'
 
 const ALICE = getAddress('0x' + 'a1'.repeat(20))
 const BOB = getAddress('0x' + 'b0'.repeat(20))
@@ -201,5 +209,60 @@ describe('snapshot check of record-free PCM writes', () => {
     const c = CASES.find((x) => x.op === 'withdrawMultiTokenPoolFeeTokens')!
     const grown = await buildAndCheck({ ...c, move: (s) => feeToken(s, 9n) }, true)
     assert.deepEqual([grown.ok, grown.changed], [true, []])
+  })
+
+  describe('a record op on the stub (n2): the sealed values are re-read, never echoed', () => {
+    /** A PCM with no record, its global flag driven by `paused`, PAUSER_ROLE held by OWNER. */
+    function pcm() {
+      const state = defaultStack()
+      state.pcm.roles.PAUSER_ROLE = [OWNER]
+      state.views.getPolicyNames = () => [[], [], [], [], [], []]
+      const { chain } = stackChain(state)
+      return { state, chain }
+    }
+    const build = (chain: ReturnType<typeof stackChain>['chain']) =>
+      new PauseMultiTokenPoolGlobally().generate(chain, { poolConfigManager: PCM, sender: OWNER })
+
+    it('passes on unchanged state, and reports a pause set since the build', async () => {
+      const { state, chain } = pcm()
+      const tx = await build(chain)
+      assert.equal(tx.snapshot.expected['pauses.global'], false)
+      const check = () =>
+        new CheckMultiTokenPoolSnapshot().query(chain, {
+          snapshot: tx.snapshot,
+          transaction: tx,
+          sender: OWNER,
+        })
+      assert.deepEqual((await check()).changed, [])
+      state.globallyPaused = true
+      const moved = await check()
+      assert.equal(moved.ok, false)
+      assert.ok(moved.changed.some((c) => c.path === 'pauses.global'))
+    })
+
+    it("refuses a snapshot whose op does not call the transaction's function (n3)", async () => {
+      const { chain } = pcm()
+      const tx = await build(chain)
+      const unpause = getMultiTokenPoolInterface(
+        POOL_CONFIG_MANAGER_TYPE,
+        MultiTokenPoolVersion.V2_1_0_DEV,
+      ).encodeFunctionData('unpauseGlobally', [])
+      // an honest snapshot of the pause, sealed again over the unpause's calldata
+      const { hash: _, ...fields } = tx.snapshot
+      const resealed = sealMultiTokenPoolSnapshot({ ...fields, calldataHash: keccak256(unpause) })
+      await assert.rejects(
+        new CheckMultiTokenPoolSnapshot().query(chain, {
+          snapshot: resealed,
+          transaction: { ...tx, transactions: [{ ...tx.transactions[0]!, data: unpause }] },
+          sender: OWNER,
+        }),
+        (e: unknown) =>
+          e instanceof CCTParamsInvalidError &&
+          e.context.param === 'snapshot.operation' &&
+          /calls pauseGlobally, but the transaction calls unpauseGlobally/.test(
+            String(e.context.reason),
+          ),
+      )
+    })
   })
 })

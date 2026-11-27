@@ -18,8 +18,13 @@ import {
   serializeMultiTokenPoolSnapshot,
 } from '../../../multi-token-pool.ts'
 import { latestBlock } from '../../mined-block.ts'
+import {
+  type MultiTokenPoolOperationTarget,
+  MULTI_TOKEN_POOL_OPERATIONS,
+} from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
+import { decodeMultiTokenPoolWrite } from '../calldata.ts'
 import { resolvePoolConfigManagerTarget } from '../contracts.ts'
 import {
   GUARD_OPTIONS_PATH,
@@ -245,6 +250,19 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
         this.name,
         'snapshot.operation',
         `${snapshot.operation} is not a multi-token pool write this check can re-read`,
+      )
+    // the snapshot's op must be the one the calldata calls: a snapshot of another op is not a seal
+    // of this proposal, whatever its hash says
+    const target = (MULTI_TOKEN_POOL_OPERATIONS as Record<string, MultiTokenPoolOperationTarget>)[
+      snapshot.operation
+    ]!
+    const functions = 'function' in target ? [target.function] : Object.values(target.functions)
+    const called = decodeMultiTokenPoolWrite(tx.data as string, version).functionName
+    if (!functions.includes(called))
+      throw new CCTParamsInvalidError(
+        this.name,
+        'snapshot.operation',
+        `${snapshot.operation} calls ${functions.join(' or ')}, but the transaction calls ${called}: pass the snapshot built with this transaction`,
       )
     // what the proposal replaces, read now through the op itself: never the sealed values
     const blockTag = await latestBlock(chain)

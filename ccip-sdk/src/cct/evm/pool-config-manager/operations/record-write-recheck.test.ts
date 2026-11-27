@@ -10,8 +10,18 @@ import { describe, it } from 'node:test'
 import { ZeroAddress, getAddress } from 'ethers'
 
 import { canonicalHash } from '../../../canonical.ts'
-import { MULTI_TOKEN_POOL_OPERATIONS } from '../../multi-token-pool/contracts.ts'
-import { type DecodedMultiTokenPoolWrite, NO_RECORD_CHANGE_FUNCTIONS } from '../calldata.ts'
+import {
+  MULTI_TOKEN_POOL_OPERATIONS,
+  MultiTokenPoolVersion,
+  POOL_CONFIG_MANAGER_TYPE,
+  getMultiTokenPoolInterface,
+} from '../../multi-token-pool/contracts.ts'
+import {
+  type DecodedMultiTokenPoolWrite,
+  NO_RECORD_CHANGE_FUNCTIONS,
+  decodeMultiTokenPoolWrite,
+} from '../calldata.ts'
+import { encodePolicyName } from '../contracts.ts'
 import { C1, empty, inlineLane, on } from '../projection.test.helpers.ts'
 import {
   type MultiTokenPoolRecordChange,
@@ -237,4 +247,160 @@ describe('snapshot check of PCM record writes', () => {
         `${op} ignores the state it seals`,
       )
     })
+
+  describe("encode → decode → sealedFrom, on each op's real calldata (n3)", () => {
+    const P = getAddress('0x' + '9e'.repeat(20))
+    const U = getAddress('0x' + '7b'.repeat(20))
+    /** A chain stub for the few reads an encode makes (token decimals, a provider's type). */
+    const chain = {
+      getTokenInfo: async () => ({ decimals: 18, symbol: 'U' }),
+      typeAndVersion: async () => ['SameAddressRemoteTokenAddressProvider', '2.1.0-dev', 'x'],
+      provider: { getCode: async () => '0x60806040' },
+    }
+    /** Real params per op, each touching what its WRITES case touches. */
+    const PARAMS: Record<
+      string,
+      { params: Record<string, unknown>; setup?: (s: MultiTokenPoolRecordState) => void }
+    > = {}
+    for (const type of [
+      'connection',
+      'remotePool',
+      'rateLimit',
+      'fee',
+      'destOverhead',
+      'security',
+    ] as const) {
+      const T_ = type[0]!.toUpperCase() + type.slice(1)
+      PARAMS[`applyMultiTokenPool${T_}PolicyConfigUpdates`] = {
+        params: { recordsToRemove: [policyKey] },
+      }
+      PARAMS[`applyMultiTokenPoolInline${T_}ConfigUpdates`] = { params: { remove: [key] } }
+    }
+    const bucket = {
+      remoteChainSelector: C1,
+      direction: 'outbound',
+      fastFinality: false,
+      config: { enabled: false },
+    }
+    PARAMS.applyMultiTokenPoolInlineRateLimitBucketUpdates = {
+      params: { updates: [{ tokenAddress: T, ...bucket }] },
+    }
+    PARAMS.applyMultiTokenPoolRateLimitPolicyBucketUpdates = {
+      params: { updates: [{ policyName: 'p', ...bucket }] },
+    }
+    PARAMS.applyMultiTokenPoolRemoteTokenAddressProviderUpdates = {
+      params: { updates: [{ policyName: 'p', remoteTokenAddressProvider: P }] },
+    }
+    PARAMS.applyMultiTokenPoolSubsetTokenUpdates = {
+      params: { add: [{ ...policyKey, tokenAddress: T }] },
+      setup: (s) =>
+        (s.tokens.find((t) => t.tokenAddress === T)!.policies.connection = 'p' as never),
+    }
+    PARAMS.applyMultiTokenPoolTokenPolicyUpdates = {
+      params: { recordType: 'fee', assignments: [{ tokenAddress: T, policyName: 'p' }] },
+    }
+    PARAMS.pauseMultiTokenPoolGlobally = { params: {} }
+    PARAMS.unpauseMultiTokenPoolGlobally = { params: {}, setup: (s) => (s.isGloballyPaused = true) }
+    PARAMS.pauseMultiTokenPoolTokens = { params: { tokenAddresses: [T], direction: 'outbound' } }
+    PARAMS.unpauseMultiTokenPoolTokens = {
+      params: { tokenAddresses: [T], direction: 'outbound' },
+      setup: (s) => (s.tokens.find((t) => t.tokenAddress === T)!.isOutboundPaused = true),
+    }
+    PARAMS.pauseMultiTokenPoolChains = {
+      params: { remoteChainSelectors: [C1], direction: 'outbound' },
+    }
+    PARAMS.unpauseMultiTokenPoolChains = {
+      params: { remoteChainSelectors: [C1], direction: 'outbound' },
+      setup: (s) => (s.chainPauses[0]!.outbound = true),
+    }
+    PARAMS.stopMultiTokenPoolLanes = { params: { lanes: [key], direction: 'outbound' } }
+    PARAMS.liftMultiTokenPoolLaneStops = {
+      params: { lanes: [key], direction: 'outbound' },
+      setup: (s) => {
+        const rl = s.tokens.find((t) => t.tokenAddress === T)!.inline.rateLimit[0]!
+        rl.rateLimits = { ...rl.rateLimits, outbound: stop, fastFinalityOutbound: stop }
+        s.tokens.find((t) => t.tokenAddress === T)!.policies.rateLimit = 'p' as never
+      },
+    }
+    PARAMS.applyMultiTokenPoolTokenProfileUpdates = {
+      params: {
+        profilesToSet: [
+          {
+            tokenAddress: U,
+            localDecimals: 18,
+            lockOrBurnFlavor: 'burn',
+            allowedFinality: { finalityDepth: 0 },
+            lockOrBurnAddress: null,
+            additionalPoolDataProvider: null,
+          },
+        ],
+      },
+    }
+
+    it('covers every registered op', () => {
+      assert.deepEqual(Object.keys(PARAMS).sort(), [...RECORD_WRITE_OPS.keys()].sort())
+    })
+
+    for (const [name, { params, setup }] of Object.entries(PARAMS))
+      it(`${name}: seals what its own calldata touches, and calls the op map's function`, async () => {
+        const state = base()
+        setup?.(state)
+        const op = RECORD_WRITE_OPS.get(name) as unknown as {
+          prepare: (p: unknown) => unknown
+          encode: (
+            c: unknown,
+            p: unknown,
+            x: PoolConfigManagerWriteContext,
+          ) => Promise<{ data: string }>
+          sealedFrom: (
+            c: unknown,
+            d: DecodedMultiTokenPoolWrite,
+            x: PoolConfigManagerWriteContext,
+          ) => Promise<Record<string, unknown>> | Record<string, unknown>
+        }
+        const ctx = {
+          ...ctxOf(state),
+          staticConfig: {},
+          policyNames: Object.fromEntries(
+            (
+              ['connection', 'remotePool', 'rateLimit', 'fee', 'destOverhead', 'security'] as const
+            ).map((t) => [t, new Set([encodePolicyName('test', 'p', 'p').toLowerCase()])]),
+          ),
+          rateLimitPolicyDecimals: new Map([
+            [encodePolicyName('test', 'p', 'p').toLowerCase(), 18],
+          ]),
+        } as unknown as PoolConfigManagerWriteContext
+        // the profile op also reads the pools serving the PCM (the registry), which its live tests
+        // cover: here its calldata comes straight from the PCM ABI
+        const data =
+          name === 'applyMultiTokenPoolTokenProfileUpdates'
+            ? getMultiTokenPoolInterface(
+                POOL_CONFIG_MANAGER_TYPE,
+                MultiTokenPoolVersion.V2_1_0_DEV,
+              ).encodeFunctionData('applyTokenProfileUpdates', [
+                [],
+                [[U, 18, 0, '0x00000000', ZeroAddress, ZeroAddress]],
+              ])
+            : (await op.encode(chain, op.prepare({ poolConfigManager: PCM, ...params }), ctx)).data
+        const decoded = decodeMultiTokenPoolWrite(data, MultiTokenPoolVersion.V2_1_0_DEV)
+        const target = MULTI_TOKEN_POOL_OPERATIONS[name as keyof typeof MULTI_TOKEN_POOL_OPERATIONS]
+        const functions =
+          'function' in target
+            ? [target.function]
+            : Object.values(target.functions as Record<string, string>)
+        assert.ok(
+          functions.includes(decoded.functionName),
+          `${name} encodes ${decoded.functionName}`,
+        )
+        const fromCalldata = await op.sealedFrom(chain, decoded, ctx)
+        assert.ok(Object.keys(fromCalldata).length > 0, `${name} seals nothing from its calldata`)
+        // the representative write touches the same records, so it seals the same paths
+        if (decoded.profiles) assert.deepEqual(Object.keys(fromCalldata), [`profiles.${U}`])
+        else
+          assert.deepEqual(
+            Object.keys(fromCalldata).sort(),
+            Object.keys(await sealed(name, WRITES[name]!.decoded, state)).sort(),
+          )
+      })
+  })
 })
