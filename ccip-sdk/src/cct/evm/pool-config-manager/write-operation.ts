@@ -26,6 +26,7 @@ import {
   type MultiTokenPoolLaneDirections,
   type MultiTokenPoolLaneKey,
   type PoolConfigManagerTarget,
+  readPoolConfigManagerStaticConfig,
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from './contracts.ts'
@@ -37,6 +38,7 @@ import {
 
 export type { MultiTokenPoolSimulatedFrom } from './guard-run.ts'
 export type { MultiTokenPoolGuardOptions } from './guards.ts'
+import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from './guards.ts'
 
 /** Common fields of every PoolConfigManager write. */
@@ -149,6 +151,37 @@ export abstract class PoolConfigManagerWriteOperation<
     return undefined
   }
 
+  /**
+   * Whether the write changes stored records. A role, admin or withdrawal write changes none: its
+   * build skips the record state read (the guard projects no change, still gates and simulates).
+   * Defaults to `true`.
+   */
+  protected changesRecords(): boolean {
+    return true
+  }
+
+  /**
+   * The `sender` pre-flight, before any other read: by default one of {@link gate}'s roles. An op
+   * whose gate is not a role (the pending admin of a transfer) overrides it.
+   */
+  protected async preflight(
+    chain: EVMChain,
+    params: Parsed,
+    ctx: Pick<PoolConfigManagerWriteContext, 'address' | 'version' | 'blockTag'>,
+    sender: string,
+  ): Promise<void> {
+    await assertPoolConfigManagerRole(
+      this.name,
+      chain,
+      ctx.address,
+      ctx.version,
+      sender,
+      this.gate(params),
+      ctx.blockTag,
+      this.errorContext(params),
+    )
+  }
+
   /** Validates the target, sender and guard options; subclasses validate their own fields after it. */
   protected override prepare(params: P): Parsed {
     validatePoolConfigManagerTarget(this.name, params)
@@ -164,18 +197,14 @@ export abstract class PoolConfigManagerWriteOperation<
     const { address, version } = await resolvePoolConfigManagerTarget(chain, params)
     const blockTag = await chain.provider.getBlockNumber()
     if (params.sender !== undefined)
-      await assertPoolConfigManagerRole(
-        this.name,
-        chain,
-        address,
-        version,
-        params.sender,
-        this.gate(params),
-        blockTag,
-        this.errorContext(params),
-      )
+      await this.preflight(chain, params, { address, version, blockTag }, params.sender)
     // the stored records, read once: the op checks and encodes from them, the guard judges on them
-    const read = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
+    const read = this.changesRecords()
+      ? await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
+      : emptyRecordStateRead(
+          blockTag,
+          await readPoolConfigManagerStaticConfig(chain, address, version, { blockTag }),
+        )
     const { data, expected } = await this.encode(chain, params, {
       address,
       version,
@@ -257,4 +286,34 @@ function writeGuardsOf(params: MultiTokenPoolWriteGuards): MultiTokenPoolWriteGu
   for (const key of Object.keys(WRITE_GUARD_KEYS) as (keyof MultiTokenPoolWriteGuards)[])
     if (params[key] !== undefined) out[key] = params[key]
   return out as MultiTokenPoolWriteGuards
+}
+
+/** The state read of a write that changes no record: no token, no policy, the static config. */
+function emptyRecordStateRead(
+  blockNumber: number,
+  staticConfig: MultiTokenPoolRecordStateRead['staticConfig'],
+): MultiTokenPoolRecordStateRead {
+  const policyNames = {} as MultiTokenPoolRecordStateRead['policyNames']
+  for (const type of LANE_RECORD_TYPES) policyNames[type] = new Set()
+  return {
+    state: {
+      tokens: [],
+      policies: {
+        connection: [],
+        remoteTokenAddressProviders: [],
+        remotePool: [],
+        rateLimit: [],
+        fee: [],
+        destOverhead: [],
+        security: [],
+      },
+      providerAnswers: [],
+      chainPauses: [],
+      isGloballyPaused: false,
+    },
+    blockNumber,
+    lanes: [],
+    staticConfig,
+    policyNames,
+  }
 }
