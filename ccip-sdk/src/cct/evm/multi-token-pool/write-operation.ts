@@ -11,7 +11,11 @@ import type { TransactionReceipt } from 'ethers'
 import type { EVMChain } from '../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../evm/types.ts'
 import { type CCTStateChange, CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
-import type { MultiTokenPoolLaneFinding, MultiTokenPoolSnapshot } from '../../multi-token-pool.ts'
+import type {
+  MultiTokenPoolLaneFinding,
+  MultiTokenPoolSnapshot,
+  MultiTokenPoolSnapshotCheck,
+} from '../../multi-token-pool.ts'
 import type { TransactionResult } from '../../operation.ts'
 import { noteMinedBlock } from '../mined-block.ts'
 import { type EVMExecuteParams, EVMOperation } from '../operation.ts'
@@ -200,4 +204,47 @@ export abstract class MultiTokenPoolWriteOperation<
       )
     return unsigned
   }
+}
+
+/**
+ * The snapshot check of a write whose sealed state no lane covers: the facts its op re-read now are
+ * compared with the sealed ones (the guard options and confirmations travel with the proposal); when
+ * none moved, the op is rebuilt from the executing account, so every check it makes now runs again,
+ * and the rebuilt snapshot is compared. Shared by the PCM and the owner-gated writes.
+ * @internal
+ */
+export async function recheckSealedFacts({
+  snapshot,
+  facts,
+  rebuild,
+  tolerated,
+}: {
+  snapshot: MultiTokenPoolSnapshot
+  facts: Record<string, unknown>
+  rebuild: () => Promise<{
+    snapshot: MultiTokenPoolSnapshot
+    warnings: MultiTokenPoolLaneFinding[]
+  }>
+  tolerated: (change: CCTStateChange) => boolean
+}): Promise<MultiTokenPoolSnapshotCheck> {
+  const sealed = Object.fromEntries(
+    Object.entries(snapshot.expected).filter(
+      ([path]) => !path.startsWith('guard.') && !path.startsWith('confirm.'),
+    ),
+  )
+  const moved = snapshotChanges(
+    { ...snapshot, expected: sealed },
+    { guardInputsHash: snapshot.guardInputsHash, expected: facts },
+    tolerated,
+  )
+  if (moved.length) return { ok: false, changed: moved, findings: [] }
+  const rebuilt = await rebuild()
+  const changed = snapshotChanges(snapshot, rebuilt.snapshot, tolerated)
+  if (rebuilt.snapshot.calldataHash !== snapshot.calldataHash)
+    changed.unshift({
+      path: 'calldataHash',
+      expected: snapshot.calldataHash,
+      actual: rebuilt.snapshot.calldataHash,
+    })
+  return { ok: !changed.length, changed, findings: rebuilt.warnings }
 }

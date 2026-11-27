@@ -8,17 +8,14 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
-
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
-import { validateArray, validateNonZeroAddress } from '../../validate.ts'
 import {
   type AdvancedPoolHooksTarget,
   ADVANCED_POOL_HOOKS_INTERFACE,
   assertAdvancedPoolHooksOwner,
+  parseAuthorizedCallerUpdates,
   resolveAdvancedPoolHooksTarget,
   validateAdvancedPoolHooksTarget,
 } from '../contracts.ts'
@@ -33,16 +30,6 @@ export type UpdateAdvancedPoolHooksAuthorizedCallersParams = AdvancedPoolHooksTa
   sender?: string
 }
 
-function validateCallers(operation: string, param: string, callers: unknown): void {
-  validateArray(operation, param, callers)
-  const normalized = callers.map((caller, i) => {
-    validateNonZeroAddress(operation, `${param}[${i}]`, caller)
-    return getAddress(caller as string)
-  })
-  if (new Set(normalized).size !== normalized.length)
-    throw new CCTParamsInvalidError(operation, param, 'must not contain duplicate addresses')
-}
-
 /** Applies authorized-caller additions and removals. Owner-only. */
 export class UpdateAdvancedPoolHooksAuthorizedCallers extends EVMOperation<UpdateAdvancedPoolHooksAuthorizedCallersParams> {
   readonly name = 'updateAdvancedPoolHooksAuthorizedCallers'
@@ -52,15 +39,7 @@ export class UpdateAdvancedPoolHooksAuthorizedCallers extends EVMOperation<Updat
     params: UpdateAdvancedPoolHooksAuthorizedCallersParams,
   ): UpdateAdvancedPoolHooksAuthorizedCallersParams {
     validateAdvancedPoolHooksTarget(this.name, params)
-    const { addedCallers = [], removedCallers = [] } = params
-    validateCallers(this.name, 'addedCallers', addedCallers)
-    validateCallers(this.name, 'removedCallers', removedCallers)
-    if (addedCallers.length + removedCallers.length === 0)
-      throw new CCTParamsInvalidError(
-        this.name,
-        'addedCallers',
-        'at least one caller must be added or removed',
-      )
+    parseAuthorizedCallerUpdates(this.name, params)
     return params
   }
 

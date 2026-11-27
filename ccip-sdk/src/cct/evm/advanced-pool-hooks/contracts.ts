@@ -28,7 +28,12 @@ import {
   resolveEncoder,
   resolveTokenPool,
 } from '../token-pool/contracts.ts'
-import { validateAddress, validateArray, validateExactlyOneTarget } from '../validate.ts'
+import {
+  validateAddress,
+  validateArray,
+  validateExactlyOneTarget,
+  validateNonZeroAddress,
+} from '../validate.ts'
 
 /** The `typeAndVersion` contract type an `AdvancedPoolHooks` reports (`"AdvancedPoolHooks 2.0.0"`). */
 export const ADVANCED_POOL_HOOKS_TYPE = 'AdvancedPoolHooks'
@@ -390,4 +395,38 @@ export function validateCCVList(operation: string, param: string, value: unknown
     seen.add(normalized)
     return normalized
   })
+}
+
+/** Validates one caller list: an array of distinct, non-zero addresses; returns it checksummed. */
+function validateCallers(operation: string, param: string, callers: unknown): string[] {
+  validateArray(operation, param, callers)
+  const normalized = callers.map((caller, i) => {
+    validateNonZeroAddress(operation, `${param}[${i}]`, caller)
+    return getAddress(caller as string)
+  })
+  if (new Set(normalized).size !== normalized.length)
+    throw new CCTParamsInvalidError(operation, param, 'must not contain duplicate addresses')
+  return normalized
+}
+
+/**
+ * The `addedCallers` / `removedCallers` of an `applyAuthorizedCallerUpdates` write, validated and
+ * checksummed: distinct, non-zero addresses, at least one in all. Removes run before adds on chain,
+ * so an address in both stays authorized. Shared by every authorized-callers op.
+ * @throws {@link CCTParamsInvalidError} at the list or the entry
+ * @internal
+ */
+export function parseAuthorizedCallerUpdates(
+  operation: string,
+  { addedCallers = [], removedCallers = [] }: { addedCallers?: unknown; removedCallers?: unknown },
+): { addedCallers: string[]; removedCallers: string[] } {
+  const added = validateCallers(operation, 'addedCallers', addedCallers)
+  const removed = validateCallers(operation, 'removedCallers', removedCallers)
+  if (added.length + removed.length === 0)
+    throw new CCTParamsInvalidError(
+      operation,
+      'addedCallers',
+      'at least one caller must be added or removed',
+    )
+  return { addedCallers: added, removedCallers: removed }
 }

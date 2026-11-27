@@ -22,6 +22,8 @@ import {
   type MultiTokenPoolOperationTarget,
   MULTI_TOKEN_POOL_OPERATIONS,
 } from '../../multi-token-pool/contracts.ts'
+import type { MultiTokenPoolOwnedWriteOperation } from '../../multi-token-pool/owned-write-operation.ts'
+import { UpdatePolicyStoreAuthorizedCallers } from '../../policy-store/operations/update-policy-store-authorized-callers.ts'
 import { EVMQuery } from '../../query.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
 import { decodeMultiTokenPoolWrite } from '../calldata.ts'
@@ -110,6 +112,22 @@ export const RECORD_FREE_OPS: ReadonlyMap<string, PoolConfigManagerWriteOperatio
     new RollbackMultiTokenPoolDefaultAdminDelay(),
     new WithdrawMultiTokenPoolFeeTokens(),
   ].map((op) => [op.name, op as unknown as PoolConfigManagerWriteOperation<never>]),
+)
+
+/**
+ * Every sealed owner-gated write (to a pool, a policy store or a hook contract), by op name. What each
+ * is judged on lies outside every lane and every PCM record, so it is re-checked by its own op
+ * (`recheck`, over its `readFacts`). A unit test keeps this list equal to the sealed owned ops.
+ * @internal
+ */
+export const OWNED_SEALED_OPS: ReadonlyMap<
+  string,
+  { recheck: MultiTokenPoolOwnedWriteOperation<never, never>['recheck'] }
+> = new Map(
+  [new UpdatePolicyStoreAuthorizedCallers()].map((op) => [
+    op.name,
+    op as unknown as { recheck: MultiTokenPoolOwnedWriteOperation<never, never>['recheck'] },
+  ]),
 )
 
 /**
@@ -210,6 +228,15 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
     }: CheckMultiTokenPoolSnapshotParams,
   ): Promise<MultiTokenPoolSnapshotCheck> {
     const tx = transaction.transactions[0]!
+    // a sealed write to the pool, a store or the hooks: its own op re-reads what it sealed
+    const owned = OWNED_SEALED_OPS.get(snapshot.operation)
+    if (owned)
+      return owned.recheck(chain, {
+        data: tx.data as string,
+        to: tx.to as string,
+        sender,
+        snapshot,
+      })
     const { address, version } = await resolvePoolConfigManagerTarget(chain, {
       poolConfigManager: tx.to as string,
     })

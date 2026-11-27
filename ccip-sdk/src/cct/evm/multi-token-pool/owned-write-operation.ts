@@ -6,25 +6,29 @@
  * @packageDocumentation
  */
 
-import { getAddress } from 'ethers'
+import { type Result, getAddress, keccak256 } from 'ethers'
 
 import type { EVMChain } from '../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
-import type { MultiTokenPoolSnapshot } from '../../multi-token-pool.ts'
+import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
+import { CCTParamsInvalidError } from '../../errors.ts'
+import type { MultiTokenPoolSnapshot, MultiTokenPoolSnapshotCheck } from '../../multi-token-pool.ts'
 import { latestBlock } from '../mined-block.ts'
-import { revertRefusal } from '../pool-config-manager/guard-run.ts'
+import { assertSnapshotHolds, revertRefusal } from '../pool-config-manager/guard-run.ts'
 import { simulateEVMTx } from '../simulate.ts'
 import { validateNonZeroAddress } from '../validate.ts'
 import {
   type MultiTokenPoolContractType,
   type MultiTokenPoolHooksType,
+  type MultiTokenPoolSingleFunctionOperation,
   MULTI_TOKEN_POOL_HOOKS_TYPES,
   MULTI_TOKEN_POOL_TYPES,
   MultiTokenPoolVersion,
   POLICY_STORE_TYPES,
   assertMultiTokenPoolAuxContract,
   getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
   readOwnership,
   resolveMultiTokenPoolContract,
 } from './contracts.ts'
@@ -32,6 +36,7 @@ import {
   type MultiTokenPoolUnsealedUnsignedTx,
   type MultiTokenPoolWriteImpact,
   MultiTokenPoolWriteOperation,
+  recheckSealedFacts,
 } from './write-operation.ts'
 
 /** The contracts an owner-gated MTTP write targets. @internal */
@@ -65,6 +70,8 @@ export type MultiTokenPoolOwnedWriteContext = {
   owner: string
   /** The proposed owner that has not accepted, or `null`. */
   pendingOwner: string | null
+  /** What a sealed write is judged on ({@link MultiTokenPoolOwnedWriteOperation.readFacts}); `{}` otherwise. */
+  facts: Record<string, unknown>
 }
 
 /** The impact fields an owned write's own guard reports (lanes, findings, follow-ups, snapshot). @internal */
@@ -93,6 +100,98 @@ export abstract class MultiTokenPoolOwnedWriteOperation<
   protected abstract readonly kind: K
   /** Who may send it: the owner (default), or the pending owner (an accept). */
   protected readonly signer: 'owner' | 'pendingOwner' = 'owner'
+  /**
+   * Whether the write seals a snapshot (it is judged on chain state no calldata shows: a store's
+   * callers, the pools a PCM serves). A sealed op implements {@link readFacts} and
+   * {@link paramsFromCalldata}, and `checkMultiTokenPoolSnapshot` re-checks it through {@link recheck}.
+   */
+  protected readonly seals: boolean = false
+
+  /**
+   * The chain facts a sealed write is judged on, read at `ctx.blockTag`: sealed, and re-read through
+   * this same method by the snapshot check. Its `encode` judges on `ctx.facts`, never on a second read.
+   */
+  protected readFacts(
+    _chain: EVMChain,
+    _params: Parsed,
+    _ctx: Omit<MultiTokenPoolOwnedWriteContext, 'facts'>,
+  ): Promise<Record<string, unknown>> | Record<string, unknown> {
+    return {}
+  }
+
+  /** The confirmations a sealed write was built with, sealed under `confirm.*` for its re-check. */
+  protected confirmations(_params: Parsed): Record<string, unknown> {
+    return {}
+  }
+
+  /**
+   * This op's params recovered from its own calldata, for the snapshot check of a sealed write.
+   * @param sealed - The values the proposal sealed (its `confirm.*` confirmations).
+   */
+  paramsFromCalldata(
+    _args: Result,
+    _target: string,
+    _sender: string,
+    _sealed: Record<string, unknown>,
+  ): P | undefined {
+    return undefined
+  }
+
+  /**
+   * Re-checks a proposal of this sealed write on current state (see `recheckSealedFacts`).
+   * @throws {@link CCTParamsInvalidError} if the calldata is not this op's, or the op refuses the
+   *   current state
+   * @internal
+   */
+  async recheck(
+    chain: EVMChain,
+    {
+      data,
+      to,
+      sender,
+      snapshot,
+    }: { data: string; to: string; sender: string; snapshot: MultiTokenPoolSnapshot },
+  ): Promise<MultiTokenPoolSnapshotCheck> {
+    const address = getAddress(to)
+    const { type, version } = await this.resolveTarget(chain, address)
+    let args: Result
+    try {
+      args = ownedTargetInterface({ type, version }).decodeFunctionData(
+        multiTokenPoolFunctionOf(this.name as MultiTokenPoolSingleFunctionOperation),
+        data,
+      )
+    } catch (cause) {
+      throw new CCTParamsInvalidError(
+        this.name,
+        'transaction',
+        `is not a ${this.name} call, which the snapshot was built for`,
+        { cause: cause instanceof Error ? cause : undefined },
+      )
+    }
+    const raw = this.paramsFromCalldata(args, address, sender, snapshot.expected)
+    if (raw === undefined)
+      throw new CCTParamsInvalidError(this.name, 'snapshot', `${this.name} seals no snapshot`)
+    const params = this.prepare({ ...raw, sender })
+    const blockTag = await latestBlock(chain)
+    const { owner, pendingOwner } = await readOwnership(chain, address, blockTag)
+    const facts = await this.readFacts(chain, params, {
+      address,
+      type,
+      version,
+      blockTag,
+      owner,
+      pendingOwner,
+    })
+    return recheckSealedFacts({
+      snapshot,
+      facts,
+      rebuild: async () => {
+        const rebuilt = await this.generate(chain, { ...raw, sender })
+        return { snapshot: rebuilt.snapshot!, warnings: rebuilt.warnings }
+      },
+      tolerated: (c) => this.tolerated(c),
+    })
+  }
 
   /** Encodes the calldata sent to the target. */
   protected abstract encode(
@@ -140,17 +239,15 @@ export abstract class MultiTokenPoolOwnedWriteOperation<
     const { type, version } = await this.resolveTarget(chain, address)
     const blockTag = await latestBlock(chain)
     const { owner, pendingOwner } = await readOwnership(chain, address, blockTag)
+    const base = { address, type, version, blockTag, owner, pendingOwner }
+    if (params.sender !== undefined) this.assertSigner(params, base, getAddress(params.sender))
     const ctx: MultiTokenPoolOwnedWriteContext = {
-      address,
-      type,
-      version,
-      blockTag,
-      owner,
-      pendingOwner,
+      ...base,
+      facts: this.seals ? await this.readFacts(chain, params, base) : {},
     }
-    if (params.sender !== undefined) this.assertSigner(params, ctx, getAddress(params.sender))
     const data = await this.encode(chain, params, ctx)
     const impact = await this.judge(chain, params, ctx, data)
+    const snapshot = this.seals ? this.seal(params, ctx, data) : undefined
     if (params.sender !== undefined) {
       const sim = await simulateEVMTx(
         chain,
@@ -173,11 +270,36 @@ export abstract class MultiTokenPoolOwnedWriteOperation<
       projectionVerified: false,
       simulatedFrom: params.sender !== undefined ? 'sender' : 'none',
       ...impact,
+      ...(snapshot && { snapshot }),
     } as unknown as Tx
   }
 
+  /**
+   * The snapshot of a sealed write: its facts and confirmations, and the calldata. Its guard inputs
+   * are its facts (no lane projection applies), so the input hash is a constant. A caller's
+   * `expectedSnapshot` must still hold.
+   * @throws {@link CCTStateChangedError} if `expectedSnapshot` no longer holds
+   */
+  private seal(params: Parsed, ctx: MultiTokenPoolOwnedWriteContext, data: string) {
+    const confirmations = Object.fromEntries(
+      Object.entries(this.confirmations(params)).map(([k, v]) => [`confirm.${k}`, v]),
+    )
+    const current = {
+      calldataHash: keccak256(data),
+      guardInputsHash: canonicalHash({}),
+      expected: { ...ctx.facts, ...confirmations },
+    }
+    if (params.expectedSnapshot)
+      assertSnapshotHolds(this.name, params.expectedSnapshot, current, (c) => this.tolerated(c))
+    return sealMultiTokenPoolSnapshot({
+      observedAt: BigInt(ctx.blockTag),
+      operation: this.name,
+      ...current,
+    })
+  }
+
   /** Resolves the target: exact type and version, or type only for hooks. */
-  private async resolveTarget(
+  protected async resolveTarget(
     chain: EVMChain,
     address: string,
   ): Promise<{ type: MultiTokenPoolContractType; version: MultiTokenPoolVersion }> {
@@ -192,7 +314,11 @@ export abstract class MultiTokenPoolOwnedWriteOperation<
   }
 
   /** The `sender` pre-flight: the owner, or the pending owner for an accept. */
-  private assertSigner(params: Parsed, ctx: MultiTokenPoolOwnedWriteContext, sender: string): void {
+  private assertSigner(
+    params: Parsed,
+    ctx: Omit<MultiTokenPoolOwnedWriteContext, 'facts'>,
+    sender: string,
+  ): void {
     const { label } = OWNED_TARGETS[this.kind]
     if (this.signer === 'owner') {
       if (sender !== ctx.owner)

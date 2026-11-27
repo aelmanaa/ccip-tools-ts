@@ -25,6 +25,7 @@ import {
 import {
   type MultiTokenPoolUnsignedTx,
   MultiTokenPoolWriteOperation,
+  recheckSealedFacts,
 } from '../multi-token-pool/write-operation.ts'
 import {
   type PoolConfigManagerTarget,
@@ -32,7 +33,7 @@ import {
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from './contracts.ts'
-import { runMultiTokenPoolGuards, snapshotChanges } from './guard-run.ts'
+import { runMultiTokenPoolGuards } from './guard-run.ts'
 import {
   type MultiTokenPoolRecordStateRead,
   readMultiTokenPoolRecordState,
@@ -260,27 +261,12 @@ export abstract class PoolConfigManagerWriteOperation<
       version,
       blockTag: await latestBlock(chain),
     })
-    // the facts only: the guard options and the confirmations travel with the proposal
-    const sealed = Object.fromEntries(
-      Object.entries(snapshot.expected).filter(
-        ([path]) => !path.startsWith('guard.') && !path.startsWith('confirm.'),
-      ),
-    )
-    const moved = snapshotChanges(
-      { ...snapshot, expected: sealed },
-      { guardInputsHash: snapshot.guardInputsHash, expected: facts },
-      (c) => this.tolerated(c),
-    )
-    if (moved.length) return { ok: false, changed: moved, findings: [] }
-    const rebuilt = await this.generate(chain, { ...raw, sender })
-    const changed = snapshotChanges(snapshot, rebuilt.snapshot, (c) => this.tolerated(c))
-    if (rebuilt.snapshot.calldataHash !== snapshot.calldataHash)
-      changed.unshift({
-        path: 'calldataHash',
-        expected: snapshot.calldataHash,
-        actual: rebuilt.snapshot.calldataHash,
-      })
-    return { ok: !changed.length, changed, findings: rebuilt.warnings }
+    return recheckSealedFacts({
+      snapshot,
+      facts,
+      rebuild: () => this.generate(chain, { ...raw, sender }),
+      tolerated: (c) => this.tolerated(c),
+    })
   }
 
   /**
