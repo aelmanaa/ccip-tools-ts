@@ -10,6 +10,7 @@
 
 import { getAddress } from 'ethers'
 
+import type { TransferDirection } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { canonicalHash } from '../../../canonical.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
@@ -35,6 +36,7 @@ import { encodeRateLimits } from '../decode.ts'
 import {
   inlineRecordOf,
   laneKey,
+  rateLimitBucketOf,
   resolveMultiTokenPoolLanes,
   tokenRecordsOf,
 } from '../projection.ts'
@@ -84,11 +86,15 @@ export type LiftMultiTokenPoolLaneStopsParams = StopMultiTokenPoolLanesParams &
   }
 
 /** The buckets of each direction (a stop holds them; a lift writes only the lifted direction's). */
-const DIRECTION_BUCKETS = {
-  outbound: ['outbound', 'fastFinalityOutbound'],
-  inbound: ['inbound', 'fastFinalityInbound'],
-  both: ['outbound', 'fastFinalityOutbound', 'inbound', 'fastFinalityInbound'],
-} as const satisfies Record<PauseDirection, readonly (keyof MultiTokenPoolRateLimits)[]>
+const bucketsOf = (d: TransferDirection) => [
+  rateLimitBucketOf(d, false),
+  rateLimitBucketOf(d, true),
+]
+const DIRECTION_BUCKETS: Record<PauseDirection, readonly (keyof MultiTokenPoolRateLimits)[]> = {
+  outbound: bucketsOf('outbound'),
+  inbound: bucketsOf('inbound'),
+  both: [...bucketsOf('outbound'), ...bucketsOf('inbound')],
+}
 
 const STOP: RateLimitConfig = { enabled: true, capacity: 0n, rate: 0n }
 

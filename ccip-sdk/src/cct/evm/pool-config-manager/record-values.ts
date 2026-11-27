@@ -10,7 +10,7 @@
 import { ZeroAddress, getAddress } from 'ethers'
 
 import { CCTParamsInvalidError } from '../../errors.ts'
-import type { MultiTokenPoolRateLimits } from '../../multi-token-pool.ts'
+import { type MultiTokenPoolRateLimits, RATE_LIMIT_BUCKETS } from '../../multi-token-pool.ts'
 import { validateCCVList } from '../advanced-pool-hooks/contracts.ts'
 import {
   validateDestOverheadFields,
@@ -25,8 +25,6 @@ import type {
 } from './records.ts'
 
 /** The four bucket names of a rate limit record. */
-const BUCKETS = ['outbound', 'inbound', 'fastFinalityOutbound', 'fastFinalityInbound'] as const
-
 /**
  * The four buckets of a rate limit record: each enabled with `rate <= capacity`, or disabled with
  * zero amounts (an omitted amount of a disabled bucket is `0n`).
@@ -44,7 +42,10 @@ export function parseMultiTokenPoolRateLimits(
     'rate limits (outbound, inbound, fastFinalityOutbound, fastFinalityInbound)',
   )
   return Object.fromEntries(
-    BUCKETS.map((b) => [b, parseRateLimitConfig(operation, `${at}.${b}`, input[b], null)]),
+    RATE_LIMIT_BUCKETS.map((b) => [
+      b,
+      parseRateLimitConfig(operation, `${at}.${b}`, input[b], null),
+    ]),
   ) as MultiTokenPoolRateLimits
 }
 

@@ -9,6 +9,7 @@ import { ZeroAddress, getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../chain.ts'
 import { decodeRemotePools } from '../../../evm/multi-token-pool.ts'
+import { RATE_LIMIT_BUCKETS } from '../../multi-token-pool.ts'
 import { decodeRemoteAddress, encodeRemoteAddress } from '../../remote-address.ts'
 import { nullableAddress } from '../multi-token-pool/contracts.ts'
 import { fromAbiRateLimitConfig, toAbiRateLimitConfig } from '../token-pool/rate-limit.ts'
@@ -48,12 +49,9 @@ export type AbiRateLimits = {
 
 /** @internal */
 export function decodeRateLimits(c: AbiRateLimits): MultiTokenPoolRateLimits {
-  return {
-    outbound: fromAbiRateLimitConfig(c.outbound),
-    inbound: fromAbiRateLimitConfig(c.inbound),
-    fastFinalityOutbound: fromAbiRateLimitConfig(c.fastFinalityOutbound),
-    fastFinalityInbound: fromAbiRateLimitConfig(c.fastFinalityInbound),
-  }
+  return Object.fromEntries(
+    RATE_LIMIT_BUCKETS.map((b) => [b, fromAbiRateLimitConfig(c[b])]),
+  ) as MultiTokenPoolRateLimits
 }
 
 /** @internal */
@@ -99,12 +97,7 @@ export function decodeSecurityConfig(c: {
 export function encodeRateLimits(c: MultiTokenPoolRateLimits): AbiRateLimits {
   const abi = (b: MultiTokenPoolRateLimits[keyof MultiTokenPoolRateLimits]) =>
     toAbiRateLimitConfig({ enabled: b.enabled, capacity: b.capacity ?? 0n, rate: b.rate ?? 0n })
-  return {
-    outbound: abi(c.outbound),
-    inbound: abi(c.inbound),
-    fastFinalityOutbound: abi(c.fastFinalityOutbound),
-    fastFinalityInbound: abi(c.fastFinalityInbound),
-  }
+  return Object.fromEntries(RATE_LIMIT_BUCKETS.map((b) => [b, abi(c[b])])) as AbiRateLimits
 }
 
 /** Encodes a security record (`decodeSecurityConfig`' inverse). @internal */

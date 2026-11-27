@@ -104,6 +104,14 @@ export type MultiTokenPoolRateLimits = {
   fastFinalityInbound: RateLimitConfig
 }
 
+/** The four buckets of a {@link MultiTokenPoolRateLimits}, in one place. @internal */
+export const RATE_LIMIT_BUCKETS = [
+  'outbound',
+  'inbound',
+  'fastFinalityOutbound',
+  'fastFinalityInbound',
+] as const satisfies readonly (keyof MultiTokenPoolRateLimits)[]
+
 /** The four rate-limit buckets of one lane, as core `RateLimiterState` (`null` = disabled). */
 export type MultiTokenPoolLaneRateLimits = {
   /** Outbound bucket (finality transfers, or every transfer without a fast-finality bucket). */
