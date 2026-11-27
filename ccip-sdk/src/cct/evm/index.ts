@@ -242,6 +242,7 @@ import {
   type GetTokenAdminRegistryResult,
   type RegisterAdminParams,
   type SetPoolParams,
+  type SetPoolUnsignedTx,
   type TransferAdminParams,
   AcceptAdmin,
   GetSupportedTokens,
@@ -723,7 +724,16 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
   /**
    * Builds an unsigned `setPool` tx (for multisig / offline signing).
    * A zero/empty `poolAddress` delists the token from the registry.
-   * @throws {@link CCTParamsInvalidError} if any param is invalid
+   *
+   * @remarks Unchanged for any pool that does not report a multi-token pool. For a multi-token pool,
+   * each lane its PoolConfigManager has for the token runs the lane check: `checkLanes: 'fund-loss'`
+   * (default) refuses only findings that lose funds and returns the rest in `warnings`; `'all'`
+   * refuses every error finding. A long-data lane not paused outbound needs `getChain` (its remote
+   * format decides whether a send mints); a legacy one builds without it. `requireOutboundPause`
+   * also requires the token served by the pool and paused outbound.
+   * @throws {@link CCTParamsInvalidError} if any param is invalid; for a multi-token pool, if a lane
+   * the switch makes live has a refused finding, or `requireOutboundPause` is set and the token is
+   * not served or not paused
    * @example
    * ```typescript
    * // build only — sign later (multisig / offline). `sender` must be the token's current admin.
@@ -735,7 +745,7 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * })
    * ```
    */
-  generateUnsignedSetPool(opts: SetPoolParams): Promise<UnsignedEVMTx> {
+  generateUnsignedSetPool(opts: SetPoolParams): Promise<SetPoolUnsignedTx> {
     return this.#setPool.generate(this.chain, opts)
   }
 

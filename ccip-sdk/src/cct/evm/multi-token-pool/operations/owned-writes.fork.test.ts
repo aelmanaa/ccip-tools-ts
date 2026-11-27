@@ -673,4 +673,37 @@ describe('MTTP owner-gated writes (Sepolia and Fuji forks)', { skip, timeout: 90
     )
     assert.deepEqual([check.ok, check.changed], [true, []])
   })
+  it('setPool to a multi-token pool checks the lanes it makes live; any other pool builds as before', async () => {
+    const FUJI = 14767482510784806043n
+    const token = getAddress('0x6377325E0D7F2E0D2Bc770860F0eB3B6c62F7cEd') // mttp-core, a long-data lane
+    const cct = EVMTokenManager.fromChain(sepolia.chain)
+    const getChain: ChainGetter = async (selector) =>
+      BigInt(selector) === FUJI ? fuji.chain : sepolia.chain
+    const registry = await sepolia.chain.getTokenAdminRegistryFor(CORE_POOL)
+    const params = { tokenAddress: token, poolAddress: CORE_POOL, address: registry }
+    // a long-data lane that sends needs its remote read
+    const unread = await withForkRetry(() =>
+      rejectionOf(cct.generateUnsignedSetPool(params), 'expected a refusal'),
+    )
+    assert.ok(unread instanceof CCTParamsInvalidError && unread.context.param === 'poolAddress')
+    assert.match(String(unread.context.reason), /REMOTE_UNREADABLE/)
+    const built = await withForkRetry(() => cct.generateUnsignedSetPool({ ...params, getChain }))
+    assert.ok(built.affectedLanes!.some((l) => l.remoteChainSelector === FUJI))
+    assert.ok(Array.isArray(built.warnings))
+    // the token is not paused outbound: requireOutboundPause refuses
+    const unpaused = await withForkRetry(() =>
+      rejectionOf(
+        cct.generateUnsignedSetPool({ ...params, getChain, requireOutboundPause: true }),
+        'expected a refusal',
+      ),
+    )
+    assert.ok(unpaused instanceof CCTParamsInvalidError)
+    assert.match(String(unpaused.context.reason), /not paused outbound/)
+    // any other contract (here a policy store) builds exactly as before: no lanes, no warnings
+    const other = await withForkRetry(() =>
+      cct.generateUnsignedSetPool({ ...params, poolAddress: store }),
+    )
+    assert.equal(other.affectedLanes, undefined)
+    assert.equal(other.warnings, undefined)
+  })
 })

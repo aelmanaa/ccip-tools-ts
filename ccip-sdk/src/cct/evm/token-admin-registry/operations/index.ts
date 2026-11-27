@@ -14,5 +14,5 @@ export {
   type RegisterAdminParams,
   RegisterAdmin,
 } from './register-admin.ts'
-export { type SetPoolParams, SetPool } from './set-pool.ts'
+export { type SetPoolParams, type SetPoolUnsignedTx, SetPool } from './set-pool.ts'
 export { type TransferAdminParams, TransferAdmin } from './transfer-admin.ts'

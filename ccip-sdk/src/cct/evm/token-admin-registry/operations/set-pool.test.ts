@@ -25,6 +25,8 @@ function stubChain(onAddress?: (address: string) => void): EVMChain {
   return {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     network: networkInfo('ethereum-testnet-sepolia-base-1'),
+    // a pool that answers no typeAndVersion (a custom pool): setPool builds as it always did
+    typeAndVersion: () => Promise.reject(makeError('execution reverted', 'CALL_EXCEPTION')),
     getTokenAdminRegistryFor: (address: string) => {
       onAddress?.(address)
       return Promise.resolve(TAR)
