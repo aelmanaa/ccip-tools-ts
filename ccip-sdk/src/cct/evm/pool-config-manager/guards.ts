@@ -24,11 +24,11 @@ import {
   DEFAULT_MIN_DEST_GAS_OVERHEAD,
   HOOK_DEST_GAS_OVERHEAD,
   LEGACY_POOL_DATA_BYTES,
-  isStop,
+  effectiveRateLimit,
+  isLaneStopped,
   longPoolDataBytes,
   sortFindings,
 } from '../../multi-token-pool.ts'
-import type { RateLimitConfig } from '../../rate-limit.ts'
 import { parseUniqueRemoteAddresses } from '../../remote-address.ts'
 import {
   assertUnique,
@@ -524,7 +524,8 @@ export function evaluateMultiTokenPoolGuards({
     // spec's onboarding exception, as on Solana): nothing is sent, so nothing burns; the unpause or
     // lift re-check runs with no exception
     const waiting =
-      (c.isTokenOutboundPaused || stopsOutbound(lane.rateLimits)) && remote.registryPool === null
+      (c.isTokenOutboundPaused || isLaneStopped(lane.rateLimits, 'outbound')) &&
+      remote.registryPool === null
     if (remote.registryPool === null) {
       if (!waiting)
         add(
@@ -768,11 +769,15 @@ export function validateMultiTokenPoolGuardOptions(
   }
 }
 
-/** Whether a lane is live in a direction: it has a connection and no pause holds that direction. */
+/**
+ * Whether a lane is live in a direction: it has a connection, and neither a pause nor a rate limit
+ * stop holds that direction (so lifting a stop shows in `goingLive`).
+ */
 function liveIn(l: ProjectedMultiTokenPoolLane, d: TransferDirection): boolean {
   return (
     l.connection.hasConnection &&
-    !(d === 'outbound' ? l.connection.isOutboundPaused : l.connection.isInboundPaused)
+    !(d === 'outbound' ? l.connection.isOutboundPaused : l.connection.isInboundPaused) &&
+    !isLaneStopped(l.rateLimits, d)
   )
 }
 
@@ -863,23 +868,12 @@ export function multiTokenPoolPcmLaneCheck(
 }
 
 /**
- * Whether a lane's rate limits hold every outbound send: the outbound bucket is a stop, and so is
- * the fast-finality outbound bucket when it is enabled (a disabled one sends nothing faster).
- * @internal
- */
-export function stopsOutbound(rateLimits: MultiTokenPoolRateLimits | null): boolean {
-  if (!rateLimits) return false
-  const stop = (r: RateLimitConfig) =>
-    isStop({ isEnabled: r.enabled, capacity: r.capacity ?? 0n, rate: r.rate ?? 0n })
-  const fast = rateLimits.fastFinalityOutbound
-  return stop(rateLimits.outbound) && (!fast.enabled || stop(fast))
-}
-
-/**
- * Whether a write loosens a lane's rate limits: any bucket disabled from enabled, or given more
- * capacity or rate (lifting a stop included). A lane gaining its record counts, and so does a lane
- * left with none (its transfers would revert: `RECORD_MISSING` must be judged); enabling a disabled
- * bucket, lowering a limit, or stopping does not.
+ * Whether a write loosens a lane's rate limits: the limit any transfer consumes (each direction, each
+ * finality, through {@link effectiveRateLimit}: a disabled fast-finality bucket falls back to the
+ * default one) is no longer enforced, or has more capacity or rate (lifting a stop included). A lane
+ * gaining its record counts, and so does a lane left with none (its transfers would revert:
+ * `RECORD_MISSING` must be judged). Enforcing a limit that was not, lowering one, or stopping does
+ * not loosen.
  * @internal
  */
 export function loosensRateLimits(
@@ -887,13 +881,15 @@ export function loosensRateLimits(
   after: MultiTokenPoolRateLimits | null,
 ): boolean {
   if (!after || !before) return before !== after
-  return (Object.keys(after) as (keyof MultiTokenPoolRateLimits)[]).some((bucket) => {
-    const b = before[bucket]
-    const a = after[bucket]
-    if (!a.enabled) return b.enabled
-    if (!b.enabled) return false
-    return a.capacity > b.capacity || a.rate > b.rate
-  })
+  return TRANSFER_DIRECTIONS.some((direction) =>
+    [false, true].some((fastFinality) => {
+      const b = effectiveRateLimit(before, direction, fastFinality)
+      const a = effectiveRateLimit(after, direction, fastFinality)
+      if (!a.enabled) return b.enabled
+      if (!b.enabled) return false
+      return a.capacity > b.capacity || a.rate > b.rate
+    }),
+  )
 }
 
 /**

@@ -17,7 +17,7 @@ import {
   type MultiTokenPoolExpectedSnapshot,
   type MultiTokenPoolRateLimits,
   type MultiTokenPoolSnapshot,
-  isStop,
+  isLaneStopped,
 } from '../../../multi-token-pool.ts'
 import type { RateLimitConfig } from '../../../rate-limit.ts'
 import {
@@ -91,17 +91,6 @@ export function stoppedRateLimits(
   const out = structuredClone(rateLimits)
   for (const bucket of STOPPED_BUCKETS[direction]) out[bucket] = { ...STOP }
   return out
-}
-
-/** Whether every bucket of the direction is a stop. @internal */
-export function isStoppedIn(
-  rateLimits: MultiTokenPoolRateLimits,
-  direction: PauseDirection,
-): boolean {
-  return STOPPED_BUCKETS[direction].every((bucket) => {
-    const b = rateLimits[bucket]
-    return isStop({ isEnabled: b.enabled, capacity: b.capacity ?? 0n, rate: b.rate ?? 0n })
-  })
 }
 
 /** The snapshot path of a lane's inline rate limit record (absent: `null`). */
@@ -204,7 +193,7 @@ export class StopMultiTokenPoolLanes extends LaneStopWriteOperation<StopMultiTok
           `lanes[${i}]`,
           `no rate limit resolves for ${lane.tokenAddress} → ${lane.remoteChainSelector} (no connection, or no rate limit record): there is no lane to stop`,
         )
-      if (isStoppedIn(rateLimits, direction))
+      if (isLaneStopped(rateLimits, direction))
         throw this.refuse(
           `lanes[${i}]`,
           `is already stopped ${direction}: nothing to do (lift it with liftMultiTokenPoolLaneStops)`,
@@ -279,7 +268,7 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
     const set: { lane: MultiTokenPoolLaneKey; rateLimits: MultiTokenPoolRateLimits }[] = []
     lanes.forEach((lane, i) => {
       const current = inlineRecordOf(state, 'rateLimit', lane)
-      if (!current || !isStoppedIn(current.rateLimits, direction))
+      if (!current || !isLaneStopped(current.rateLimits, direction))
         throw this.refuse(
           `lanes[${i}]`,
           `is not stopped ${direction}${current ? '' : ' (it has no inline rate limit record)'}: nothing to lift`,

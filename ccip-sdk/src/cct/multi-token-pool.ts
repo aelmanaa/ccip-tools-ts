@@ -876,3 +876,46 @@ export type MultiTokenPoolInlineRemotePoolDrop = {
    */
   flags?: (typeof DROPPABLE_REMOTE_POOL_FLAGS)[number][]
 }
+
+/** The fast-finality bucket of each direction. */
+const FAST_FINALITY_BUCKETS = {
+  outbound: 'fastFinalityOutbound',
+  inbound: 'fastFinalityInbound',
+} as const satisfies Record<TransferDirection, keyof MultiTokenPoolRateLimits>
+
+/**
+ * The bucket a transfer of one direction and finality consumes, as the store resolves it
+ * (chainlink-ccip c950d9bc `SecurityPolicyStore._consumeRateLimit`): a fast-finality transfer uses
+ * the fast-finality bucket when it is enabled, else the direction's default bucket. A disabled
+ * default bucket is no limit.
+ * @internal
+ */
+export function effectiveRateLimit(
+  rateLimits: MultiTokenPoolRateLimits,
+  direction: TransferDirection,
+  fastFinality: boolean,
+): RateLimitConfig {
+  const fast = rateLimits[FAST_FINALITY_BUCKETS[direction]]
+  return fastFinality && fast.enabled ? fast : rateLimits[direction]
+}
+
+/**
+ * Whether a lane's rate limits hold every transfer of a direction (`'both'`: of each direction):
+ * the bucket each finality consumes is a stop. The one rule the lane view (`stopped`), the guard's
+ * waiver, `goingLive` and the lane stop ops share. A lane with no rate limits is not stopped.
+ * @internal
+ */
+export function isLaneStopped(
+  rateLimits: MultiTokenPoolRateLimits | null | undefined,
+  direction: TransferDirection | 'both',
+): boolean {
+  if (!rateLimits) return false
+  const directions: TransferDirection[] =
+    direction === 'both' ? ['outbound', 'inbound'] : [direction]
+  return directions.every((d) =>
+    [false, true].every((fastFinality) => {
+      const b = effectiveRateLimit(rateLimits, d, fastFinality)
+      return isStop({ isEnabled: b.enabled, capacity: b.capacity ?? 0n, rate: b.rate ?? 0n })
+    }),
+  )
+}

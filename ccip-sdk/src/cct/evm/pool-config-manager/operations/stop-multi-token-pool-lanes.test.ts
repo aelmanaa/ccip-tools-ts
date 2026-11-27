@@ -4,12 +4,11 @@ import { describe, it } from 'node:test'
 import { getAddress } from 'ethers'
 
 import { CCTParamsInvalidError } from '../../../errors.ts'
-import type { MultiTokenPoolRateLimits } from '../../../multi-token-pool.ts'
+import { type MultiTokenPoolRateLimits, isLaneStopped } from '../../../multi-token-pool.ts'
 import { POOL, stackChain } from '../../multi-token-pool/stack.test.helpers.ts'
 import {
   LiftMultiTokenPoolLaneStops,
   StopMultiTokenPoolLanes,
-  isStoppedIn,
   stoppedRateLimits,
 } from './stop-multi-token-pool-lanes.ts'
 
@@ -31,10 +30,10 @@ describe('lane stops (cct/evm pool-config-manager)', () => {
     assert.deepEqual(out.outbound, { enabled: true, capacity: 0n, rate: 0n })
     assert.deepEqual(out.fastFinalityOutbound, { enabled: true, capacity: 0n, rate: 0n })
     assert.deepEqual([out.inbound, out.fastFinalityInbound], [on, on])
-    assert.equal(isStoppedIn(out, 'outbound'), true)
-    assert.equal(isStoppedIn(out, 'inbound'), false)
-    assert.equal(isStoppedIn(out, 'both'), false)
-    assert.equal(isStoppedIn(stoppedRateLimits(limits, 'both'), 'inbound'), true)
+    assert.equal(isLaneStopped(out, 'outbound'), true)
+    assert.equal(isLaneStopped(out, 'inbound'), false)
+    assert.equal(isLaneStopped(out, 'both'), false)
+    assert.equal(isLaneStopped(stoppedRateLimits(limits, 'both'), 'inbound'), true)
     // the input is not mutated
     assert.deepEqual(limits.outbound, on)
   })
