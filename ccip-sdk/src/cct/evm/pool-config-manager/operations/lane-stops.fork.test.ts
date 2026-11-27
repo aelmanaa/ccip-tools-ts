@@ -23,6 +23,7 @@ import { CCTParamsInvalidError } from '../../../errors.ts'
 import type { RateLimitConfig } from '../../../rate-limit.ts'
 import { EVMTokenManager } from '../../index.ts'
 import { ApplyMultiTokenPoolInlineRateLimitBucketUpdates } from './apply-multi-token-pool-inline-rate-limit-bucket-updates.ts'
+import { ApplyMultiTokenPoolRateLimitPolicyBucketUpdates } from './apply-multi-token-pool-rate-limit-policy-bucket-updates.ts'
 import { mined as minedOn } from './fork.test.helpers.ts'
 import {
   LiftMultiTokenPoolLaneStops,
@@ -271,5 +272,47 @@ describe('MTTP lane stops (Sepolia fork)', { skip, timeout: 600_000 }, () => {
         e instanceof CCTParamsInvalidError &&
         (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL'),
     )
+  })
+
+  it('binds the copied direction: a pending Safe stop goes stale when the policy moves under it (R1 M3)', async (t) => {
+    if (!deployed) return t.skip('mttp-core not deployed')
+    const lanes = [{ tokenAddress: POLICY_TOKEN, remoteChainSelector: FUJI }]
+    // the proposal: an unsigned outbound stop, which copies inbound from the policy as it is now
+    const built = await stop.generate(chain, {
+      poolAddress: CORE_POOL,
+      lanes,
+      direction: 'outbound',
+    })
+    const policy = await cct.getMultiTokenPoolRateLimitPolicy({
+      poolAddress: CORE_POOL,
+      policyName: 'core-pol',
+    })
+    const inbound = policy.records.find((r) => r.remoteChainSelector === FUJI)!.rateLimits.inbound
+    assert.ok(inbound.enabled)
+    // meanwhile the policy's inbound is clamped (a tightening: never judged)
+    await mined(
+      new ApplyMultiTokenPoolRateLimitPolicyBucketUpdates().execute(chain, {
+        poolAddress: CORE_POOL,
+        wallet: await signer(CORE_CONFIG),
+        updates: [
+          {
+            policyName: 'core-pol',
+            remoteChainSelector: FUJI,
+            direction: 'inbound',
+            fastFinality: false,
+            config: { enabled: true, capacity: inbound.capacity / 2n, rate: inbound.rate / 2n },
+          },
+        ],
+      }),
+    )
+    // executing the stop now would pin inbound back to the old, looser copy: the re-check says stale
+    const check = await cct.checkMultiTokenPoolSnapshot({
+      snapshot: built.snapshot,
+      transaction: built,
+      sender: CORE_CONFIG,
+      getChain,
+    })
+    assert.equal(check.ok, false)
+    assert.ok(check.changed.some((c) => c.path === 'guardInputsHash'))
   })
 })

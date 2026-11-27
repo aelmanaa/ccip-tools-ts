@@ -7364,6 +7364,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * it replaced (or that there was none) and the buckets it copied: keep it to `restore` the lane.
    * A stop only tightens, so it is never refused by a lane rule and reads no remote fact.
    *
+   * An inline record holds all four buckets, so the direction not stopped is pinned to its values at
+   * the build block until the lift: policy edits no longer reach the stopped lane, an emergency clamp
+   * of the policy included. On a policy lane, stop `'both'` in an incident. A pending (unsigned)
+   * stop is bound to those copied values: if they move before it executes,
+   * `checkMultiTokenPoolSnapshot` reports it stale (and the signed path refuses it).
+   *
    * `sender` is optional (multisig and offline signing): with it the gate is pre-flighted and the
    * write simulated from it; without it each store call is simulated from the PoolConfigManager
    * (`simulatedFrom: 'pcm'`), which checks everything but the role gate.
@@ -7410,6 +7416,12 @@ export class EVMTokenManager extends TokenManager<typeof ChainFamily.EVM> {
    * {@link generateUnsignedLiftMultiTokenPoolLaneStops}. The returned `snapshot` records the record
    * it replaced (or that there was none) and the buckets it copied: keep it to `restore` the lane.
    * A stop only tightens, so it is never refused by a lane rule and reads no remote fact.
+   *
+   * An inline record holds all four buckets, so the direction not stopped is pinned to its values at
+   * the build block until the lift: policy edits no longer reach the stopped lane, an emergency clamp
+   * of the policy included. On a policy lane, stop `'both'` in an incident. A pending (unsigned)
+   * stop is bound to those copied values: if they move before it executes,
+   * `checkMultiTokenPoolSnapshot` reports it stale (and the signed path refuses it).
    *
    * Gate: `CONFIG_ROLE`, `TOKEN_MANAGER_ROLE` or `RATE_LIMIT_ROLE` (`_checkTokenRoles`).
    *

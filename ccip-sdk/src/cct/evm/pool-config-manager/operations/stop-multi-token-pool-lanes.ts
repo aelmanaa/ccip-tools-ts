@@ -50,7 +50,9 @@ import {
 
 /**
  * Parameters of `stopMultiTokenPoolLanes`: the lanes to stop, and the direction. A stop is the
- * emergency action: it is never refused by a lane rule (it only tightens).
+ * emergency action: it is never refused by a lane rule (it only tightens). An inline record holds all
+ * four buckets, so the direction not stopped is pinned to its values at the build until the lift
+ * (policy edits no longer reach the lane): on a policy lane, stop `'both'` in an incident.
  */
 export type StopMultiTokenPoolLanesParams = PoolConfigManagerWriteParams &
   MultiTokenPoolExpectedSnapshot & {
