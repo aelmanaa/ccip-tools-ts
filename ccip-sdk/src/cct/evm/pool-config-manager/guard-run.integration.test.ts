@@ -23,6 +23,7 @@ import {
   getMultiTokenPoolInterface,
 } from '../multi-token-pool/contracts.ts'
 import { type RunMultiTokenPoolGuardsInput, runMultiTokenPoolGuards } from './guard-run.ts'
+import { ApplyMultiTokenPoolRateLimitPolicyBucketUpdates } from './operations/apply-multi-token-pool-rate-limit-policy-bucket-updates.ts'
 
 const skip = !!process.env.SKIP_INTEGRATION_TESTS
 
@@ -121,19 +122,17 @@ describe('MTTP post-state guard (Sepolia v5v9, read-only)', { skip, timeout: 600
     )
   })
 
-  it('refuses a write that leaves the lanes live outbound toward the missing remote side', async (t) => {
+  it('never refuses a pause on the lanes it touches, even one that leaves them live outbound toward the missing remote side', async (t) => {
     if (!deployed) return t.skip('v5v9 multi-token pool not deployed')
-    await assert.rejects(
-      runMultiTokenPoolGuards({
-        ...base,
-        operation: 'pauseMultiTokenPoolTokens',
-        data: pause(INBOUND),
-      }),
-      (e: unknown) =>
-        e instanceof CCTParamsInvalidError &&
-        e.context.param === 'guards' &&
-        (e.context.findings as { check: string }[]).every((f) => f.check === 'NO_REMOTE_POOL'),
-    )
+    // the scope comes from the calldata (pauseTokens), so a direct guard call and a snapshot
+    // re-check judge it as the op build does: projected, simulated, sealed, never judged
+    const r = await runMultiTokenPoolGuards({
+      ...base,
+      operation: 'pauseMultiTokenPoolTokens',
+      data: pause(INBOUND),
+    })
+    assert.equal(r.affectedLanes.length, FUJI_TOKENS.length)
+    assert.deepEqual(r.warnings, [])
   })
 
   it('refuses a write the sender cannot execute, with the decoded revert', async (t) => {
@@ -228,5 +227,39 @@ describe('MTTP post-state guard (Sepolia v5v9, read-only)', { skip, timeout: 600
     assert.deepEqual(r.affectedLanes, [lane])
     assert.deepEqual(r.warnings, [])
     testLogger.info(`healthy lane projectionVerified: ${r.projectionVerified}`)
+  })
+
+  it('builds a clamp on a lane that fails a rule, and refuses loosening it (bucket writes judge only what they loosen)', async (t) => {
+    if (!deployed) return t.skip('v5v9 multi-token pool not deployed')
+    // policy v5 holds the Fuji lanes' rate limit (outbound 100e18 / 1e17); their remote side does not
+    // exist (NO_REMOTE_POOL), so any judged write on them is refused
+    const op = new ApplyMultiTokenPoolRateLimitPolicyBucketUpdates()
+    const bucket = (capacity: bigint, rate: bigint) =>
+      op.generate(base.chain, {
+        poolAddress: POOL,
+        sender: OPERATOR,
+        getChain: base.getChain!,
+        updates: [
+          {
+            policyName: 'v5',
+            remoteChainSelector: FUJI,
+            direction: 'outbound',
+            fastFinality: false,
+            config: { enabled: true, capacity, rate },
+          },
+        ],
+      })
+    // tighten and stop: built, never judged
+    const clamp = await bucket(50n * 10n ** 18n, 5n * 10n ** 16n)
+    assert.ok(clamp.affectedLanes.length > 0)
+    await bucket(0n, 0n)
+    // more capacity: the lanes are judged, and their missing remote side refuses it
+    await assert.rejects(bucket(200n * 10n ** 18n, 10n ** 17n), (e: unknown) => {
+      testLogger.info(`loosen refused: ${(e as Error).message}`)
+      return (
+        e instanceof CCTParamsInvalidError &&
+        (e.context.findings as { check: string }[]).some((f) => f.check === 'NO_REMOTE_POOL')
+      )
+    })
   })
 })

@@ -34,6 +34,7 @@ import {
   ANY_FINALITY_CONFIG,
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
+  multiTokenPoolFunctionOf,
   poolConfigManagerContract,
 } from '../multi-token-pool/contracts.ts'
 import { decodeError, simulateEVMTx } from '../simulate.ts'
@@ -53,6 +54,7 @@ import {
   type MultiTokenPoolLaneDirections,
   evaluateMultiTokenPoolGuards,
   guardLaneKey,
+  loosensRateLimits,
   multiTokenPoolAffectedLanes,
   multiTokenPoolCandidateLanes,
   multiTokenPoolChainLanes,
@@ -115,11 +117,6 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   errorContext?: Record<string, unknown>
   /** The op's own state read at `blockTag`, so a build reads the state once. */
   stateRead?: MultiTokenPoolRecordStateRead
-  /**
-   * `false` for a pause: the lanes are projected, the write simulated and the snapshot sealed, but no
-   * remote fact is read and no lane rule refuses. Defaults to `true`.
-   */
-  judgeLanes?: boolean
 }
 
 /** What a guarded write reports (the fields of `MultiTokenPoolUnsignedTx`). @internal */
@@ -178,8 +175,16 @@ export async function runMultiTokenPoolGuards(
   )
   const afterLanes = lanes.map((l) => l.after)
   // a pause is the emergency action: it never reads remote facts, and never refuses on what is
-  // wrong with the lanes it stops (it is still gated, simulated and sealed)
-  const judge = input.judgeLanes !== false
+  // wrong with the lanes it stops (it is still gated, simulated and sealed); a bucket write judges
+  // only the lanes it loosens
+  const scope = laneJudgingOf(decoded.functionName)
+  const judged =
+    scope === 'none'
+      ? []
+      : scope === 'loosened'
+        ? lanes.filter((l) => loosensRateLimits(l.before.rateLimits, l.after.rateLimits))
+        : lanes
+  const judge = judged.length > 0
   const facts: MultiTokenPoolGuardFacts = !judge
     ? {
         remoteLanes: new Map(),
@@ -195,7 +200,7 @@ export async function runMultiTokenPoolGuards(
         tokenAdminRegistry: staticConfig.tokenAdminRegistry,
         blockTag: blockNumber,
         ...(input.poolAddress && { poolAddress: input.poolAddress }),
-        requests: requiredMultiTokenPoolGuardFacts(afterLanes),
+        requests: requiredMultiTokenPoolGuardFacts(judged.map((l) => l.after)),
         ...(input.getChain && { getChain: input.getChain }),
         ...(input.remoteAttestations && { remoteAttestations: input.remoteAttestations }),
         now: BigInt(Math.floor(Date.now() / 1000)),
@@ -211,7 +216,7 @@ export async function runMultiTokenPoolGuards(
     ...new Set(afterLanes.map((l) => l.remoteChainSelector)),
   ])
   const { findings, factFailures } = judge
-    ? evaluateMultiTokenPoolGuards({ after, lanes, chainLanes, facts, options: input })
+    ? evaluateMultiTokenPoolGuards({ after, lanes: judged, chainLanes, facts, options: input })
     : { findings: [], factFailures: [] }
 
   if (factFailures.length) {
@@ -870,4 +875,26 @@ async function crossCheckWithSimulateV1(
       })
   })
   return true
+}
+
+/**
+ * Which lanes the lane rules judge for a PCM function (the write is always projected, simulated and
+ * sealed, and the scope is read from the calldata, so a snapshot re-check judges as the build did):
+ * - a pause, the emergency action: `'none'`, and no remote fact is read;
+ * - a rate limit bucket write: `'loosened'`, only the lanes whose rate limits it loosens (a stop
+ *   lifted, a bucket disabled, more capacity or rate), so a write that only tightens or stops a lane
+ *   is never refused by a lane rule and an operator can always clamp a broken lane;
+ * - any other write: `'all'`, every lane it changes.
+ * @internal
+ */
+export function laneJudgingOf(functionName: string): 'all' | 'loosened' | 'none' {
+  return LANE_JUDGING[functionName] ?? 'all'
+}
+
+const LANE_JUDGING: Readonly<Record<string, 'loosened' | 'none'>> = {
+  [multiTokenPoolFunctionOf('pauseMultiTokenPoolGlobally')]: 'none',
+  [multiTokenPoolFunctionOf('pauseMultiTokenPoolTokens')]: 'none',
+  [multiTokenPoolFunctionOf('pauseMultiTokenPoolChains')]: 'none',
+  [multiTokenPoolFunctionOf('applyMultiTokenPoolInlineRateLimitBucketUpdates')]: 'loosened',
+  [multiTokenPoolFunctionOf('applyMultiTokenPoolRateLimitPolicyBucketUpdates')]: 'loosened',
 }

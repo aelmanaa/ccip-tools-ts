@@ -43,10 +43,11 @@ export type ApplyMultiTokenPoolInlineRateLimitBucketUpdatesParams = PoolConfigMa
 
 /**
  * Writes single buckets of existing inline rate limit records, keeping the other buckets. A bucket enabled with no
- * capacity and no rate stops its direction (see `stopMultiTokenPoolLanes`); the lane guard runs on
- * every lane the buckets change.
+ * capacity and no rate stops its direction (see `stopMultiTokenPoolLanes`); the lane rules judge only
+ * the lanes a bucket loosens (a stop lifted, a bucket disabled, more capacity or rate): a write that
+ * only tightens or stops is never refused by a lane rule, so a broken lane can always be clamped.
  * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), the record does not
- *   exist, `sender` lacks the gate, or a lane guard refuses; `context.recordType` is `'rateLimit'`
+ *   exist, `sender` lacks the gate, or a lane guard refuses a loosened lane; `context.recordType` is `'rateLimit'`
  */
 export class ApplyMultiTokenPoolInlineRateLimitBucketUpdates extends PoolConfigManagerWriteOperation<ApplyMultiTokenPoolInlineRateLimitBucketUpdatesParams> {
   readonly name = 'applyMultiTokenPoolInlineRateLimitBucketUpdates'

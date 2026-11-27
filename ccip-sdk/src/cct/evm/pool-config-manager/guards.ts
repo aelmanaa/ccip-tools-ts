@@ -898,3 +898,24 @@ export function stopsOutbound(rateLimits: MultiTokenPoolRateLimits | null): bool
   const fast = rateLimits.fastFinalityOutbound
   return stop(rateLimits.outbound) && (!fast.enabled || stop(fast))
 }
+
+/**
+ * Whether a write loosens a lane's rate limits: any bucket disabled from enabled, or given more
+ * capacity or rate (lifting a stop included). A lane gaining its record counts; enabling a disabled
+ * bucket, lowering a limit, or stopping does not.
+ * @internal
+ */
+export function loosensRateLimits(
+  before: MultiTokenPoolRateLimits | null,
+  after: MultiTokenPoolRateLimits | null,
+): boolean {
+  if (!after) return false
+  if (!before) return true
+  return (Object.keys(after) as (keyof MultiTokenPoolRateLimits)[]).some((bucket) => {
+    const b = before[bucket]
+    const a = after[bucket]
+    if (!a.enabled) return b.enabled
+    if (!b.enabled) return false
+    return a.capacity > b.capacity || a.rate > b.rate
+  })
+}
