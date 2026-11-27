@@ -9,17 +9,22 @@ import { BN } from '@coral-xyz/anchor'
 import { type AccountMeta, type TransactionInstruction, PublicKey } from '@solana/web3.js'
 
 import type { SolanaChain } from '../../../../solana/index.ts'
+import { getMultipleAccountsInfoPaged } from '../../../../solana/utils.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import type { SolanaGenerateParams } from '../../operation.ts'
-import { deriveEventAuthorityPda } from '../../programs/token-pool.ts'
+import { deriveEventAuthorityPda, deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
+import { parsePublicKey } from '../../validate.ts'
 import { poolGroupPdas, poolGroupsCoder } from '../accounts.ts'
 import { decodeRoles, toBigInt } from '../decode.ts'
+import { isUnread } from '../lane.ts'
 import { type PoolGroupPackItem, oneTransactionChecks } from '../packer.ts'
+import { type PoolState, poolState } from '../remote-lane.ts'
 import type { PoolGroupLaneKey, PoolGroupPolicyClass } from '../types.ts'
 import { type ParsedPoolGroupWrite, parseWriteBase } from '../write-operation.ts'
 import type {
   PoolGroupFollowUp,
   PoolGroupGuardOptions,
+  PoolGroupUnsignedResult,
   PoolGroupWriteParams,
 } from '../write-types.ts'
 import { type ParsedPoolGroupRef, parsePoolGroupRef } from './common.ts'
@@ -360,3 +365,193 @@ export function ccvSyncFollowUps(
     inputs: { remoteChainSelector, tokenAddresses },
   }))
 }
+
+/**
+ * Membership writes hand the pool group's owner and admins the lanes' CONNECTION trust: refuse a
+ * group whose owner is not `expectedOwner` (defaults to `authority`).
+ * @throws {@link CCTParamsInvalidError} (param `expectedOwner`) otherwise
+ * @internal
+ */
+export function requireExpectedGroupOwner(
+  operation: string,
+  owner: PublicKey,
+  expectedOwner: PublicKey,
+): void {
+  if (!owner.equals(expectedOwner))
+    throw new CCTParamsInvalidError(
+      operation,
+      'expectedOwner',
+      `the pool group is owned by ${owner.toBase58()}, not ${expectedOwner.toBase58()}: its owner, policy admin and connection admin can change what these lanes trust. To proceed, pass expectedOwner: ${owner.toBase58()}`,
+    )
+}
+
+/**
+ * The pool group owner who co-signs a membership write (`require_membership_approved`), or `null`
+ * with open membership. One Squads vault signs for one key, so a second signer is refused there.
+ * @throws {@link CCTParamsInvalidError} (param `poolGroupOwner`) if it is not the group's owner, or
+ *   two signers would be needed under Squads
+ * @internal
+ */
+export function membershipCoSigner(
+  operation: string,
+  group: { owner: PublicKey; openMembership: boolean },
+  poolGroupOwner: PublicKey | undefined,
+  authority: PublicKey,
+  budget: ParsedPoolGroupWrite['budget'],
+): PublicKey | null {
+  const owner = group.openMembership ? null : (poolGroupOwner ?? group.owner)
+  if (owner && !owner.equals(group.owner))
+    throw new CCTParamsInvalidError(
+      operation,
+      'poolGroupOwner',
+      `the pool group owner is ${group.owner.toBase58()}, who co-signs while membership is closed`,
+    )
+  if (owner && !owner.equals(authority) && budget?.executor === 'squads-v4')
+    throw new CCTParamsInvalidError(
+      operation,
+      'poolGroupOwner',
+      'the pool owner and the pool group owner must both sign, and one Squads vault signs for one key: open the membership (setPoolGroupSettings openMembership), or hold both roles in one vault',
+    )
+  return owner
+}
+
+/**
+ * The pool `State`s of `mints` under `program`, in one paged read; with `owner`, each must be
+ * owned by it (the lane owner gate of the membership and lane writes).
+ * @throws {@link CCTParamsInvalidError} if a mint has no pool there, or `owner` does not own it
+ * @internal
+ */
+export async function readPoolStates(
+  operation: string,
+  chain: SolanaChain,
+  program: PublicKey,
+  mints: readonly PublicKey[],
+  owner?: PublicKey,
+): Promise<PoolState[]> {
+  const addresses = mints.map((m) => deriveTokenPoolConfigPda(program, m))
+  const infos = await getMultipleAccountsInfoPaged(chain.connection, addresses)
+  return mints.map((mint, i) => {
+    const info = infos[i]
+    const pool =
+      info?.owner.equals(program) &&
+      poolState(addresses[i]!, info, `the pool State of ${mint.toBase58()}`)
+    if (!pool || isUnread(pool))
+      throw new CCTParamsInvalidError(
+        operation,
+        'tokenAddresses',
+        `${mint.toBase58()} has no pool State under ${program.toBase58()}${pool ? ` (${pool.reason})` : ''}`,
+      )
+    if (owner && !pool.state.owner.equals(owner))
+      throw new CCTParamsInvalidError(
+        operation,
+        'authority',
+        `${owner.toBase58()} does not own the pool of ${mint.toBase58()} (owner ${pool.state.owner.toBase58()}), who signs for its lanes`,
+      )
+    return pool
+  })
+}
+
+/**
+ * The trust echo of a membership write: the owner, the admins who can rewrite CONNECTION, and the
+ * CONNECTION pools the lanes trust by chain.
+ * @internal
+ */
+export function poolGroupTrustOf(
+  group: { owner: PublicKey; roles: Parameters<typeof decodeRoles>[0] },
+  remotePools: { remoteChainSelector: bigint; addresses: string[] }[],
+): NonNullable<PoolGroupUnsignedResult['poolGroupTrust']> {
+  const roles = decodeRoles(group.roles)
+  return {
+    owner: group.owner.toBase58(),
+    policyAdmin: roles.policyAdmin,
+    connectionAdmin: roles.connectionAdmin,
+    remotePools,
+  }
+}
+
+/** The key of a lane, for sets. @internal */
+export const laneId = (l: PoolGroupLaneKey) => `${l.tokenAddress}:${l.remoteChainSelector}`
+
+/**
+ * Parses an optional list of lanes (`acknowledgeLiveAdmission`, `confirmInFlightDrained`, ...):
+ * canonical mints, each lane once.
+ * @throws {@link CCTParamsInvalidError} if it is not an array of lane keys
+ * @internal
+ */
+export function parseLaneKeys(
+  operation: string,
+  param: string,
+  value: unknown,
+): PoolGroupLaneKey[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new CCTParamsInvalidError(operation, param, 'must be an array')
+  const lanes = value.map((l: unknown, i) => {
+    const selector: unknown = Reflect.get(Object(l), 'remoteChainSelector')
+    if (typeof selector !== 'bigint' || selector < 1n)
+      throw new CCTParamsInvalidError(
+        operation,
+        `${param}[${i}].remoteChainSelector`,
+        'must be a bigint selector',
+      )
+    return {
+      tokenAddress: parsePublicKey(
+        operation,
+        `${param}[${i}].tokenAddress`,
+        Reflect.get(Object(l), 'tokenAddress'),
+      ).toBase58(),
+      remoteChainSelector: selector,
+    }
+  })
+  return [...new Map(lanes.map((l) => [laneId(l), l])).values()]
+}
+
+/**
+ * The mints of pool `State` accounts a proposal names (each a pool State of the program).
+ * @throws {@link CCTParamsInvalidError} if one is not
+ * @internal
+ */
+export async function mintsOfPoolStates(
+  operation: string,
+  chain: SolanaChain,
+  program: PublicKey,
+  states: readonly PublicKey[],
+): Promise<PublicKey[]> {
+  const infos = await getMultipleAccountsInfoPaged(chain.connection, [...states])
+  return states.map((address, i) => {
+    const info = infos[i]
+    const pool = info ? poolState(address, info, `the pool State ${address.toBase58()}`) : null
+    if (!pool || isUnread(pool) || !pool.program.equals(program))
+      throw new CCTParamsInvalidError(
+        operation,
+        'transactions',
+        `${address.toBase58()} is not a pool State of the program`,
+      )
+    return pool.state.mint
+  })
+}
+
+/**
+ * Every `stride`-th remaining account of a proposal's instructions, from `fixed` (the lanes' first
+ * account each, e.g. their pool `State`).
+ * @internal
+ */
+export const everyLane = (
+  instructions: readonly { ix: TransactionInstruction }[],
+  fixed: number,
+  stride: number,
+  offset = 0,
+): PublicKey[] =>
+  instructions.flatMap(({ ix }) =>
+    ix.keys
+      .slice(fixed)
+      .filter((_, i) => i % stride === offset)
+      .map((k) => k.pubkey),
+  )
+
+/** A decoded `[u8; N]` / `Vec<u8>` field, as numbers. @internal */
+export const byteArrayField = (v: unknown): number[] =>
+  Array.isArray(v) ? v.filter((b): b is number => typeof b === 'number') : []
+
+/** An optional signer a proposal passes (the program ID stands for "none"). @internal */
+export const optionalSigner = (key: PublicKey | undefined, program: PublicKey) =>
+  key && !key.equals(program) ? key : undefined

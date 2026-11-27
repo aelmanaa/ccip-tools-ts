@@ -80,7 +80,7 @@ export type PoolGroupWritePlan<X extends object> = {
   /** Judge options; `null` skips the lane guard (a new group has no lanes). */
   judge: Pick<
     JudgePoolGroupWriteInput,
-    'failsClosedSeverity' | 'goingLiveSeverity' | 'scope'
+    'failsClosedSeverity' | 'goingLiveSeverity' | 'scope' | 'lanes' | 'drainConfirmed'
   > | null
   /**
    * Judge each item as its own simulated transaction (batched lane ops whose items touch disjoint
@@ -95,7 +95,21 @@ export type PoolGroupWritePlan<X extends object> = {
   followUps?: (judgement: PoolGroupJudgement | null) => PoolGroupFollowUp[]
   /** A measured upper bound of items per transaction. */
   maxItemsPerTransaction?: number
+  /**
+   * Lanes the write makes materializable on an unpaused chain (live admission, §7.6): no lane
+   * account changes, so the judge cannot see them; reported in `goingLive` with the judged ones.
+   */
+  goingLive?: PoolGroupLaneKey[]
 }
+
+/** Lanes, each once, in order. */
+const uniqueLanes = <T extends PoolGroupLaneKey>(lanes: readonly T[]): T[] =>
+  lanes.filter(
+    (l, i) =>
+      lanes.findIndex(
+        (o) => o.tokenAddress === l.tokenAddress && o.remoteChainSelector === l.remoteChainSelector,
+      ) === i,
+  )
 
 /** A plan's kept values, with the pool group it writes (so a snapshot binds to one group). */
 const expectedOf = (plan: PoolGroupWritePlan<object>): Record<string, unknown> => ({
@@ -135,14 +149,7 @@ async function judgeGroups(
       guardInputsHash: canonicalHash([]),
       slot: BigInt(await input.chain.connection.getSlot('confirmed')),
     }
-  const unique = <T extends PoolGroupLaneKey>(lanes: T[]) =>
-    lanes.filter(
-      (l, i) =>
-        lanes.findIndex(
-          (o) =>
-            o.tokenAddress === l.tokenAddress && o.remoteChainSelector === l.remoteChainSelector,
-        ) === i,
-    )
+  const unique = uniqueLanes
   return {
     affectedLanes: unique(parts.flatMap((p) => p.affectedLanes)),
     goingLive: unique(parts.flatMap((p) => p.goingLive)),
@@ -342,7 +349,7 @@ export abstract class PoolGroupWriteOperation<
         ...packed,
         snapshot,
         affectedLanes: judgement?.affectedLanes ?? [],
-        goingLive: judgement?.goingLive ?? [],
+        goingLive: uniqueLanes([...(judgement?.goingLive ?? []), ...(plan.goingLive ?? [])]),
         findings: (judgement?.findings ?? []).filter((f) => f.severity === 'warning'),
         ...(followUps.length && { followUps }),
       },

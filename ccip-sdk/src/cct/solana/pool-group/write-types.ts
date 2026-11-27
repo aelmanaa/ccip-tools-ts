@@ -11,6 +11,7 @@ import type { ChainGetter, TokenTransferFeeConfig } from '../../../chain.ts'
 import type { UnsignedSolanaTx } from '../../../solana/types.ts'
 import type {
   MultiTokenPoolExpectedSnapshot,
+  PoolDataFormat,
   MultiTokenPoolInlineRemotePoolDrop,
   MultiTokenPoolLaneFinding,
   MultiTokenPoolLaneKey,
@@ -21,6 +22,8 @@ import type { SolanaDurableNonce } from '../serialize.ts'
 import type {
   PoolGroupConnectionSection,
   PoolGroupLaneKey,
+  PoolGroupLaneMode,
+  PoolGroupMemberRemoteToken,
   PoolGroupPolicyClass,
   PoolGroupPolicyEngine,
   PoolGroupProgramRef,
@@ -1116,3 +1119,332 @@ export type ExecuteSetPoolGroupPolicyEngineParams =
   SolanaExecuteParams<SetPoolGroupPolicyEngineParams>
 /** Signed result of `setPoolGroupPolicyEngine`. */
 export type ExecuteSetPoolGroupPolicyEngineResult = PoolGroupExecuteResult
+
+// ─── S5: linked lanes, membership, driven lanes ─────────────────────────────────────────────
+
+/** Where a linked lane takes each class from: its own fields, or the pool group default. */
+export type PoolGroupLinkClassSource = Record<PoolGroupPolicyClass, 'inline' | 'default'>
+
+/**
+ * `link_lanes`: links existing lanes (each with a `ChainConfigV2`) of one chain to the pool group
+ * in place. Linking clears the lanes' own pause flags, so a lane on an unpaused chain is live at
+ * once: the op runs the lane check on it. The pool owner signs, with the pool group owner unless
+ * membership is open.
+ */
+export type LinkPoolGroupLanesParams = PoolGroupWriteParams & {
+  /** The chain. */
+  remoteChainSelector: bigint
+  /** The lanes, by mint; `authority` owns each pool. */
+  tokenAddresses: string[]
+  /** Per class: inline or the group default (named policies come with `assignPoolGroupLanePolicies`). */
+  classSource: PoolGroupLinkClassSource
+  /** The co-signer while membership is closed; defaults to the group's owner. */
+  poolGroupOwner?: string
+}
+
+/**
+ * `unlink_lanes`: the lanes leave the pool group and keep their own fields (and the format they
+ * sent). The lane owner signs alone. Trusted pools the lanes lose need `confirmDropped`.
+ */
+export type UnlinkPoolGroupLanesParams = PoolGroupWriteParams & {
+  /** The chain. */
+  remoteChainSelector: bigint
+  /** The lanes, by mint. */
+  tokenAddresses: string[]
+}
+
+/** One lane to create in a pool group by hand. */
+export type PoolGroupLaneEntry = {
+  /** The local mint. */
+  tokenAddress: string
+  /** The remote token, in the remote chain's spelling. */
+  remoteTokenAddress: string
+  /** Its decimals. */
+  remoteTokenDecimals: number
+  /** The remote pools the lane trusts itself (used while CONNECTION is inline). */
+  remotePoolAddresses: string[]
+}
+
+/** `init_group_lanes`: creates linked lanes of one chain directly in the pool group. */
+export type InitPoolGroupLanesParams = PoolGroupWriteParams & {
+  /** The chain. */
+  remoteChainSelector: bigint
+  /** The lanes. */
+  lanes: PoolGroupLaneEntry[]
+  /** Per class: inline or the group default. */
+  classSource: PoolGroupLinkClassSource
+  /** The co-signer while membership is closed; defaults to the group's owner. */
+  poolGroupOwner?: string
+}
+
+/**
+ * `set_lane_pool_data`: a lane's own pool-data format and factory UID (used while its CONNECTION
+ * is inline). The lane owner signs.
+ */
+export type SetPoolGroupLanePoolDataParams = PoolGroupProgramRef &
+  PoolGroupBatchOptions &
+  PoolGroupGuardOptions &
+  PoolGroupLiveCheckOptions &
+  MultiTokenPoolExpectedSnapshot & {
+    /** The lane's mint. */
+    tokenAddress: string
+    /** The lane's chain. */
+    remoteChainSelector: bigint
+    /** The format the lane sends. */
+    poolDataFormat: PoolDataFormat
+    /** The factory UID (32-byte hex), or `null` for none. */
+    uid: string | null
+    /** The pool owner; defaults to `payer`. */
+    authority?: string
+  }
+
+/** One token joining or updating a pool group. */
+export type PoolGroupMemberEntry = {
+  /** The member's mint. */
+  tokenAddress: string
+  /** The remote tokens its driven lanes are created with, by chain. */
+  remoteTokens: PoolGroupMemberRemoteToken[]
+}
+
+/**
+ * `join_group`. Member indices are assigned by the program in landing order, so the indices an
+ * unsigned build returns are predictions; read `GroupMember` after landing before using one (for
+ * example in a raw-index subset write).
+ */
+export type JoinPoolGroupParams = PoolGroupWriteParams & {
+  /** System-owned, non-executable; defaults to `authority`. Pre-flighted. */
+  rentReceiver?: string
+  /** The members. */
+  poolGroupMembers: PoolGroupMemberEntry[]
+  /** The co-signer while membership is closed; defaults to the group's owner. */
+  poolGroupOwner?: string
+  /** Lanes this join makes materializable on an unpaused chain that admits them; refused unless listed here. */
+  acknowledgeLiveAdmission?: PoolGroupLaneKey[]
+}
+
+/** Result fields of `joinPoolGroup`. */
+export type JoinPoolGroupResult = {
+  /** Predicted on the unsigned path (the program assigns indices in landing order); read `GroupMember` after landing. */
+  memberIndices: Record<string, number>
+}
+
+/**
+ * `set_member_remote_tokens`, with add/remove semantics: the op reads each member's list, applies
+ * `upsert` and `removeChains`, and writes the result (the instruction replaces the list).
+ */
+export type SetPoolGroupMemberRemoteTokensParams = PoolGroupWriteParams & {
+  /** Replaces the members' rent receiver (system-owned, non-executable). */
+  rentReceiver?: string
+  /** Per token: entries to add or replace, keyed by chain; other chains are kept. */
+  upsert?: PoolGroupMemberEntry[]
+  /** Per token: chains to drop. */
+  removeChains?: PoolGroupLaneKey[]
+  /**
+   * Live driven lanes the caller agrees to drop. A dropped lane keeps working (the transfer path
+   * never reads the member) until someone closes it, and anyone can; closing strands inbound
+   * in-flight messages. Required for each dropped live lane.
+   */
+  confirmDroppedLanes?: PoolGroupLaneKey[]
+  /**
+   * Close the dropped lanes in the same transaction (`close_group_lanes`). Refused unless each lane
+   * is paused in both directions or listed in `confirmInFlightDrained`.
+   */
+  closeDroppedLanes?: boolean
+  /** Lanes whose inbound in-flight messages the caller confirms drained. */
+  confirmInFlightDrained?: PoolGroupLaneKey[]
+  /** Lanes the write makes materializable on an unpaused chain; refused unless listed here. */
+  acknowledgeLiveAdmission?: PoolGroupLaneKey[]
+}
+
+/** Result fields of `setPoolGroupMemberRemoteTokens`. */
+export type SetPoolGroupMemberRemoteTokensResult = {
+  /** Driven lanes whose member no longer lists their chain after the write (anyone may close them). */
+  staleLanes: PoolGroupLaneKey[]
+  /** The dropped lanes closed in the same transaction (`closeDroppedLanes`). */
+  lanesToClose: PoolGroupLaneKey[]
+}
+
+/** `close_group_members`: the token owner, or the pool group owner or policy admin. */
+export type ClosePoolGroupMembersParams = PoolGroupWriteParams & {
+  /** The members, by mint; each must have no driven lane left. */
+  tokenAddresses: string[]
+}
+
+/** A raw overwrite of a chain record's subset bitmap. */
+export type PoolGroupBitmapWrite = {
+  /** The first byte written. */
+  byteOffset: number
+  /** The bytes. */
+  bytes: Uint8Array
+}
+
+/**
+ * `set_group_chain_lanes`. Every field the instruction writes is merged and snapshotted. Admission
+ * changes on an unpaused chain are refused unless acknowledged. Third parties can still crank a
+ * close of a lane the record stops admitting: the SDK gates only its own calls.
+ */
+export type SetPoolGroupChainLanesParams = PoolGroupWriteParams & {
+  /** The chain. */
+  remoteChainSelector: bigint
+  /** The lane mode; defaults to the record's. */
+  laneMode?: PoolGroupLaneMode
+  /** The driven lanes' pause (both directions); defaults to the record's; required from `'off'`. */
+  drivenLanesPaused?: boolean
+  /** Members to add to the subset, by mint. */
+  addTokens?: string[]
+  /** Members to remove from the subset, by mint. */
+  removeTokens?: string[]
+  /** Raw indices, e.g. to clear stale bits of departed members. */
+  addMemberIndices?: number[]
+  /** Raw indices to remove. */
+  removeMemberIndices?: number[]
+  /**
+   * Raw bitmap overwrite for bulk changes. Pre-flighted against the program's bounds
+   * (`byteOffset + length <= ceil(nextMemberIndex / 8)`, spare bits of the last byte clear). A
+   * larger write is split over transactions, and the split is not atomic: refused on an unpaused
+   * chain unless `acknowledgeNonAtomicBitmapWrite`.
+   */
+  bitmapWrite?: PoolGroupBitmapWrite
+  /** Accepts a bitmap write split over transactions on an unpaused chain. */
+  acknowledgeNonAtomicBitmapWrite?: boolean
+  /** Lanes the write makes live or materializable on an unpaused chain; refused unless listed here. */
+  acknowledgeLiveAdmission?: PoolGroupLaneKey[]
+}
+
+/**
+ * `materialize_group_lanes` (permissionless): creates the driven lanes the group admits. With
+ * `resync`, also re-syncs existing driven lanes to their member's remote token, which the program
+ * applies only while the chain's driven lanes are paused (refused otherwise).
+ */
+export type MaterializePoolGroupLanesParams = PoolGroupWriteParams & {
+  /** The chain. */
+  remoteChainSelector: bigint
+  /** The members, by mint; defaults to every admitted member listing the chain (needs `getProgramAccounts`). */
+  tokenAddresses?: string[]
+  /** Re-sync existing driven lanes whose remote token or decimals differ from the member's. */
+  resync?: boolean
+}
+
+/**
+ * `close_group_lanes` (permissionless): closes driven lanes the group no longer admits, or whose
+ * member no longer lists the chain. Closing strands inbound in-flight messages, so each lane must be
+ * paused in both directions or listed in `confirmInFlightDrained`.
+ */
+export type ClosePoolGroupLanesParams = PoolGroupWriteParams & {
+  /** The chain. */
+  remoteChainSelector: bigint
+  /** The lanes, by mint; defaults to every closable driven lane of the chain (needs `getProgramAccounts`). */
+  tokenAddresses?: string[]
+  /** Lanes whose inbound in-flight messages the caller confirms drained. */
+  confirmInFlightDrained?: PoolGroupLaneKey[]
+}
+
+/** Unsigned params of `linkPoolGroupLanes` (`link_lanes`). */
+export type GenerateLinkPoolGroupLanesParams = SolanaGenerateParams<
+  LinkPoolGroupLanesParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `linkPoolGroupLanes`. */
+export type GenerateLinkPoolGroupLanesResult = PoolGroupUnsignedResult
+/** Signed params of `linkPoolGroupLanes`; durable nonces are refused here. */
+export type ExecuteLinkPoolGroupLanesParams = SolanaExecuteParams<LinkPoolGroupLanesParams>
+/** Signed result of `linkPoolGroupLanes`. */
+export type ExecuteLinkPoolGroupLanesResult = PoolGroupExecuteResult
+
+/** Unsigned params of `unlinkPoolGroupLanes` (`unlink_lanes`). */
+export type GenerateUnlinkPoolGroupLanesParams = SolanaGenerateParams<
+  UnlinkPoolGroupLanesParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `unlinkPoolGroupLanes`. */
+export type GenerateUnlinkPoolGroupLanesResult = PoolGroupUnsignedResult
+/** Signed params of `unlinkPoolGroupLanes`; durable nonces are refused here. */
+export type ExecuteUnlinkPoolGroupLanesParams = SolanaExecuteParams<UnlinkPoolGroupLanesParams>
+/** Signed result of `unlinkPoolGroupLanes`. */
+export type ExecuteUnlinkPoolGroupLanesResult = PoolGroupExecuteResult
+
+/** Unsigned params of `initPoolGroupLanes` (`init_group_lanes`). */
+export type GenerateInitPoolGroupLanesParams = SolanaGenerateParams<
+  InitPoolGroupLanesParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `initPoolGroupLanes`. */
+export type GenerateInitPoolGroupLanesResult = PoolGroupUnsignedResult
+/** Signed params of `initPoolGroupLanes`; durable nonces are refused here. */
+export type ExecuteInitPoolGroupLanesParams = SolanaExecuteParams<InitPoolGroupLanesParams>
+/** Signed result of `initPoolGroupLanes`. */
+export type ExecuteInitPoolGroupLanesResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupLanePoolData` (`set_lane_pool_data`). */
+export type GenerateSetPoolGroupLanePoolDataParams = SolanaGenerateParams<
+  SetPoolGroupLanePoolDataParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupLanePoolData`. */
+export type GenerateSetPoolGroupLanePoolDataResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupLanePoolData`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupLanePoolDataParams = SolanaExecuteParams<SetPoolGroupLanePoolDataParams>
+/** Signed result of `setPoolGroupLanePoolData`. */
+export type ExecuteSetPoolGroupLanePoolDataResult = PoolGroupExecuteResult
+
+/** Unsigned params of `joinPoolGroup` (`join_group`). */
+export type GenerateJoinPoolGroupParams = SolanaGenerateParams<
+  JoinPoolGroupParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `joinPoolGroup`. */
+export type GenerateJoinPoolGroupResult = PoolGroupUnsignedResult & JoinPoolGroupResult
+/** Signed params of `joinPoolGroup`; durable nonces are refused here. */
+export type ExecuteJoinPoolGroupParams = SolanaExecuteParams<JoinPoolGroupParams>
+/** Signed result of `joinPoolGroup`. */
+export type ExecuteJoinPoolGroupResult = PoolGroupExecuteResult & JoinPoolGroupResult
+
+/** Unsigned params of `setPoolGroupMemberRemoteTokens` (`set_member_remote_tokens`). */
+export type GenerateSetPoolGroupMemberRemoteTokensParams = SolanaGenerateParams<
+  SetPoolGroupMemberRemoteTokensParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupMemberRemoteTokens`. */
+export type GenerateSetPoolGroupMemberRemoteTokensResult = PoolGroupUnsignedResult & SetPoolGroupMemberRemoteTokensResult
+/** Signed params of `setPoolGroupMemberRemoteTokens`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupMemberRemoteTokensParams = SolanaExecuteParams<SetPoolGroupMemberRemoteTokensParams>
+/** Signed result of `setPoolGroupMemberRemoteTokens`. */
+export type ExecuteSetPoolGroupMemberRemoteTokensResult = PoolGroupExecuteResult & SetPoolGroupMemberRemoteTokensResult
+
+/** Unsigned params of `closePoolGroupMembers` (`close_group_members`). */
+export type GenerateClosePoolGroupMembersParams = SolanaGenerateParams<
+  ClosePoolGroupMembersParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `closePoolGroupMembers`. */
+export type GenerateClosePoolGroupMembersResult = PoolGroupUnsignedResult
+/** Signed params of `closePoolGroupMembers`; durable nonces are refused here. */
+export type ExecuteClosePoolGroupMembersParams = SolanaExecuteParams<ClosePoolGroupMembersParams>
+/** Signed result of `closePoolGroupMembers`. */
+export type ExecuteClosePoolGroupMembersResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupChainLanes` (`set_group_chain_lanes`). */
+export type GenerateSetPoolGroupChainLanesParams = SolanaGenerateParams<
+  SetPoolGroupChainLanesParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupChainLanes`. */
+export type GenerateSetPoolGroupChainLanesResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupChainLanes`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupChainLanesParams = SolanaExecuteParams<SetPoolGroupChainLanesParams>
+/** Signed result of `setPoolGroupChainLanes`. */
+export type ExecuteSetPoolGroupChainLanesResult = PoolGroupExecuteResult
+
+/** Unsigned params of `materializePoolGroupLanes` (`materialize_group_lanes`). */
+export type GenerateMaterializePoolGroupLanesParams = SolanaGenerateParams<
+  MaterializePoolGroupLanesParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `materializePoolGroupLanes`. */
+export type GenerateMaterializePoolGroupLanesResult = PoolGroupUnsignedResult
+/** Signed params of `materializePoolGroupLanes`; durable nonces are refused here. */
+export type ExecuteMaterializePoolGroupLanesParams = SolanaExecuteParams<MaterializePoolGroupLanesParams>
+/** Signed result of `materializePoolGroupLanes`. */
+export type ExecuteMaterializePoolGroupLanesResult = PoolGroupExecuteResult
+
+/** Unsigned params of `closePoolGroupLanes` (`close_group_lanes`). */
+export type GenerateClosePoolGroupLanesParams = SolanaGenerateParams<
+  ClosePoolGroupLanesParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `closePoolGroupLanes`. */
+export type GenerateClosePoolGroupLanesResult = PoolGroupUnsignedResult
+/** Signed params of `closePoolGroupLanes`; durable nonces are refused here. */
+export type ExecuteClosePoolGroupLanesParams = SolanaExecuteParams<ClosePoolGroupLanesParams>
+/** Signed result of `closePoolGroupLanes`. */
+export type ExecuteClosePoolGroupLanesResult = PoolGroupExecuteResult

@@ -80,7 +80,10 @@ import {
   laneItems,
   parseGroupWrite,
   proposalBase,
+  membershipCoSigner,
+  mintsOfPoolStates,
   requireClassWriter,
+  requireExpectedGroupOwner,
   requirePolicyManager,
   signerRole,
 } from './write-common.ts'
@@ -851,13 +854,7 @@ export class AssignPoolGroupLanePolicies extends PoolGroupWriteOperation<
     ])
     // joining a group hands its owner and admins the lane's CONNECTION trust: refuse a group the
     // caller did not name the owner of
-    const expectedOwner = ref.expectedOwner ?? authority
-    if (!group.owner.equals(expectedOwner))
-      throw new CCTParamsInvalidError(
-        this.name,
-        'expectedOwner',
-        `the pool group is owned by ${group.owner.toBase58()}, not ${expectedOwner.toBase58()}: its owner, policy admin and connection admin can change what these lanes trust. To proceed, pass expectedOwner: ${group.owner.toBase58()}`,
-      )
+    requireExpectedGroupOwner(this.name, group.owner, ref.expectedOwner ?? authority)
     if (!gcpInfo)
       throw new CCTParamsInvalidError(
         this.name,
@@ -907,7 +904,7 @@ export class AssignPoolGroupLanePolicies extends PoolGroupWriteOperation<
     const mints =
       'mints' in parsed.lanes
         ? parsed.lanes.mints
-        : await mintsOfStates(chain, ref, parsed.lanes.states)
+        : await mintsOfPoolStates(this.name, chain, ref.program, parsed.lanes.states)
     const states = await readPoolGroupLaneStates(
       chain,
       ref.program,
@@ -991,19 +988,13 @@ export class AssignPoolGroupLanePolicies extends PoolGroupWriteOperation<
     )
 
     // the co-signer: the group owner, unless membership is open
-    const owner = group.openMembership ? null : (parsed.poolGroupOwner ?? group.owner)
-    if (owner && !owner.equals(group.owner))
-      throw new CCTParamsInvalidError(
-        this.name,
-        'poolGroupOwner',
-        `the pool group owner is ${group.owner.toBase58()}, who co-signs while membership is closed`,
-      )
-    if (owner && !owner.equals(authority) && parsed.budget?.executor === 'squads-v4')
-      throw new CCTParamsInvalidError(
-        this.name,
-        'poolGroupOwner',
-        'the pool owner and the pool group owner must both sign, and one Squads vault signs for one key: open the membership (setPoolGroupSettings openMembership), or hold both roles in one vault',
-      )
+    const owner = membershipCoSigner(
+      this.name,
+      group,
+      parsed.poolGroupOwner,
+      authority,
+      parsed.budget,
+    )
     const client = createPoolGroupProgram(chain, ref.program, parsed.payer)
     // each instruction passes the slot records and the records its own lanes reference (S3b m6)
     const slotRecordKeys = slotRecords.flatMap((r) => (r ? [r.toBase58()] : []))
@@ -1127,20 +1118,6 @@ export class AssignPoolGroupLanePolicies extends PoolGroupWriteOperation<
 }
 
 /** The mints of pool `State` accounts (a proposal names lanes by them). */
-async function mintsOfStates(chain: SolanaChain, ref: ParsedPoolGroupRef, states: PublicKey[]) {
-  const infos = await getMultipleAccountsInfoPaged(chain.connection, states)
-  return states.map((address, i) => {
-    const info = infos[i]
-    const pool = info ? poolState(address, info, `the pool State ${address.toBase58()}`) : null
-    if (!pool || isUnread(pool) || !pool.program.equals(ref.program))
-      throw new CCTParamsInvalidError(
-        'assignPoolGroupLanePolicies',
-        'transactions',
-        `${address.toBase58()} is not a pool State of the program`,
-      )
-    return pool.state.mint
-  })
-}
 
 type ParsedReset = ParsedGroupWrite & {
   selector: bigint

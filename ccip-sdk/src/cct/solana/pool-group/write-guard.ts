@@ -31,6 +31,7 @@ import { MAX_COMPUTE_UNIT_LIMIT } from '../../../solana/utils.ts'
 import { jsonStringify } from '../../../utils.ts'
 import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
 import { CCTParamsInvalidError, CCTStateChangedError } from '../../errors.ts'
+import { decodeRemoteAddress } from '../../remote-address.ts'
 import {
   assertDropsConfirmed,
   droppedRemotePools,
@@ -44,7 +45,11 @@ import type {
 } from '../../multi-token-pool.ts'
 import { deriveTokenPoolChainConfigPda } from '../programs/token-pool.ts'
 import { parsePublicKey } from '../validate.ts'
-import { decodePoolGroupIdlAccount, poolGroupPdas } from './accounts.ts'
+import {
+  decodePoolGroupChainConfigV2,
+  decodePoolGroupIdlAccount,
+  poolGroupPdas,
+} from './accounts.ts'
 import {
   type LaneFailsClosed,
   type PoolGroupLaneState,
@@ -60,7 +65,11 @@ import {
 } from './lane.ts'
 import { checkSolanaMultiTokenPoolLane } from './multi-token-pool-check.ts'
 import { listPoolGroupLaneRequests } from './operations/get-pool-group-lane.ts'
-import { type PoolGroupPostState, readPoolGroupLaneStates } from './operations/lane.ts'
+import {
+  type PoolGroupLaneRequest,
+  type PoolGroupPostState,
+  readPoolGroupLaneStates,
+} from './operations/lane.ts'
 import { POOL_GROUPS_PROGRAM_IDL } from './program.ts'
 import { laneRemotePools } from './remote-lane.ts'
 import { rateLimitsOf as sectionRateLimits, sectionValue } from './sections.ts'
@@ -275,6 +284,17 @@ export type JudgePoolGroupWriteInput = PoolGroupGuardOptions & {
    * one whose lane count the program requires to be 0).
    */
   scope?: 'all' | 'loosened' | 'none'
+  /**
+   * The lanes to judge, instead of listing the group's lanes (`getProgramAccounts`): a write that
+   * changes exactly these lanes and nothing other lanes read (a lane's own pool-data settings).
+   */
+  lanes?: readonly PoolGroupLaneRequest[]
+  /**
+   * Lanes the write closes that passed the drain gate (paused in both directions, or confirmed
+   * drained): the remote pools they trusted are dropped by the close itself, which the gate
+   * already confirms (A21 is not asked twice).
+   */
+  drainConfirmed?: readonly PoolGroupLaneKey[]
 }
 
 /** What a judged write reports. @internal */
@@ -489,6 +509,93 @@ async function checkLanesAfter(
 }
 
 /**
+ * The lanes a write creates or links to `group` that a listing before it does not hold: each
+ * changed `ChainConfigV2` that names the group after the write.
+ */
+function lanesJoining(
+  program: PublicKey,
+  group: PublicKey,
+  changed: ReadonlyMap<string, AccountInfo<Buffer> | null>,
+  listed: readonly PoolGroupLaneRequest[],
+): PoolGroupLaneRequest[] {
+  const known = new Set(listed.map((l) => `${l.mint.toBase58()}:${l.selector}`))
+  const out: PoolGroupLaneRequest[] = []
+  for (const [address, account] of changed) {
+    if (!account?.owner.equals(program) || !account.data.subarray(0, 8).equals(LANE_ACCOUNTS[1]!))
+      continue
+    let lane
+    try {
+      lane = decodePoolGroupChainConfigV2(account.data, address)
+    } catch {
+      // a changed account that does not decode is judged through the lanes that read it
+      continue
+    }
+    if (lane.ext?.poolGroupAddress !== group.toBase58()) continue
+    const key = `${lane.mint}:${lane.remoteChainSelector}`
+    if (known.has(key)) continue
+    known.add(key)
+    out.push({ mint: new PublicKey(lane.mint), selector: lane.remoteChainSelector })
+  }
+  return out
+}
+
+/** A lane's remote token in its chain's spelling (raw hex when the family cannot decode it). */
+function remoteTokenOf(state: PoolGroupLaneState): string {
+  const bytes = Buffer.from(state.chainConfig.base.remote.tokenAddress.address)
+  try {
+    return decodeRemoteAddress(bytes, state.selector).toLowerCase()
+  } catch {
+    // bytes the family rejects still compare as bytes
+    return `0x${bytes.toString('hex')}`
+  }
+}
+
+/**
+ * `REMOTE_TOKEN_SHARED` (as EVM, `guards.ts`): a lane open after the write whose remote token is
+ * also another lane's of the group on that chain, so the destination cannot tell them apart. An
+ * error on a lane the write makes live, or when the write brings the sharing; else a warning.
+ */
+function sharedRemoteTokens(
+  open: readonly { key: PoolGroupLaneKey; state: PoolGroupLaneState; live: boolean }[],
+  lanes: readonly {
+    r: PoolGroupLaneRequest
+    s0: PoolGroupLaneState | null | Unread
+    s1: PoolGroupLaneState | null | Unread
+  }[],
+): MultiTokenPoolLaneFinding[] {
+  const tokens = (pick: 's0' | 's1', selector: bigint, except: string) =>
+    lanes.flatMap((l) => {
+      const s = l[pick]
+      return s && !isUnread(s) && s.selector === selector && s.mint.toBase58() !== except
+        ? [{ mint: s.mint.toBase58(), token: remoteTokenOf(s) }]
+        : []
+    })
+  return open.flatMap(({ key, state, live }) => {
+    const token = remoteTokenOf(state)
+    const shared = tokens('s1', key.remoteChainSelector, key.tokenAddress).filter(
+      (o) => o.token === token,
+    )
+    if (!shared.length) return []
+    const before = lanes.find((l) => laneKey({ tokenAddress: l.r.mint.toBase58(), remoteChainSelector: l.r.selector }) === laneKey(key))?.s0
+    const had =
+      !!before &&
+      !isUnread(before) &&
+      tokens('s0', key.remoteChainSelector, key.tokenAddress).some(
+        (o) => o.token === remoteTokenOf(before),
+      )
+    return [
+      {
+        check: 'REMOTE_TOKEN_SHARED' as const,
+        severity: live || !had ? ('error' as const) : ('warning' as const),
+        ...key,
+        recordType: 'connection' as const,
+        reason: `remote token ${token} is also the remote token of ${shared.map((o) => o.mint).join(', ')} on this chain in the pool group, so the destination cannot tell them apart: give each local token its own remote token${had && !live ? ' (already so before the write)' : ''}`,
+      },
+    ]
+  })
+}
+
+/**
  * Runs the post-state guard of one pool-group write: simulates it, reads back the accounts it
  * writes, and judges every lane whose state one of them carries (its `ChainConfig`, `ChainConfigV2`,
  * group chain record or named policy records): A21 dropped trusted remote pools (refused unless in
@@ -570,14 +677,19 @@ export async function judgePoolGroupWrite(
       slot,
     }
 
-  const requests = await listPoolGroupLaneRequests(
-    operation,
-    chain,
-    { program, group },
-    {
-      fix: 'judging the lanes this write changes needs it; use an RPC that serves getProgramAccounts',
-    },
-  )
+  const listed = input.lanes
+    ? [...input.lanes]
+    : await listPoolGroupLaneRequests(
+        operation,
+        chain,
+        { program, group },
+        {
+          fix: 'judging the lanes this write changes needs it; use an RPC that serves getProgramAccounts',
+        },
+      )
+  // lanes the write creates or links to this group are not listed before it: found from the
+  // ChainConfigV2 accounts it leaves naming this group
+  const requests = [...listed, ...lanesJoining(program, group, changed, listed)]
   const [statesBefore, statesAfter] = await Promise.all([
     readPoolGroupLaneStates(chain, program, requests),
     readPoolGroupLaneStates(chain, program, requests, { overlay: changed }),
@@ -605,6 +717,9 @@ export async function judgePoolGroupWrite(
   const ccvChanges: { lane: PoolGroupLaneKey; before: unknown; after: unknown }[] = []
   const inputs: unknown[] = []
   const nothing: LaneView = { pools: [], outbound: false, inbound: false }
+  const drainConfirmed = new Set((input.drainConfirmed ?? []).map(laneKey))
+  // lanes open after the write, for the shared remote-token rule below
+  const openAfter: { key: PoolGroupLaneKey; state: PoolGroupLaneState; live: boolean }[] = []
   requests.forEach(({ mint, selector }, i) => {
     const key = { tokenAddress: mint.toBase58(), remoteChainSelector: selector }
     const s0 = statesBefore[i] ?? null
@@ -644,6 +759,12 @@ export async function judgePoolGroupWrite(
     // a lane unreadable before the write is judged as nothing trusted and nothing live
     const before0 = v0 && !isUnread(v0) ? v0 : nothing
     const after1 = v1 ?? nothing
+    if (s1 && (after1.outbound || after1.inbound))
+      openAfter.push({
+        key,
+        state: s1,
+        live: (after1.outbound && !before0.outbound) || (after1.inbound && !before0.inbound),
+      })
     if ((after1.outbound && !before0.outbound) || (after1.inbound && !before0.inbound)) {
       goingLive.push(key)
       checkedLanes.push({ key, mint, selector, open: openOf(after1), mode: 'live' })
@@ -691,7 +812,12 @@ export async function judgePoolGroupWrite(
       if (canonicalHash(ccvs.before) !== canonicalHash(ccvs.after))
         ccvChanges.push({ lane: key, ...ccvs })
     }
-    dropped.push(...droppedRemotePools([{ lane: key, before: before0.pools, after: after1.pools }]))
+    // a lane closed after the drain gate: its close drops its pools, which the gate confirms
+    const drained = s1 === null && drainConfirmed.has(laneKey(key))
+    if (!drained)
+      dropped.push(
+        ...droppedRemotePools([{ lane: key, before: before0.pools, after: after1.pools }]),
+      )
     const fails = v1?.failsClosed
     if (fails && fails.code !== before0.failsClosed?.code) {
       failingClosed.push({ ...key, reason: fails.reason })
@@ -721,6 +847,12 @@ export async function judgePoolGroupWrite(
     }
   })
 
+  findings.push(
+    ...sharedRemoteTokens(
+      openAfter,
+      requests.map((r, i) => ({ r, s0: statesBefore[i] ?? null, s1: statesAfter[i] ?? null })),
+    ),
+  )
   assertDropsConfirmed(operation, dropped, input.confirmDropped ?? [])
   const confirmedCcvs = new Set((input.confirmCCVChanges ?? []).map(laneKey))
   const unconfirmedCcvs = ccvChanges.filter((c) => !confirmedCcvs.has(laneKey(c.lane)))
