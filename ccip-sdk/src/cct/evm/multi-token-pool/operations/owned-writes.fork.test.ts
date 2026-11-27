@@ -12,6 +12,7 @@ import { after, before, describe, it } from 'node:test'
 
 import {
   type JsonRpcProvider,
+  Interface,
   Wallet,
   ZeroAddress,
   getAddress,
@@ -22,6 +23,7 @@ import { Instance } from 'prool'
 
 import { type RpcEnvName, rpcEndpoint } from '../../../../../../scripts/test-endpoints.ts'
 import type { ChainGetter } from '../../../../chain.ts'
+import Router_ABI from '../../../../evm/abi/Router.ts'
 import {
   forkProvider,
   rejectionOf,
@@ -29,6 +31,7 @@ import {
 } from '../../../../evm/fork-retry.test.helpers.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import type { MultiTokenPoolLaneFinding } from '../../../multi-token-pool.ts'
 import { EVMTokenManager } from '../../index.ts'
 import { GetMultiTokenPoolHooksState } from '../../multi-token-pool-hooks/operations/get-multi-token-pool-hooks-state.ts'
 import {
@@ -49,6 +52,7 @@ import {
   TransferMultiTokenPoolOwnership,
   TransferPolicyStoreOwnership,
 } from './ownership-writes.ts'
+import { SetMultiTokenPoolRouter } from './set-multi-token-pool-router.ts'
 
 /** A port the OS reports free right now (the fork binds it immediately after). */
 async function freePort(): Promise<number> {
@@ -446,5 +450,153 @@ describe('MTTP owner-gated writes (Sepolia and Fuji forks)', { skip, timeout: 90
       }),
     )
     assert.deepEqual([check.ok, check.changed], [true, []])
+  })
+  it('setMultiTokenPoolRouter keeps every OffRamp, and runs the lane check on lanes a new OnRamp opens', async () => {
+    const FUJI = 14767482510784806043n
+    const cct = EVMTokenManager.fromChain(sepolia.chain)
+    const getChain: ChainGetter = async (selector) =>
+      BigInt(selector) === FUJI ? fuji.chain : sepolia.chain
+    const state = await withForkRetry(() => cct.getMultiTokenPoolState({ poolAddress: CORE_POOL }))
+    const live = state.router
+    // the chains the pool serves, and the live Router's ramps for them
+    const { tokens } = await withForkRetry(() =>
+      cct.getMultiTokenPoolConfiguredTokens({ poolAddress: CORE_POOL }),
+    )
+    const configs = await withForkRetry(() =>
+      cct.getMultiTokenPoolTokenConfigs({ poolAddress: CORE_POOL, tokenAddresses: tokens }),
+    )
+    const chains = [...new Set(configs.flatMap((c) => c.supportedChains))]
+    assert.ok(chains.includes(FUJI))
+    const ramps = await Promise.all(
+      chains.map(async (c) => ({
+        chain: c,
+        onRamp: await sepolia.chain.getOnRampForRouter(live, c),
+        offRamps: await sepolia.chain.getOffRampsForRouter(live, c),
+      })),
+    )
+    /** The live Router's code on a fresh address, owned by a fresh account, with the given ramps. */
+    const routerCopy = async (keepFujiOnRamp: boolean) => {
+      const router = Wallet.createRandom().address
+      const owner = Wallet.createRandom().address
+      await sepolia.provider.send('anvil_setCode', [router, await sepolia.provider.getCode(live)])
+      await sepolia.provider.send('anvil_setStorageAt', [
+        router,
+        toBeHex(0, 32),
+        zeroPadValue(owner, 32),
+      ])
+      const wallet = await impersonate(sepolia.provider, owner)
+      const iface = new Interface(Router_ABI)
+      const data = iface.encodeFunctionData('applyRampUpdates', [
+        ramps
+          .filter((r) => keepFujiOnRamp || r.chain !== FUJI)
+          .map((r) => ({ destChainSelector: r.chain, onRamp: r.onRamp })),
+        [],
+        ramps.flatMap((r) =>
+          r.offRamps.map((offRamp) => ({ sourceChainSelector: r.chain, offRamp })),
+        ),
+      ])
+      await mined(sepolia.provider, wallet.sendTransaction({ to: router, data }))
+      return router
+    }
+    const op = new SetMultiTokenPoolRouter()
+    const { owner } = await withForkRetry(() => readOwnership(sepolia.chain, CORE_POOL))
+    const ownerWallet = await impersonate(sepolia.provider, owner)
+    // a Router that lists none of the live OffRamps: refused
+    const empty = Wallet.createRandom().address
+    await sepolia.provider.send('anvil_setCode', [empty, await sepolia.provider.getCode(live)])
+    const dropped = await withForkRetry(() =>
+      rejectionOf(
+        op.generate(sepolia.chain, { poolAddress: CORE_POOL, router: empty }),
+        'expected a refusal',
+      ),
+    )
+    assert.ok(dropped instanceof CCTParamsInvalidError)
+    assert.match(String(dropped.context.reason), /does not list the OffRamps/)
+    // a contract that is no Router: refused
+    const notRouter = await withForkRetry(() =>
+      rejectionOf(
+        op.generate(sepolia.chain, { poolAddress: CORE_POOL, router: store }),
+        'expected a refusal',
+      ),
+    )
+    assert.ok(notRouter instanceof CCTParamsInvalidError && notRouter.context.param === 'router')
+    // M: every OffRamp, no OnRamp to Fuji; N: the same, and the Fuji OnRamp back
+    const m = await routerCopy(false)
+    await mined(
+      sepolia.provider,
+      op.execute(sepolia.chain, {
+        poolAddress: CORE_POOL,
+        router: m,
+        getChain,
+        wallet: ownerWallet,
+      }),
+    )
+    const n = await routerCopy(true)
+    const toN = { poolAddress: CORE_POOL, router: n, getChain, sender: owner }
+    // live mttp-core lanes to Fuji with a hook but 200,000 gas: opening them is refused
+    const refused = await withForkRetry(() =>
+      rejectionOf(op.generate(sepolia.chain, toN), 'expected a refusal'),
+    )
+    assert.ok(refused instanceof CCTParamsInvalidError && refused.context.param === 'guards')
+    const lowGas = (refused.context.findings as MultiTokenPoolLaneFinding[]).filter(
+      (f) => f.check === 'DEST_GAS_OVERHEAD_TOO_LOW',
+    )
+    assert.ok(lowGas.length > 0)
+    // raised to 350,000 (CONFIG_ROLE, an inline record per lane), the opening builds
+    const configWallet = await impersonate(
+      sepolia.provider,
+      '0x3F7Ba502948E1A74d2eF94908CA3e0Bb8f17C7Ca',
+    )
+    for (const { tokenAddress, remoteChainSelector } of lowGas) {
+      const [fee] = await withForkRetry(() =>
+        cct.getMultiTokenPoolLaneTokenTransferFeeConfigs({
+          poolAddress: CORE_POOL,
+          lanes: [{ tokenAddress, remoteChainSelector }],
+        }),
+      )
+      await mined(
+        sepolia.provider,
+        cct.applyMultiTokenPoolInlineDestOverheadConfigUpdates({
+          poolAddress: CORE_POOL,
+          set: [
+            {
+              tokenAddress,
+              remoteChainSelector,
+              destOverheadConfig: {
+                destGasOverhead: 350_000,
+                destBytesOverhead: fee!.destBytesOverhead,
+              },
+            },
+          ],
+          getChain,
+          wallet: configWallet,
+        }),
+      )
+    }
+    const opening = await op.generate(sepolia.chain, toN)
+    assert.ok(opening.goingLive.length > 0)
+    assert.ok(
+      opening.goingLive.every(
+        (l) => l.remoteChainSelector === FUJI && l.directions.includes('outbound'),
+      ),
+    )
+    const check = await withForkRetry(() =>
+      cct.checkMultiTokenPoolSnapshot({
+        snapshot: opening.snapshot,
+        transaction: opening,
+        sender: owner,
+        getChain,
+      }),
+    )
+    assert.deepEqual([check.ok, check.changed], [true, []])
+    await mined(
+      sepolia.provider,
+      op.execute(sepolia.chain, {
+        poolAddress: CORE_POOL,
+        router: live,
+        getChain,
+        wallet: ownerWallet,
+      }),
+    )
   })
 })

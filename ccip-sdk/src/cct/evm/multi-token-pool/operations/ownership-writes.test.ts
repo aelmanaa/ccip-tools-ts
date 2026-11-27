@@ -5,6 +5,7 @@ import { Interface, ZeroAddress, getAddress } from 'ethers'
 
 import { CCTContractTypeInvalidError, CCTParamsInvalidError } from '../../../errors.ts'
 import { AcceptPoolOwnership } from '../../token-pool/operations/accept-pool-ownership.ts'
+import { SetDynamicConfig } from '../../token-pool/operations/set-dynamic-config.ts'
 import { TransferPoolOwnership } from '../../token-pool/operations/transfer-pool-ownership.ts'
 import {
   CPS,
@@ -240,5 +241,22 @@ describe('MTTP ownership writes', () => {
           },
         )
       })
+  })
+
+  it("main's setDynamicConfig names setMultiTokenPoolRouter", async () => {
+    const { chain } = stackChain()
+    await assert.rejects(
+      new SetDynamicConfig().generate(chain, {
+        poolAddress: POOL,
+        router: NEW_OWNER,
+        rateLimitAdmin: ZeroAddress,
+        feeAdmin: ZeroAddress,
+      }),
+      (e: unknown) => {
+        assert.ok(e instanceof CCTContractTypeInvalidError)
+        assert.match(String(e.context.reason), /setMultiTokenPoolRouter/)
+        return true
+      },
+    )
   })
 })

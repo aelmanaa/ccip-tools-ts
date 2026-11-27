@@ -27,6 +27,7 @@ import type { Interface } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
+import { redirectMultiTokenPool } from '../../multi-token-pool/pool-reads.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import { validateAddress, validateNonZeroAddress } from '../../validate.ts'
 import {
@@ -131,7 +132,15 @@ export class SetDynamicConfig extends EVMOperation<SetDynamicConfigParams> {
     chain: EVMChain,
     params: SetDynamicConfigParams,
   ): Promise<UnsignedEVMTx> {
-    const { type, version } = await resolveTokenPool(chain, params.poolAddress)
+    const { type, version } = await resolveTokenPool(chain, params.poolAddress).catch(
+      (err: unknown) =>
+        redirectMultiTokenPool(
+          err,
+          'setMultiTokenPoolRouter',
+          'the same poolAddress and router; a multi-token pool keeps no rate limit or fee admin: those roles live on its PoolConfigManager (grantMultiTokenPoolRole)',
+          { perToken: false },
+        ),
+    )
     const encode = resolveEncoder(this.encoders, version, this.name)
     const unsigned = encode(getTokenPoolInterface(type, version), params)
     if (params.sender !== undefined)

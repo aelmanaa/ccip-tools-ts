@@ -8,6 +8,7 @@
 
 import { type Result, getAddress, keccak256 } from 'ethers'
 
+import type { ChainGetter } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
@@ -150,7 +151,15 @@ export abstract class MultiTokenPoolOwnedWriteOperation<
       to,
       sender,
       snapshot,
-    }: { data: string; to: string; sender: string; snapshot: MultiTokenPoolSnapshot },
+      getChain,
+    }: {
+      data: string
+      to: string
+      sender: string
+      snapshot: MultiTokenPoolSnapshot
+      /** Resolves the remote chains a rebuild reads (a lane check). */
+      getChain?: ChainGetter
+    },
   ): Promise<MultiTokenPoolSnapshotCheck> {
     const address = getAddress(to)
     const { type, version } = await this.resolveTarget(chain, address)
@@ -186,7 +195,11 @@ export abstract class MultiTokenPoolOwnedWriteOperation<
       snapshot,
       facts,
       rebuild: async () => {
-        const rebuilt = await this.generate(chain, { ...raw, sender })
+        const rebuilt = await this.generate(chain, {
+          ...raw,
+          sender,
+          ...(getChain && { getChain }),
+        } as P)
         return { snapshot: rebuilt.snapshot!, warnings: rebuilt.warnings }
       },
       tolerated: (c) => this.tolerated(c),
