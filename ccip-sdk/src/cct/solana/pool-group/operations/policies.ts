@@ -32,7 +32,6 @@ import { parsePublicKey, validateInteger } from '../../validate.ts'
 import { decodePoolGroupChainConfigV2, poolGroupPdas } from '../accounts.ts'
 import { decodeClassBits, decodeRoles, decodeSections, keyOrNull, toBigInt } from '../decode.ts'
 import { isUnread } from '../lane.ts'
-import { type PoolGroupPackItem, fitsOneTransaction } from '../packer.ts'
 import { createPoolGroupProgram } from '../program.ts'
 import { poolState } from '../remote-lane.ts'
 import {
@@ -74,6 +73,7 @@ import {
   eventAccounts,
   field,
   keyField,
+  laneItems,
   parseGroupWrite,
   proposalBase,
   requireClassWriter,
@@ -714,52 +714,6 @@ export class SetPoolGroupPolicyDefault extends PoolGroupWriteOperation<
 }
 
 // ─── lanes: assignments and bucket resets ────────────────────────────────────────────────────
-
-/**
- * Splits lane metas into instructions of as many lanes as one transaction fits (greedy), each
- * built by `build`; every instruction is one item (judged alone: lanes are disjoint).
- */
-async function laneItems(
-  operation: string,
-  chain: SolanaChain,
-  parsed: ParsedGroupWrite,
-  lanes: { mint: PublicKey; metas: AccountMeta[] }[],
-  build: (metas: AccountMeta[]) => Promise<TransactionInstruction>,
-  signerRoles: PoolGroupPackItem['signerRoles'],
-): Promise<PoolGroupPackItem[]> {
-  const items: PoolGroupPackItem[] = []
-  let current: typeof lanes = []
-  const itemOf = async (chunk: typeof lanes): Promise<PoolGroupPackItem> => ({
-    tokenAddresses: chunk.map((l) => l.mint.toBase58()),
-    instructions: [await build(chunk.flatMap((l) => l.metas))],
-    ...(signerRoles && { signerRoles }),
-  })
-  const fits = async (chunk: typeof lanes) =>
-    fitsOneTransaction({
-      operation,
-      chain,
-      payer: parsed.payer,
-      items: [await itemOf(chunk)],
-      ...(parsed.budget && { budget: parsed.budget }),
-      ...(parsed.durableNonces && { durableNonces: parsed.durableNonces }),
-    })
-  for (const lane of lanes) {
-    if (await fits([...current, lane])) {
-      current.push(lane)
-      continue
-    }
-    if (!current.length)
-      throw new CCTParamsInvalidError(
-        operation,
-        'budget',
-        `the lane of ${lane.mint.toBase58()} does not fit a transaction alone`,
-      )
-    items.push(await itemOf(current))
-    current = [lane]
-  }
-  if (current.length) items.push(await itemOf(current))
-  return items
-}
 
 /** The class sources an assignment writes: bytes per class and the slots they use. */
 type RawSources = { classSource: number[]; policySlots: PublicKey[] }

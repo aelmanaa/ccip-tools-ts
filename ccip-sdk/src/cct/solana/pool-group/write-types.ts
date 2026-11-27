@@ -7,7 +7,7 @@
 
 import type { AddressLookupTableAccount, TransactionInstruction } from '@solana/web3.js'
 
-import type { TokenTransferFeeConfig } from '../../../chain.ts'
+import type { ChainGetter, TokenTransferFeeConfig } from '../../../chain.ts'
 import type { UnsignedSolanaTx } from '../../../solana/types.ts'
 import type {
   MultiTokenPoolExpectedSnapshot,
@@ -20,6 +20,7 @@ import type { SolanaDurableNonce } from '../serialize.ts'
 import type {
   PoolGroupConnectionSection,
   PoolGroupLaneKey,
+  PoolGroupPolicyEngine,
   PoolGroupPolicyClass,
   PoolGroupProgramRef,
   PoolGroupRateLimitSection,
@@ -292,10 +293,26 @@ export type PoolGroupGuardOptions = {
   confirmDropped?: MultiTokenPoolInlineRemotePoolDrop[]
 }
 
+/**
+ * Options of every write that can make lanes live (clearing a pool-group, chain or lane pause,
+ * syncing CCVs into a lane that failed closed, a section write that repairs a lane, ...). The write
+ * runs `checkMultiTokenPoolLane` on every lane it makes live, as the write leaves it, chunked,
+ * refuses on any error finding, and returns `goingLive` and the findings. No attestations are
+ * accepted here: every remote chain must be readable through `getChain`, or the lane fails closed
+ * (`REMOTE_UNREADABLE`).
+ */
+export type PoolGroupLiveCheckOptions = {
+  /** Resolves each lane's remote chain for the lane check (core `ChainGetter`). */
+  getChain?: ChainGetter
+  /** Lane checks in flight at once; defaults to 4. */
+  concurrency?: number
+}
+
 /** Fields every write on an existing pool group takes. */
 export type PoolGroupWriteParams = PoolGroupRef &
   PoolGroupBatchOptions &
   PoolGroupGuardOptions &
+  PoolGroupLiveCheckOptions &
   MultiTokenPoolExpectedSnapshot & {
     /** The signer the instruction checks; defaults to `payer`. Pre-flighted against the decoded roles. */
     authority?: string
@@ -711,3 +728,376 @@ export type ExecuteResetPoolGroupLaneBucketsParams =
   SolanaExecuteParams<ResetPoolGroupLaneBucketsParams>
 /** Signed result of `resetPoolGroupLaneBuckets`. */
 export type ExecuteResetPoolGroupLaneBucketsResult = PoolGroupExecuteResult
+
+// ─── S4: pauses, CCVs, hooks ─────────────────────────────────────────────────────────────────
+
+/** `set_group_pause`: sets or clears the pool group pause. */
+export type SetPoolGroupPauseParams = PoolGroupWriteParams & {
+  /** `true` to pause every lane of the group, `false` to lift the group pause. */
+  paused: boolean
+}
+/** `set_group_chain_pause`. Omitted directions keep their flag (merged, snapshotted). */
+export type SetPoolGroupChainPauseParams = PoolGroupWriteParams & {
+  /** The chain record. */
+  remoteChainSelector: bigint
+  /** The outbound flag; kept when omitted. */
+  pausedOutbound?: boolean
+  /** The inbound flag; kept when omitted. */
+  pausedInbound?: boolean
+}
+/** `set_lane_pause`. Omitted directions keep their flag per lane. */
+export type SetPoolGroupLanePauseParams = PoolGroupWriteParams & {
+  /** The mint whose lanes are set. */
+  tokenAddress: string
+  /** The lanes' chains, each once. */
+  remoteChainSelectors: bigint[]
+  /** The outbound flag; each lane keeps its own when omitted. */
+  pausedOutbound?: boolean
+  /** The inbound flag; each lane keeps its own when omitted. */
+  pausedInbound?: boolean
+}
+/**
+ * The SECURITY target rule: neither field is the group default; `remoteChainSelector` alone is that
+ * chain record; `policyId` alone is the named policy's default; both is that policy's chain record.
+ */
+export type PoolGroupSecurityTarget = {
+  /** The chain record. */
+  remoteChainSelector?: bigint
+  /** The named policy (must carry SECURITY). */
+  policyId?: number
+}
+/** CCV lists; `'default'` is `INCLUDE_DEFAULT_CCVS`. */
+export type PoolGroupCCVLists = {
+  /** Outbound CCVs (base58), `'default'` for the lane defaults. */
+  outbound: string[]
+  /** Inbound CCVs (base58), `'default'` for the lane defaults. */
+  inbound: string[]
+}
+/** `schedule_group_ccvs`. */
+export type SchedulePoolGroupCCVsParams = PoolGroupWriteParams &
+  PoolGroupSecurityTarget &
+  PoolGroupCCVLists &
+  (
+    | {
+        /** A wallet executes the transaction. */
+        budget?: SolanaTxBudget & { executor?: 'wallet' }
+        /** Unix seconds; defaults to the earliest allowed plus `approvalWindowSeconds`. */
+        activatesAt?: bigint
+        /** Seconds between building and landing; defaults to 60. */
+        approvalWindowSeconds?: number
+      }
+    | {
+        /** A Squads vault executes: the time is checked at execution, so `activatesAt` is required. */
+        budget: SolanaTxBudget & { executor: 'squads-v4' }
+        /** Unix seconds, at least the group's minimum notice after the proposal executes. */
+        activatesAt: bigint
+        /** Not with `activatesAt`. */
+        approvalWindowSeconds?: never
+      }
+    | {
+        /** A Squads vault executes: the time is checked at execution. */
+        budget: SolanaTxBudget & { executor: 'squads-v4' }
+        /** Seconds the approvals may take; `activatesAt` is the earliest allowed plus this. */
+        approvalWindowSeconds: number
+        /** Not with `approvalWindowSeconds`. */
+        activatesAt?: never
+      }
+  )
+/** Result fields of `schedulePoolGroupCCVs`. */
+export type SchedulePoolGroupCCVsResult = {
+  /** When the scheduled set activates (unix seconds). */
+  activatesAt: bigint
+}
+/** `activate_group_ccvs_now`. */
+export type ActivatePoolGroupCCVsNowParams = PoolGroupWriteParams &
+  PoolGroupSecurityTarget &
+  PoolGroupCCVLists
+/** `set_allow_dropping_default_ccvs`. Refused on a record that still inherits SECURITY. */
+export type SetPoolGroupAllowDroppingDefaultCCVsParams = PoolGroupWriteParams &
+  PoolGroupSecurityTarget & {
+    /** Whether later schedules may leave out `'default'`. */
+    allow: boolean
+  }
+/** `reset_policy_security`. */
+export type ResetPoolGroupPolicySecurityParams = PoolGroupWriteParams & {
+  /** The named SECURITY policy. */
+  policyId: number
+}
+/** `sync_group_ccvs`. Without `tokenAddresses`, every lane on the record not yet synced. */
+export type SyncPoolGroupCCVsParams = PoolGroupWriteParams & {
+  /** The chain record. */
+  remoteChainSelector: bigint
+  /** The lanes' mints; defaults to every lane on the record not yet synced. */
+  tokenAddresses?: string[]
+}
+/** `sync_policy_ccvs`. */
+export type SyncPoolGroupPolicyCCVsParams = SyncPoolGroupCCVsParams & {
+  /** The named SECURITY policy. */
+  policyId: number
+}
+/** `create_allowlist`. */
+export type CreatePoolGroupAllowlistParams = PoolGroupWriteParams & {
+  /** The list id (base58); defaults to a fresh random key. */
+  listId?: string
+  /** Whether the list is checked; fixed for life. */
+  enabled: boolean
+  /** The list admin. */
+  admin: string
+}
+/** `create_blocklist`. Shared by every pool group of the program. */
+export type CreatePoolGroupBlocklistParams = PoolGroupProgramRef &
+  PoolGroupBatchOptions & {
+    /** The list id (base58); defaults to a fresh random key. */
+    blocklistId?: string
+    /** The list admin. */
+    admin: string
+    /** The creator, who seeds the address and pays; defaults to `payer`. */
+    creator?: string
+  }
+/** Result fields of the list creations. */
+export type CreatePoolGroupListResult = {
+  /** The list. */
+  listAddress: string
+  /** Its id. */
+  listId: string
+}
+/** `apply_list_updates`. Existing adds and absent removes are dropped before packing. */
+export type ApplyPoolGroupListUpdatesParams = PoolGroupProgramRef &
+  PoolGroupBatchOptions & {
+    /** The list. */
+    list: string
+    /** Addresses to add: base58 senders (allowlist); base58 or 0x hex of any family (blocklist). */
+    add?: string[]
+    /** Addresses to remove, in the same forms. */
+    remove?: string[]
+    /** The list admin, who pays entry rent; defaults to `payer`. */
+    authority?: string
+  }
+/** `transfer_list_admin`. */
+export type TransferPoolGroupListAdminParams = PoolGroupProgramRef &
+  PoolGroupBatchOptions & {
+    /** The list. */
+    list: string
+    /** The proposed admin. */
+    proposedAdmin: string
+    /** The allowlist's pool group, when its owner signs; read from the list when omitted. */
+    poolGroupAddress?: string
+    /** The list admin, or the pool group owner for an allowlist; defaults to `payer`. */
+    authority?: string
+  }
+/** `accept_list_admin`. */
+export type AcceptPoolGroupListAdminParams = PoolGroupProgramRef &
+  PoolGroupBatchOptions & {
+    /** The list. */
+    list: string
+    /** The proposed admin; defaults to `payer`. */
+    authority?: string
+  }
+/** `set_hook_config`. `undefined` keeps a list, `null` removes it. */
+export type SetPoolGroupHookConfigParams = PoolGroupWriteParams &
+  PoolGroupSecurityTarget & {
+    /** The allowlist (an enabled allowlist of this pool group). */
+    allowlist?: string | null
+    /** The blocklist. */
+    blocklist?: string | null
+  }
+/** `set_policy_engine`. */
+export type SetPoolGroupPolicyEngineParams = PoolGroupWriteParams &
+  PoolGroupSecurityTarget & {
+    /** The engine; `null` removes it. */
+    engine: PoolGroupPolicyEngine | null
+    /** Skip the old engine's `detach` CPI (an engine that refuses it). */
+    skipDetach?: boolean
+  }
+
+/** Unsigned params of `setPoolGroupPause` (`set_group_pause`). */
+export type GenerateSetPoolGroupPauseParams = SolanaGenerateParams<
+  SetPoolGroupPauseParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupPause`. */
+export type GenerateSetPoolGroupPauseResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupPause`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupPauseParams = SolanaExecuteParams<SetPoolGroupPauseParams>
+/** Signed result of `setPoolGroupPause`. */
+export type ExecuteSetPoolGroupPauseResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupChainPause` (`set_group_chain_pause`). */
+export type GenerateSetPoolGroupChainPauseParams = SolanaGenerateParams<
+  SetPoolGroupChainPauseParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupChainPause`. */
+export type GenerateSetPoolGroupChainPauseResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupChainPause`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupChainPauseParams = SolanaExecuteParams<SetPoolGroupChainPauseParams>
+/** Signed result of `setPoolGroupChainPause`. */
+export type ExecuteSetPoolGroupChainPauseResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupLanePause` (`set_lane_pause`). */
+export type GenerateSetPoolGroupLanePauseParams = SolanaGenerateParams<
+  SetPoolGroupLanePauseParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupLanePause`. */
+export type GenerateSetPoolGroupLanePauseResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupLanePause`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupLanePauseParams = SolanaExecuteParams<SetPoolGroupLanePauseParams>
+/** Signed result of `setPoolGroupLanePause`. */
+export type ExecuteSetPoolGroupLanePauseResult = PoolGroupExecuteResult
+
+/** Unsigned params of `schedulePoolGroupCCVs` (`schedule_group_ccvs`). */
+export type GenerateSchedulePoolGroupCCVsParams = SolanaGenerateParams<
+  SchedulePoolGroupCCVsParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `schedulePoolGroupCCVs`. */
+export type GenerateSchedulePoolGroupCCVsResult = PoolGroupUnsignedResult &
+  SchedulePoolGroupCCVsResult
+/** Signed params of `schedulePoolGroupCCVs`; durable nonces are refused here. */
+export type ExecuteSchedulePoolGroupCCVsParams = SolanaExecuteParams<SchedulePoolGroupCCVsParams>
+/** Signed result of `schedulePoolGroupCCVs`. */
+export type ExecuteSchedulePoolGroupCCVsResult = PoolGroupExecuteResult &
+  SchedulePoolGroupCCVsResult
+
+/** Unsigned params of `activatePoolGroupCCVsNow` (`activate_group_ccvs_now`). */
+export type GenerateActivatePoolGroupCCVsNowParams = SolanaGenerateParams<
+  ActivatePoolGroupCCVsNowParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `activatePoolGroupCCVsNow`. */
+export type GenerateActivatePoolGroupCCVsNowResult = PoolGroupUnsignedResult
+/** Signed params of `activatePoolGroupCCVsNow`; durable nonces are refused here. */
+export type ExecuteActivatePoolGroupCCVsNowParams =
+  SolanaExecuteParams<ActivatePoolGroupCCVsNowParams>
+/** Signed result of `activatePoolGroupCCVsNow`. */
+export type ExecuteActivatePoolGroupCCVsNowResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupAllowDroppingDefaultCCVs` (`set_allow_dropping_default_ccvs`). */
+export type GenerateSetPoolGroupAllowDroppingDefaultCCVsParams = SolanaGenerateParams<
+  SetPoolGroupAllowDroppingDefaultCCVsParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupAllowDroppingDefaultCCVs`. */
+export type GenerateSetPoolGroupAllowDroppingDefaultCCVsResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupAllowDroppingDefaultCCVs`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupAllowDroppingDefaultCCVsParams =
+  SolanaExecuteParams<SetPoolGroupAllowDroppingDefaultCCVsParams>
+/** Signed result of `setPoolGroupAllowDroppingDefaultCCVs`. */
+export type ExecuteSetPoolGroupAllowDroppingDefaultCCVsResult = PoolGroupExecuteResult
+
+/** Unsigned params of `resetPoolGroupPolicySecurity` (`reset_policy_security`). */
+export type GenerateResetPoolGroupPolicySecurityParams = SolanaGenerateParams<
+  ResetPoolGroupPolicySecurityParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `resetPoolGroupPolicySecurity`. */
+export type GenerateResetPoolGroupPolicySecurityResult = PoolGroupUnsignedResult
+/** Signed params of `resetPoolGroupPolicySecurity`; durable nonces are refused here. */
+export type ExecuteResetPoolGroupPolicySecurityParams =
+  SolanaExecuteParams<ResetPoolGroupPolicySecurityParams>
+/** Signed result of `resetPoolGroupPolicySecurity`. */
+export type ExecuteResetPoolGroupPolicySecurityResult = PoolGroupExecuteResult
+
+/** Unsigned params of `syncPoolGroupCCVs` (`sync_group_ccvs`). */
+export type GenerateSyncPoolGroupCCVsParams = SolanaGenerateParams<
+  SyncPoolGroupCCVsParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `syncPoolGroupCCVs`. */
+export type GenerateSyncPoolGroupCCVsResult = PoolGroupUnsignedResult
+/** Signed params of `syncPoolGroupCCVs`; durable nonces are refused here. */
+export type ExecuteSyncPoolGroupCCVsParams = SolanaExecuteParams<SyncPoolGroupCCVsParams>
+/** Signed result of `syncPoolGroupCCVs`. */
+export type ExecuteSyncPoolGroupCCVsResult = PoolGroupExecuteResult
+
+/** Unsigned params of `syncPoolGroupPolicyCCVs` (`sync_policy_ccvs`). */
+export type GenerateSyncPoolGroupPolicyCCVsParams = SolanaGenerateParams<
+  SyncPoolGroupPolicyCCVsParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `syncPoolGroupPolicyCCVs`. */
+export type GenerateSyncPoolGroupPolicyCCVsResult = PoolGroupUnsignedResult
+/** Signed params of `syncPoolGroupPolicyCCVs`; durable nonces are refused here. */
+export type ExecuteSyncPoolGroupPolicyCCVsParams =
+  SolanaExecuteParams<SyncPoolGroupPolicyCCVsParams>
+/** Signed result of `syncPoolGroupPolicyCCVs`. */
+export type ExecuteSyncPoolGroupPolicyCCVsResult = PoolGroupExecuteResult
+
+/** Unsigned params of `createPoolGroupAllowlist` (`create_allowlist`). */
+export type GenerateCreatePoolGroupAllowlistParams = SolanaGenerateParams<
+  CreatePoolGroupAllowlistParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `createPoolGroupAllowlist`. */
+export type GenerateCreatePoolGroupAllowlistResult = PoolGroupUnsignedResult &
+  CreatePoolGroupListResult
+/** Signed params of `createPoolGroupAllowlist`; durable nonces are refused here. */
+export type ExecuteCreatePoolGroupAllowlistParams =
+  SolanaExecuteParams<CreatePoolGroupAllowlistParams>
+/** Signed result of `createPoolGroupAllowlist`. */
+export type ExecuteCreatePoolGroupAllowlistResult = PoolGroupExecuteResult &
+  CreatePoolGroupListResult
+
+/** Unsigned params of `createPoolGroupBlocklist` (`create_blocklist`). */
+export type GenerateCreatePoolGroupBlocklistParams = SolanaGenerateParams<
+  CreatePoolGroupBlocklistParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `createPoolGroupBlocklist`. */
+export type GenerateCreatePoolGroupBlocklistResult = PoolGroupUnsignedResult &
+  CreatePoolGroupListResult
+/** Signed params of `createPoolGroupBlocklist`; durable nonces are refused here. */
+export type ExecuteCreatePoolGroupBlocklistParams =
+  SolanaExecuteParams<CreatePoolGroupBlocklistParams>
+/** Signed result of `createPoolGroupBlocklist`. */
+export type ExecuteCreatePoolGroupBlocklistResult = PoolGroupExecuteResult &
+  CreatePoolGroupListResult
+
+/** Unsigned params of `applyPoolGroupListUpdates` (`apply_list_updates`). */
+export type GenerateApplyPoolGroupListUpdatesParams = SolanaGenerateParams<
+  ApplyPoolGroupListUpdatesParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `applyPoolGroupListUpdates`. */
+export type GenerateApplyPoolGroupListUpdatesResult = PoolGroupUnsignedResult
+/** Signed params of `applyPoolGroupListUpdates`; durable nonces are refused here. */
+export type ExecuteApplyPoolGroupListUpdatesParams =
+  SolanaExecuteParams<ApplyPoolGroupListUpdatesParams>
+/** Signed result of `applyPoolGroupListUpdates`. */
+export type ExecuteApplyPoolGroupListUpdatesResult = PoolGroupExecuteResult
+
+/** Unsigned params of `transferPoolGroupListAdmin` (`transfer_list_admin`). */
+export type GenerateTransferPoolGroupListAdminParams = SolanaGenerateParams<
+  TransferPoolGroupListAdminParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `transferPoolGroupListAdmin`. */
+export type GenerateTransferPoolGroupListAdminResult = PoolGroupUnsignedResult
+/** Signed params of `transferPoolGroupListAdmin`; durable nonces are refused here. */
+export type ExecuteTransferPoolGroupListAdminParams =
+  SolanaExecuteParams<TransferPoolGroupListAdminParams>
+/** Signed result of `transferPoolGroupListAdmin`. */
+export type ExecuteTransferPoolGroupListAdminResult = PoolGroupExecuteResult
+
+/** Unsigned params of `acceptPoolGroupListAdmin` (`accept_list_admin`). */
+export type GenerateAcceptPoolGroupListAdminParams = SolanaGenerateParams<
+  AcceptPoolGroupListAdminParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `acceptPoolGroupListAdmin`. */
+export type GenerateAcceptPoolGroupListAdminResult = PoolGroupUnsignedResult
+/** Signed params of `acceptPoolGroupListAdmin`; durable nonces are refused here. */
+export type ExecuteAcceptPoolGroupListAdminParams =
+  SolanaExecuteParams<AcceptPoolGroupListAdminParams>
+/** Signed result of `acceptPoolGroupListAdmin`. */
+export type ExecuteAcceptPoolGroupListAdminResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupHookConfig` (`set_hook_config`). */
+export type GenerateSetPoolGroupHookConfigParams = SolanaGenerateParams<
+  SetPoolGroupHookConfigParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupHookConfig`. */
+export type GenerateSetPoolGroupHookConfigResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupHookConfig`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupHookConfigParams = SolanaExecuteParams<SetPoolGroupHookConfigParams>
+/** Signed result of `setPoolGroupHookConfig`. */
+export type ExecuteSetPoolGroupHookConfigResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupPolicyEngine` (`set_policy_engine`). */
+export type GenerateSetPoolGroupPolicyEngineParams = SolanaGenerateParams<
+  SetPoolGroupPolicyEngineParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupPolicyEngine`. */
+export type GenerateSetPoolGroupPolicyEngineResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupPolicyEngine`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupPolicyEngineParams =
+  SolanaExecuteParams<SetPoolGroupPolicyEngineParams>
+/** Signed result of `setPoolGroupPolicyEngine`. */
+export type ExecuteSetPoolGroupPolicyEngineResult = PoolGroupExecuteResult

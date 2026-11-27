@@ -24,6 +24,7 @@ import {
 } from '@solana/web3.js'
 import { keccak256 } from 'ethers'
 
+import { CCIPError } from '../../../errors/index.ts'
 import type { SolanaChain } from '../../../solana/index.ts'
 import { deriveTokenPoolChainConfigV2Pda } from '../../../solana/token-pool.ts'
 import { MAX_COMPUTE_UNIT_LIMIT } from '../../../solana/utils.ts'
@@ -54,13 +55,14 @@ import {
   lanePauses,
   laneSectionsFor,
 } from './lane.ts'
+import { checkSolanaMultiTokenPoolLane } from './multi-token-pool-check.ts'
 import { listPoolGroupLaneRequests } from './operations/get-pool-group-lane.ts'
-import { readPoolGroupLaneStates } from './operations/lane.ts'
+import { type PoolGroupPostState, readPoolGroupLaneStates } from './operations/lane.ts'
 import { POOL_GROUPS_PROGRAM_IDL } from './program.ts'
 import { laneRemotePools } from './remote-lane.ts'
 import { rateLimitsOf as sectionRateLimits } from './sections.ts'
 import type { PoolGroupLaneKey } from './types.ts'
-import type { PoolGroupGuardOptions } from './write-types.ts'
+import type { PoolGroupGuardOptions, PoolGroupLiveCheckOptions } from './write-types.ts'
 
 /** The accounts whose state a lane's transfers read: a change to one of them affects lanes. */
 const LANE_ACCOUNTS = ['ChainConfig', 'ChainConfigV2', 'GroupChainPolicy', 'PolicyChainRecord'].map(
@@ -144,10 +146,13 @@ export type JudgePoolGroupWriteInput = PoolGroupGuardOptions & {
   /** Severity of a lane the write leaves failing closed; defaults to `'error'` (refused). */
   failsClosedSeverity?: 'error' | 'warning'
   /**
-   * Lanes the write makes live: refused by default (`'error'`), or only reported in `goingLive`
-   * (`'warning'`, an ownership accept, which must never be blocked).
+   * Lanes the write makes live: by default (`'error'`) each runs the lane check as the write leaves
+   * it and an error finding refuses the write; `'warning'` only reports them in `goingLive` (an
+   * ownership accept, which must never be blocked).
    */
   goingLiveSeverity?: 'error' | 'warning'
+  /** The make-live check's remote reader and concurrency. */
+  liveCheck?: PoolGroupLiveCheckOptions
   /** Report error findings instead of refusing (the snapshot check). */
   reportFindings?: boolean
   /**
@@ -275,18 +280,80 @@ function laneAddresses(
   ].map((a) => a.toBase58())
 }
 
+/** A lane a write makes live, with the directions open after it. */
+type LiveLane = {
+  key: PoolGroupLaneKey
+  mint: PublicKey
+  selector: bigint
+  open: ('outbound' | 'inbound')[]
+}
+
+/** Lane checks in flight at once, by default (as the shared planners' `concurrency`). */
+const LIVE_CHECK_CONCURRENCY = 4
+
+/**
+ * The make-live check: `checkMultiTokenPoolLane` on each lane the write makes live, as the write
+ * leaves it (`post`), with the directions open after it as `expectOpen`, `getChain` and no
+ * attestations, at most `concurrency` at a time. A lane the check cannot read (a non-transient SDK
+ * error) fails closed as `LANE_UNREADABLE`; transport errors propagate.
+ */
+async function checkLanesGoingLive(
+  input: JudgePoolGroupWriteInput,
+  lanes: readonly LiveLane[],
+  post: PoolGroupPostState,
+): Promise<MultiTokenPoolLaneFinding[]> {
+  const { operation, chain, program } = input
+  const getChain = input.liveCheck?.getChain
+  const concurrency = input.liveCheck?.concurrency ?? LIVE_CHECK_CONCURRENCY
+  const findings: MultiTokenPoolLaneFinding[] = []
+  for (let i = 0; i < lanes.length; i += concurrency) {
+    const chunk = lanes.slice(i, i + concurrency)
+    const results = await Promise.all(
+      chunk.map(async ({ key, mint, selector, open }) => {
+        try {
+          const { findings: found } = await checkSolanaMultiTokenPoolLane(
+            operation,
+            chain,
+            {
+              ...key,
+              poolAddress: program.toBase58(),
+              expectOpen: open,
+              ...(getChain && { getChain }),
+            },
+            { program, mint, selector },
+            post,
+          )
+          return found
+        } catch (err) {
+          if (!(err instanceof CCIPError) || err.isTransient) throw err
+          return [
+            {
+              check: 'LANE_UNREADABLE' as const,
+              severity: 'error' as const,
+              ...key,
+              reason: `the lane this write makes live could not be checked as the write leaves it (${err.message}): the write is refused`,
+            },
+          ]
+        }
+      }),
+    )
+    findings.push(...results.flat())
+  }
+  return findings
+}
+
 /**
  * Runs the post-state guard of one pool-group write: simulates it, reads back the accounts it
  * writes, and judges every lane whose state one of them carries (its `ChainConfig`, `ChainConfigV2`,
  * group chain record or named policy records): A21 dropped trusted remote pools (refused unless in
- * `confirmDropped`), lanes going live (refused unless `goingLiveSeverity: 'warning'`: no S3 write
- * checks lanes it opens), lanes left failing closed now or from a later time (refused, or a warning
+ * `confirmDropped`), lanes going live (the make-live check: the lane check on each as the write
+ * leaves it, whose error findings refuse; only reported with `goingLiveSeverity: 'warning'`), lanes left failing closed now or from a later time (refused, or a warning
  * with `failsClosedSeverity: 'warning'`), and affected lanes that cannot be read
  * (`LANE_UNREADABLE` at the same severity: never passed silently; an accept warns and lists them). Lanes are listed only when
  * the write changes a lane account; that listing needs `getProgramAccounts` and fails closed
  * without it. Fails closed compares the program error, not its text.
  * @throws {@link CCTParamsInvalidError} if the simulation refuses the write, a drop is unconfirmed,
- *   a lane would go live, or an error finding remains (unless `reportFindings`)
+ *   a lane it makes live fails the lane check, or an error finding remains (unless `reportFindings`)
  * @internal
  */
 export async function judgePoolGroupWrite(
@@ -353,6 +420,7 @@ export async function judgePoolGroupWrite(
   const failingClosed: PoolGroupJudgement['failingClosed'] = []
   const unreadable: PoolGroupLaneKey[] = []
   const dropped: MultiTokenPoolInlineRemotePoolDrop[] = []
+  const live: LiveLane[] = []
   const inputs: unknown[] = []
   const nothing: LaneView = { pools: [], outbound: false, inbound: false }
   requests.forEach(({ mint, selector }, i) => {
@@ -389,8 +457,18 @@ export async function judgePoolGroupWrite(
     // a lane unreadable before the write is judged as nothing trusted and nothing live
     const before0 = v0 && !isUnread(v0) ? v0 : nothing
     const after1 = v1 ?? nothing
-    if ((after1.outbound && !before0.outbound) || (after1.inbound && !before0.inbound))
+    if ((after1.outbound && !before0.outbound) || (after1.inbound && !before0.inbound)) {
       goingLive.push(key)
+      live.push({
+        key,
+        mint,
+        selector,
+        open: [
+          ...(after1.outbound ? (['outbound'] as const) : []),
+          ...(after1.inbound ? (['inbound'] as const) : []),
+        ],
+      })
+    }
     dropped.push(...droppedRemotePools([{ lane: key, before: before0.pools, after: after1.pools }]))
     const fails = v1?.failsClosed
     if (fails && fails.code !== before0.failsClosed?.code) {
@@ -422,17 +500,29 @@ export async function judgePoolGroupWrite(
   })
 
   assertDropsConfirmed(operation, dropped, input.confirmDropped ?? [])
-  if (goingLive.length) {
-    const message = `the write makes ${goingLive.length} lane(s) live (${goingLive.map(laneKey).join(', ')}), which this op does not check`
-    if ((input.goingLiveSeverity ?? 'error') === 'error')
+  if (live.length && (input.goingLiveSeverity ?? 'error') === 'error') {
+    const checked = await checkLanesGoingLive(input, live, {
+      overlay: changed,
+      instructions: input.instructions,
+      payer: input.payer,
+      ...(input.lookupTables && { lookupTables: input.lookupTables }),
+    })
+    findings.push(...checked)
+    inputs.push({ live: checked.map((f) => [laneKey(f), f.check, f.severity]) })
+    const failing = checked.filter((f) => f.severity === 'error')
+    if (failing.length && !input.reportFindings)
       throw new CCTParamsInvalidError(
         operation,
         'guards',
-        `${message}: make lanes live with the pause ops, which run the lane check`,
-        { context: { goingLive } },
+        `the write makes ${goingLive.length} lane(s) live, and the lane check fails on ${failing.length} problem(s) as the write leaves them: ${failing
+          .map((f) => `${f.check} on ${f.tokenAddress} → ${f.remoteChainSelector}: ${f.reason}`)
+          .join('; ')}`,
+        { context: { goingLive, findings: failing } },
       )
-    chain.logger.warn(`${operation}: ${message}; check them with checkMultiTokenPoolLane`)
-  }
+  } else if (goingLive.length)
+    chain.logger.warn(
+      `${operation}: the write makes ${goingLive.length} lane(s) live (${goingLive.map(laneKey).join(', ')}); check them with checkMultiTokenPoolLane`,
+    )
   const errors = findings.filter((f) => f.severity === 'error')
   if (errors.length && !input.reportFindings)
     throw new CCTParamsInvalidError(

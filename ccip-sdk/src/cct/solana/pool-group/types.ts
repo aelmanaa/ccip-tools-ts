@@ -4,7 +4,7 @@
  * @packageDocumentation
  */
 
-import type { TokenTransferFeeConfig } from '../../../chain.ts'
+import type { ChainGetter, TokenTransferFeeConfig } from '../../../chain.ts'
 import type { FinalityAllowed, FinalityRequested } from '../../../extra-args.ts'
 import type { UnsignedSolanaTx } from '../../../solana/types.ts'
 import type {
@@ -595,6 +595,13 @@ export type GetPoolGroupRequiredCCVsResult = {
 export type CheckPoolGroupSnapshotParams = PoolGroupRef & {
   /** The snapshot a pool-group op returned with the proposal. */
   snapshot: MultiTokenPoolSnapshot
+  /**
+   * Resolves each remote chain for the make-live check of a proposal that makes lanes live
+   * (without it their remote side fails closed).
+   */
+  getChain?: ChainGetter
+  /** Lane checks in flight at once; defaults to 4. */
+  concurrency?: number
 } & (
     | {
         /**

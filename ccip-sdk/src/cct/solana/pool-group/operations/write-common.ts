@@ -8,14 +8,20 @@
 import { BN } from '@coral-xyz/anchor'
 import { type AccountMeta, type TransactionInstruction, PublicKey } from '@solana/web3.js'
 
+import type { SolanaChain } from '../../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import type { SolanaGenerateParams } from '../../operation.ts'
 import { deriveEventAuthorityPda } from '../../programs/token-pool.ts'
 import { poolGroupPdas, poolGroupsCoder } from '../accounts.ts'
 import { decodeRoles, toBigInt } from '../decode.ts'
-import type { PoolGroupPolicyClass } from '../types.ts'
+import { type PoolGroupPackItem, fitsOneTransaction } from '../packer.ts'
+import type { PoolGroupLaneKey, PoolGroupPolicyClass } from '../types.ts'
 import { type ParsedPoolGroupWrite, parseWriteBase } from '../write-operation.ts'
-import type { PoolGroupGuardOptions, PoolGroupWriteParams } from '../write-types.ts'
+import type {
+  PoolGroupFollowUp,
+  PoolGroupGuardOptions,
+  PoolGroupWriteParams,
+} from '../write-types.ts'
 import { type ParsedPoolGroupRef, parsePoolGroupRef } from './common.ts'
 
 /** The accounts every `#[event_cpi]` instruction ends with. @internal */
@@ -225,4 +231,102 @@ export function idlPolicyClass(cls: PoolGroupPolicyClass) {
     case 'security':
       return { security: {} }
   }
+}
+
+/**
+ * Splits entries into instructions of as many entries as one transaction fits (greedy), each built
+ * by `build`; every instruction is one item (judged alone: the entries are disjoint).
+ * @throws {@link CCTParamsInvalidError} (param `budget`) if one entry does not fit a transaction
+ * @internal
+ */
+export async function fittedItems<E>(
+  operation: string,
+  chain: SolanaChain,
+  parsed: ParsedPoolGroupWrite,
+  entries: readonly E[],
+  build: (chunk: E[]) => Promise<TransactionInstruction>,
+  {
+    signerRoles,
+    tokenAddressesOf = () => [],
+    describe,
+  }: {
+    /** The signers' roles of every item. */
+    signerRoles?: PoolGroupPackItem['signerRoles']
+    /** The mints an item's entries touch. */
+    tokenAddressesOf?: (chunk: E[]) => string[]
+    /** An entry, for the error when one does not fit alone. */
+    describe: (entry: E) => string
+  },
+): Promise<PoolGroupPackItem[]> {
+  const items: PoolGroupPackItem[] = []
+  let current: E[] = []
+  const itemOf = async (chunk: E[]): Promise<PoolGroupPackItem> => ({
+    tokenAddresses: tokenAddressesOf(chunk),
+    instructions: [await build(chunk)],
+    ...(signerRoles && { signerRoles }),
+  })
+  const fits = async (chunk: E[]) =>
+    fitsOneTransaction({
+      operation,
+      chain,
+      payer: parsed.payer,
+      items: [await itemOf(chunk)],
+      ...(parsed.budget && { budget: parsed.budget }),
+      ...(parsed.durableNonces && { durableNonces: parsed.durableNonces }),
+    })
+  for (const entry of entries) {
+    if (await fits([...current, entry])) {
+      current.push(entry)
+      continue
+    }
+    if (!current.length)
+      throw new CCTParamsInvalidError(
+        operation,
+        'budget',
+        `${describe(entry)} does not fit a transaction alone`,
+      )
+    items.push(await itemOf(current))
+    current = [entry]
+  }
+  if (current.length) items.push(await itemOf(current))
+  return items
+}
+
+/**
+ * Splits lane metas into instructions of as many lanes as one transaction fits ({@link fittedItems}).
+ * @internal
+ */
+export const laneItems = (
+  operation: string,
+  chain: SolanaChain,
+  parsed: ParsedPoolGroupWrite,
+  lanes: { mint: PublicKey; metas: AccountMeta[] }[],
+  build: (metas: AccountMeta[]) => Promise<TransactionInstruction>,
+  signerRoles: PoolGroupPackItem['signerRoles'],
+): Promise<PoolGroupPackItem[]> =>
+  fittedItems(operation, chain, parsed, lanes, (chunk) => build(chunk.flatMap((l) => l.metas)), {
+    ...(signerRoles && { signerRoles }),
+    tokenAddressesOf: (chunk) => chunk.map((l) => l.mint.toBase58()),
+    describe: (l) => `the lane of ${l.mint.toBase58()}`,
+  })
+
+/**
+ * The CCV-sync follow-ups of the lanes a judgement leaves failing closed, by chain.
+ * @internal
+ */
+export function ccvSyncFollowUps(
+  judgement: { failingClosed: PoolGroupLaneKey[] } | null,
+  reason: string,
+): PoolGroupFollowUp[] {
+  const bySelector = new Map<bigint, string[]>()
+  for (const l of judgement?.failingClosed ?? [])
+    bySelector.set(l.remoteChainSelector, [
+      ...(bySelector.get(l.remoteChainSelector) ?? []),
+      l.tokenAddress,
+    ])
+  return [...bySelector].map(([remoteChainSelector, tokenAddresses]) => ({
+    operation: 'syncPoolGroupCCVs',
+    reason,
+    inputs: { remoteChainSelector, tokenAddresses },
+  }))
 }

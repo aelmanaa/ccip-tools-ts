@@ -54,7 +54,13 @@ import {
   readPoolGroupLaneState,
 } from './lane.ts'
 import { orThrow, simulationRefused } from './operations/common.ts'
-import { type LaneGroupObservation, observeLane, readPolicyIds } from './operations/lane.ts'
+import {
+  type LaneGroupObservation,
+  type PoolGroupPostState,
+  observeLane,
+  readPolicyIds,
+  readPoolGroupLaneStates,
+} from './operations/lane.ts'
 import { createPoolGroupProgram } from './program.ts'
 import {
   type PoolState,
@@ -202,7 +208,9 @@ export async function readPoolState(
  * Reads the family-neutral view of one lane of a resolved pool program: the lane's accounts (marker,
  * tail, group and named records), and what the program applies (`observe_lane_group`: buckets
  * under the configs in force, the effective fee config). A standard lane of a program without pool
- * groups is read through core (`getTokenPoolRemotes`, `getTokenPoolConfig`).
+ * groups is read through core (`getTokenPoolRemotes`, `getTokenPoolConfig`). With `post`, the lane
+ * is read as a simulated write leaves it: its accounts from the overlay, and the view run after the
+ * write in one simulation.
  * @throws {@link CCTParamsInvalidError} if the mint has no pool State under the program
  * @throws {@link CCTDataDecodeError} if an account is not as the program writes it
  * @throws {@link CCTOperationUnsupportedError} if the program refuses the view on a marked lane
@@ -214,10 +222,15 @@ export async function readSolanaMultiTokenPoolLane(
   program: PublicKey,
   mint: PublicKey,
   selector: bigint,
+  post?: PoolGroupPostState,
 ): Promise<SolanaMultiTokenPoolLaneRead> {
   const [pool, read] = await Promise.all([
     readPoolState(operation, chain, program, mint),
-    readPoolGroupLaneState(chain.connection, program, mint, selector),
+    post
+      ? readPoolGroupLaneStates(chain, program, [{ mint, selector }], {
+          overlay: post.overlay,
+        }).then(([s]) => s ?? null)
+      : readPoolGroupLaneState(chain.connection, program, mint, selector),
   ])
   const where = `the lane of ${mint.toBase58()} toward ${selector}`
   const base = {
@@ -252,7 +265,7 @@ export async function readSolanaMultiTokenPoolLane(
   const poolDataFormat = orThrow(laneFormat(state), where)
   const remotePools = orThrow(laneRemotePools(state, poolDataFormat), where)
   const [observation, policyIds] = await Promise.all([
-    observeLane(operation, chain, state),
+    observeLane(operation, chain, state, post),
     readPolicyIds(chain, [state]),
   ])
   let rateLimits: MultiTokenPoolLane['rateLimits']

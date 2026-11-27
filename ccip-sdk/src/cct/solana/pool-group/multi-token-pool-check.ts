@@ -58,6 +58,7 @@ import {
   readSolanaMultiTokenPoolLane,
 } from './multi-token-pool-lane.ts'
 import { isViewRefusal, orThrow } from './operations/common.ts'
+import type { PoolGroupPostState } from './operations/lane.ts'
 import { SOLANA_MAX_ACCOUNT_LOCKS } from './packer.ts'
 import { getPoolGroupProgramFeatures } from './program.ts'
 import {
@@ -574,7 +575,10 @@ async function programHasPoolGroups(chain: SolanaChain, program: PublicKey): Pro
 /**
  * Runs the lane check on one Solana lane: registry and interface, admission, CCV sync, the long-data
  * fee floor, the stored EVM token and pool bytes, mint authority (burn-mint pools), pauses and
- * stops, the send lock budget, and the remote side ({@link evaluateSolanaLaneRemote}).
+ * stops, the send lock budget, and the remote side ({@link evaluateSolanaLaneRemote}). With `post`
+ * the lane's own accounts and view are judged as a simulated write leaves them (the make-live check
+ * of a write); the registry, the mint, the send resolution and the remote side are read as they are,
+ * since no pool-group write changes them.
  * @internal
  */
 export async function checkSolanaMultiTokenPoolLane(
@@ -582,6 +586,7 @@ export async function checkSolanaMultiTokenPoolLane(
   chain: SolanaChain,
   params: CheckMultiTokenPoolLaneParams,
   key: { program: PublicKey; mint: PublicKey; selector: bigint },
+  post?: PoolGroupPostState,
 ): Promise<MultiTokenPoolLaneCheckResult> {
   const read = await readSolanaMultiTokenPoolLane(
     operation,
@@ -589,6 +594,7 @@ export async function checkSolanaMultiTokenPoolLane(
     key.program,
     key.mint,
     key.selector,
+    post,
   )
   const { lane, state, pool } = read
   const findings: MultiTokenPoolLaneFinding[] = []
