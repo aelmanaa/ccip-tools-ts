@@ -168,25 +168,31 @@ describe('MTTP post-state guard (Sepolia v5v9, read-only)', { skip, timeout: 600
   })
 
   it('re-checks a proposal through checkMultiTokenPoolSnapshot with the sealed options', async (t) => {
-    if (!deployed) return t.skip('v5v9 multi-token pool not deployed')
-    const op = 'pauseMultiTokenPoolTokens'
-    const data = pause(OUTBOUND)
-    const { snapshot } = await runMultiTokenPoolGuards({
-      ...base,
-      operation: op,
-      data,
+    if (!(await EVMTokenManager.fromChain(base.chain).isMultiTokenPool({ poolAddress: CORE_POOL })))
+      return t.skip('mttp-core multi-token pool not deployed')
+    // built by the op itself: the check re-reads what the op sealed, so a hand-built snapshot
+    // without the op's values would be reported as moved
+    const cct = EVMTokenManager.fromChain(base.chain)
+    // a lane's own fee record, set again as it is: guarded with a threshold of 900 bps
+    const { fee } = await cct.getMultiTokenPoolInlineConfigs({
+      poolConfigManager: CORE_PCM,
+      tokenAddress: CORE_TOKEN,
+    })
+    const record = fee!.find((r) => r.remoteChainSelector === FUJI)
+    if (!record) return t.skip('the mttp-core lane has no inline fee record')
+    const transaction = await cct.generateUnsignedApplyMultiTokenPoolInlineFeeConfigUpdates({
+      poolConfigManager: CORE_PCM,
+      set: [record],
+      sender: CORE_CONFIG,
+      getChain: base.getChain!,
       maxTransferFeeBps: 900,
     })
+    const { snapshot } = transaction
     assert.deepEqual(snapshot.expected['guard.options'], { maxTransferFeeBps: 900 })
-    const transaction = {
-      family: 'EVM' as const,
-      transactions: [{ to: PCM, data, from: OPERATOR }],
-    }
-    const cct = EVMTokenManager.fromChain(base.chain)
     const check = await cct.checkMultiTokenPoolSnapshot({
       snapshot,
       transaction,
-      sender: OPERATOR,
+      sender: CORE_CONFIG,
       getChain: base.getChain!,
     })
     assert.deepEqual(check, { ok: true, changed: [], findings: [] })
