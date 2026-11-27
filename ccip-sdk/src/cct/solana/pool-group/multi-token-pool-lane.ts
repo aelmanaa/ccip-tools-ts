@@ -34,6 +34,7 @@ import { selectSendLane } from '../../../solana/send-v2.ts'
 import { deriveTokenPoolChainConfigV2Pda } from '../../../solana/token-pool.ts'
 import { SIMULATION_PAYER } from '../../../solana/utils.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
+import type { readRemoteMultiTokenPoolSide } from '../../evm/pool-config-manager/guard-facts.ts'
 import {
   type CheckMultiTokenPoolLaneParams,
   type GetMultiTokenPoolTransferQuoteParams,
@@ -45,6 +46,10 @@ import {
   type MultiTokenPoolRemoteAttestation,
   type MultiTokenPoolTransferQuote,
   type PoolDataFormat,
+  DEFAULT_MAX_TRANSFER_FEE_BPS,
+  DEFAULT_MIN_DEST_GAS_OVERHEAD,
+  HOOK_DEST_GAS_OVERHEAD,
+  longPoolDataBytes,
   sortFindings,
 } from '../../multi-token-pool.ts'
 import { decodeRemoteAddress, laneFamilyOf } from '../../remote-address.ts'
@@ -359,6 +364,8 @@ type RemoteSide =
       legacyFromMultiTokenPools: string[]
       /** Trusted pools whose type was not read. */
       unreadPools: string[]
+      /** A remote multi-token pool's side: its lane format and its token's provider verdicts. */
+      multiTokenPoolSide?: Awaited<ReturnType<typeof readRemoteMultiTokenPoolSide>>
     }
 
 /**
@@ -420,10 +427,33 @@ async function readEvmRemote(
   ])
   // the remote decimals only matter to compare two enabled buckets
   const compare = !!back?.outboundRateLimiterState && !!lane.rateLimits.inbound
+  const readsLongData = reportsMultiTokenPool(type)
+  // a remote multi-token pool runs its token's provider on what arrives, and adds its own data
+  let multiTokenPoolSide
+  if (readsLongData) {
+    const [{ EVMChain }, { readRemoteMultiTokenPoolSide }] = await Promise.all([
+      import('../../../evm/index.ts'),
+      import('../../evm/pool-config-manager/guard-facts.ts'),
+    ])
+    if (remote instanceof EVMChain)
+      multiTokenPoolSide = await readRemoteMultiTokenPoolSide(
+        remote,
+        registryPool,
+        lane.remoteToken!,
+        localSelector,
+        // the additional pool data this lane sends: abi.encode(bytes32 uid) on a long UID lane
+        lane.poolDataFormat === 'long' && read.state?.ext?.uid ? read.state.ext.uid : '0x',
+      )
+    else
+      multiTokenPoolSide = {
+        remoteSideUnread: 'getChain did not return an EVMChain for this EVM selector',
+      }
+  }
   return {
     status: 'known',
     registryPool: getAddress(registryPool),
-    readsLongData: reportsMultiTokenPool(type),
+    readsLongData,
+    ...(multiTokenPoolSide && { multiTokenPoolSide }),
     ...(back && {
       back: {
         remoteToken: back.remoteToken,
@@ -558,7 +588,6 @@ export async function checkSolanaMultiTokenPoolLane(
       reason,
       ...(recordType && { recordType }),
     })
-  const guards = await import('../../evm/pool-config-manager/guards.ts')
   const localSelector = chain.network.chainSelector
   let remote: MultiTokenPoolFact = 'unknown'
 
@@ -622,7 +651,7 @@ export async function checkSolanaMultiTokenPoolLane(
     const fee = lane.tokenTransferFeeConfig
     const uid = ext?.uid ?? null
     if (lane.poolDataFormat === 'long') {
-      const needed = guards.longPoolDataBytes(uid ? 32 : 0)
+      const needed = longPoolDataBytes(uid ? 32 : 0)
       if (!fee)
         add(
           'NO_FEE_RECORD',
@@ -641,7 +670,7 @@ export async function checkSolanaMultiTokenPoolLane(
     if (fee) {
       const minGas =
         params.minDestGasOverhead ??
-        guards.DEFAULT_MIN_DEST_GAS_OVERHEAD + (lane.hasHooks ? guards.HOOK_DEST_GAS_OVERHEAD : 0)
+        DEFAULT_MIN_DEST_GAS_OVERHEAD + (lane.hasHooks ? HOOK_DEST_GAS_OVERHEAD : 0)
       if (fee.destGasOverhead < minGas)
         add(
           'DEST_GAS_OVERHEAD_TOO_LOW',
@@ -649,7 +678,7 @@ export async function checkSolanaMultiTokenPoolLane(
           `destGasOverhead ${fee.destGasOverhead} is below ${minGas}${lane.hasHooks ? ' (a hook resolves)' : ''}: the destination release can run out of gas`,
           'destOverhead',
         )
-      const maxBps = params.maxTransferFeeBps ?? guards.DEFAULT_MAX_TRANSFER_FEE_BPS
+      const maxBps = params.maxTransferFeeBps ?? DEFAULT_MAX_TRANSFER_FEE_BPS
       const bps = Math.max(fee.finalityTransferFeeBps, fee.fastFinalityTransferFeeBps)
       if (bps > maxBps)
         add(
@@ -774,14 +803,55 @@ export async function checkSolanaMultiTokenPoolLane(
                 : `remote pool ${side.registryPool} has no lane back toward this chain: inbound transfers revert there`,
               'connection',
             )
-          // UID pairing needs the remote provider's verdict, which the core reads do not give
-          if (uid !== null && lane.poolDataFormat === 'long' && side.readsLongData)
+          // the additional pool data, judged by the providers that judge it on chain
+          const mttp = side.multiTokenPoolSide
+          if (mttp?.remoteSideUnread !== undefined)
             add(
-              'UID_MISMATCH',
+              'REMOTE_UNREADABLE',
               'error',
-              `the lane sends UID ${uid} as additional pool data, and the remote token's provider was not checked against it: the release there may revert (InvalidAdditionalPoolData); check the pairing on the EVM side (checkMultiTokenPoolLane there)`,
+              `the remote multi-token pool side could not be read (${mttp.remoteSideUnread}), so the UID pairing and its pool data format were not checked`,
               'connection',
             )
+          else if (mttp) {
+            if (mttp.remoteAcceptsOutbound === false)
+              add(
+                'UID_MISMATCH',
+                'error',
+                `the remote token's provider refuses the additional pool data this lane sends (${uid !== null && lane.poolDataFormat === 'long' ? uid : 'none'}): the release there reverts (InvalidAdditionalPoolData) and the burned tokens are stuck; pair the providers`,
+                'connection',
+              )
+            if (mttp.remoteProviderRefused !== undefined)
+              add(
+                'UID_MISMATCH',
+                'warning',
+                `${mttp.remoteProviderRefused}: sends from the remote side revert there`,
+                'connection',
+              )
+            if (uid !== null) {
+              if (mttp.remoteSendsData === undefined)
+                add(
+                  'UID_MISMATCH',
+                  'warning',
+                  `the additional pool data the remote side sends cannot be read, so it was not checked against this lane's UID ${uid}`,
+                  'connection',
+                )
+              else if (mttp.remoteSendsData.toLowerCase() !== uid.toLowerCase())
+                add(
+                  'UID_MISMATCH',
+                  'error',
+                  `this lane requires UID ${uid} as the additional pool data of every inbound transfer, but the remote side sends ${mttp.remoteSendsData}: inbound transfers revert here (InvalidAdditionalPoolData)`,
+                  'connection',
+                )
+            }
+            // a long or UID lane refuses legacy pool data from every pool
+            if (mttp.remoteSendsLegacy && (lane.poolDataFormat === 'long' || uid !== null))
+              add(
+                'POOL_DATA_FORMAT_MISMATCH',
+                'error',
+                `remote pool ${side.registryPool} sends legacy pool data toward this chain, which this ${uid !== null ? 'UID' : 'long'} lane refuses: inbound transfers revert here`,
+                'remotePool',
+              )
+          }
           const local = lane.rateLimits.inbound
           const theirs = back?.outbound
           if (local && theirs && side.remoteDecimals !== undefined) {
