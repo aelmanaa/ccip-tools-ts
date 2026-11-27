@@ -29,6 +29,10 @@ import {
 import { resultToObject } from '../../../evm/types.ts'
 import type { FinalityAllowed } from '../../../extra-args.ts'
 import { CCTDataDecodeError, CCTParamsInvalidError } from '../../errors.ts'
+import type {
+  MultiTokenPoolInlineRemotePoolDrop,
+  MultiTokenPoolLaneKey,
+} from '../../multi-token-pool.ts'
 import {
   type LockOrBurnFlavor,
   type MultiTokenPoolVersion,
@@ -375,38 +379,16 @@ export function policyNameOf(word: string): PolicyName {
   return decodePolicyName(word) ?? word
 }
 
-/** One token lane: a local token and a remote chain. The PCM's `LaneKey`. */
-export type MultiTokenPoolLaneKey = {
-  /** Local token. */
-  tokenAddress: string
-  /** CCIP selector of the remote chain. */
-  remoteChainSelector: bigint
-}
-
 /** A lane key plus the directions that apply to it (`goingLive`, `confirmOpening`). */
 export type MultiTokenPoolLaneDirections = MultiTokenPoolLaneKey & {
   /** The directions. */
   directions: TransferDirection[]
 }
 
-/** Flags a write may turn off on a lane's trusted pools, confirmed in `confirmDropped`. */
-export const DROPPABLE_REMOTE_POOL_FLAGS = [
-  'trustPolicyRemotePools',
-  'allowLegacyPoolData',
-] as const
-
-/** What a write drops from a lane's trusted remote pools, confirmed by repeating it. */
-export type MultiTokenPoolInlineRemotePoolDrop = {
-  /** The lane. */
-  lane: MultiTokenPoolLaneKey
-  /** Remote pools the lane no longer trusts after the write. */
-  remotePools?: string[]
-  /**
-   * Flags the write turns off: `allowLegacyPoolData` on any pool the lane keeps;
-   * `trustPolicyRemotePools` (its dropped policy pools are listed in `remotePools` too).
-   */
-  flags?: (typeof DROPPABLE_REMOTE_POOL_FLAGS)[number][]
-}
+// the family-neutral lane key and drop confirmation (both families' guards); re-exported so
+// importers keep their path
+export type { MultiTokenPoolInlineRemotePoolDrop, MultiTokenPoolLaneKey }
+export { DROPPABLE_REMOTE_POOL_FLAGS } from '../../multi-token-pool.ts'
 
 /** Lanes or tokens per PCM batch view call (every batch view chunks by it). */
 export const LANE_BATCH_SIZE = 100
