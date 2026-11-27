@@ -16,6 +16,7 @@ import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
 import { encodeAddressToAny } from '../../../../utils.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { redirectMultiTokenPool } from '../../multi-token-pool/pool-reads.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import {
   TokenPoolVersion,
@@ -91,7 +92,14 @@ export class AddRemotePool extends EVMOperation<AddRemotePoolParams, ParsedAddRe
     chain: EVMChain,
     params: ParsedAddRemotePoolParams,
   ): Promise<UnsignedEVMTx> {
-    const { type, version } = await resolveTokenPool(chain, params.poolAddress)
+    const { type, version } = await resolveTokenPool(chain, params.poolAddress).catch(
+      (err: unknown) =>
+        redirectMultiTokenPool(
+          err,
+          'applyMultiTokenPoolInlineRemotePoolConfigUpdates',
+          "set: [{ tokenAddress, remoteChainSelector, trustPolicyRemotePools, poolDataFormat, remotePools }], which replaces the lane's record",
+        ),
+    )
     // resolved before any further RPC, so an unsupported version fails on one call
     const encode = resolveEncoder(this.encoders, version, this.name)
     // owner-gated on-chain; surface it as a param error here instead of an on-chain revert

@@ -9,7 +9,7 @@
  * @packageDocumentation
  */
 
-import { getAddress, keccak256, toBeHex } from 'ethers'
+import { type Result, getAddress, keccak256, toBeHex } from 'ethers'
 
 import type { ChainGetter } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
@@ -281,8 +281,12 @@ export async function runMultiTokenPoolGuards(
         },
       )
   }
+  // without a sender, the PCM's own post-write lane checks join the bundle after the store calls
+  const bundle = sender
+    ? writes
+    : [...writes, ...pcmLaneChecks(poolConfigManager, version, data, staticConfig)]
   const projectionVerified = writes.length
-    ? await crossCheckWithSimulateV1(chain, input, writes, afterLanes, blockNumber)
+    ? await crossCheckWithSimulateV1(chain, input, bundle, afterLanes, blockNumber)
     : false
 
   const guardInputsHash = hashGuardInputs(lanes, chainLanes, facts)
@@ -324,7 +328,11 @@ export async function runMultiTokenPoolGuards(
   }
 }
 
-async function fillProviderAnswers(
+/**
+ * Adds to `state` the provider answers its policy lanes among `lanes` need, read at `blockTag`.
+ * @internal
+ */
+export async function fillProviderAnswers(
   chain: EVMChain,
   state: MultiTokenPoolRecordState,
   lanes: readonly MultiTokenPoolLaneKey[],
@@ -537,6 +545,48 @@ function forwardedStoreCalls(
     .map(([, to]) => ({ from: getAddress(poolConfigManager), to, data }))
 }
 
+/**
+ * The lane checks the PCM runs after forwarding (`_checkLane`: each store's `checkLaneRecords`), for
+ * the functions that run them: the lanes an inline connection sets and a subset adds. They read the
+ * state after the write, so they only run in the `eth_simulateV1` bundle.
+ */
+function pcmLaneChecks(
+  poolConfigManager: string,
+  version: MultiTokenPoolVersion,
+  data: string,
+  stores: Pick<
+    PoolConfigManagerStaticConfig,
+    'connectionPolicyStore' | 'feePolicyStore' | 'securityPolicyStore'
+  >,
+): WriteCall[] {
+  const tx = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).parseTransaction({
+    data,
+  })
+  const lanes =
+    tx?.name === 'applyInlineConnectionConfigUpdates' || tx?.name === 'applySubsetTokenUpdates'
+      ? (tx.args[1] as Result).map(
+          (r) => resultToObject(r) as { localToken: string; remoteChainSelector: bigint },
+        )
+      : []
+  const from = getAddress(poolConfigManager)
+  return lanes.flatMap(({ localToken, remoteChainSelector }) =>
+    (
+      [
+        ['ConnectionPolicyStore', stores.connectionPolicyStore],
+        ['FeePolicyStore', stores.feePolicyStore],
+        ['SecurityPolicyStore', stores.securityPolicyStore],
+      ] as const
+    ).map(([type, to]) => ({
+      from,
+      to,
+      data: getMultiTokenPoolInterface(type, version).encodeFunctionData('checkLaneRecords', [
+        localToken,
+        remoteChainSelector,
+      ]),
+    })),
+  )
+}
+
 /** RPC errors that mean "this node has no `eth_simulateV1`". */
 const UNSUPPORTED =
   /method.*(not found|not supported|does not exist|unsupported)|unknown method|not available/i
@@ -549,11 +599,12 @@ const UNSUPPORTED =
  */
 async function crossCheckWithSimulateV1(
   chain: EVMChain,
-  { poolConfigManager, version, operation }: RunMultiTokenPoolGuardsInput,
+  input: RunMultiTokenPoolGuardsInput,
   writes: readonly WriteCall[],
   lanes: readonly ProjectedMultiTokenPoolLane[],
   blockTag: number,
 ): Promise<boolean> {
+  const { poolConfigManager, version, operation } = input
   if (!lanes.length) return true
   const pcm = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version)
   const keys = lanes.map(toAbiLaneKey)
@@ -587,14 +638,19 @@ async function crossCheckWithSimulateV1(
   }
   const calls = (result as { calls?: { status: string; returnData: string }[] }[] | undefined)?.[0]
     ?.calls
-  if (
-    !calls ||
-    calls.length !== writes.length + views.length ||
-    calls.some((c) => c.status !== '0x1')
-  )
-    // a simulation that ran the write but not the views (or reverted where eth_call did not) is
-    // not a confirmation
-    return false
+  if (!calls || calls.length !== writes.length + views.length) return false
+  // a write call, or a post-write lane check of the PCM, that reverts in the block is a refusal: the
+  // single eth_calls cannot see the state the earlier calls leave
+  const failed = calls.slice(0, writes.length).findIndex((c) => c.status !== '0x1')
+  if (failed >= 0)
+    throw new CCTParamsInvalidError(
+      input.errorOperation ?? operation,
+      writes[0]!.from === getAddress(poolConfigManager) ? 'data' : 'sender',
+      `the write reverts when simulated with the state it leaves (call ${failed + 1} of ${writes.length}, to ${writes[failed]!.to}): ${calls[failed]!.returnData}`,
+      { context: { ...input.errorContext, revertData: calls[failed]!.returnData } },
+    )
+  // views that did not run are not a confirmation
+  if (calls.some((c) => c.status !== '0x1')) return false
   const [connRaw] = pcm.decodeFunctionResult(
     'getLaneConnectionBatch',
     calls[writes.length + 0]!.returnData,

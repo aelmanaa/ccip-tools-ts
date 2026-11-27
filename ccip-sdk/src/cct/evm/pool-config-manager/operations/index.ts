@@ -121,3 +121,30 @@ export {
   type MultiTokenPoolTokenProfileUpdate,
   ApplyMultiTokenPoolTokenProfileUpdates,
 } from './apply-multi-token-pool-token-profile-updates.ts'
+export {
+  type ApplyMultiTokenPoolInlineConnectionConfigUpdatesParams,
+  ApplyMultiTokenPoolInlineConnectionConfigUpdates,
+} from './apply-multi-token-pool-inline-connection-config-updates.ts'
+export {
+  type ApplyMultiTokenPoolConnectionPolicyConfigUpdatesParams,
+  ApplyMultiTokenPoolConnectionPolicyConfigUpdates,
+} from './apply-multi-token-pool-connection-policy-config-updates.ts'
+export {
+  type ApplyMultiTokenPoolSubsetTokenUpdatesParams,
+  type MultiTokenPoolSubsetToken,
+  ApplyMultiTokenPoolSubsetTokenUpdates,
+} from './apply-multi-token-pool-subset-token-updates.ts'
+export {
+  type ApplyMultiTokenPoolRemoteTokenAddressProviderUpdatesParams,
+  type MultiTokenPoolRemoteTokenAddressProviderUpdate,
+  ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates,
+} from './apply-multi-token-pool-remote-token-address-provider-updates.ts'
+export {
+  type ApplyMultiTokenPoolInlineRemotePoolConfigUpdatesParams,
+  type MultiTokenPoolInlineRemotePoolDrop,
+  ApplyMultiTokenPoolInlineRemotePoolConfigUpdates,
+} from './apply-multi-token-pool-inline-remote-pool-config-updates.ts'
+export {
+  type ApplyMultiTokenPoolRemotePoolPolicyConfigUpdatesParams,
+  ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates,
+} from './apply-multi-token-pool-remote-pool-policy-config-updates.ts'
