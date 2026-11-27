@@ -7,6 +7,7 @@
 
 import type { AddressLookupTableAccount, TransactionInstruction } from '@solana/web3.js'
 
+import type { TokenTransferFeeConfig } from '../../../chain.ts'
 import type { UnsignedSolanaTx } from '../../../solana/types.ts'
 import type { MultiTokenPoolInlineRemotePoolDrop } from '../../evm/pool-config-manager/contracts.ts'
 import type {
@@ -17,8 +18,11 @@ import type {
 import type { SolanaExecuteParams, SolanaGenerateParams } from '../operation.ts'
 import type { SolanaDurableNonce } from '../serialize.ts'
 import type {
+  PoolGroupConnectionSection,
   PoolGroupLaneKey,
+  PoolGroupPolicyClass,
   PoolGroupProgramRef,
+  PoolGroupRateLimitSection,
   PoolGroupRef,
   PoolGroupRoles,
 } from './types.ts'
@@ -421,3 +425,289 @@ export type ExecuteAcceptPoolGroupOwnershipParams =
   SolanaExecuteParams<AcceptPoolGroupOwnershipParams>
 /** Signed result of `acceptPoolGroupOwnership`. */
 export type ExecuteAcceptPoolGroupOwnershipResult = PoolGroupExecuteResult
+
+// ─── S3b: chain records, the default, named policies ─────────────────────────────────────────
+
+/**
+ * A section write. Fields are partial: omitted fields keep the target record's current value (read
+ * and merged). SECURITY is written only through the CCV schedule and hook ops. Remote pools of a
+ * chain record are in the remote chain's spelling; those of a default (no chain) as `0x` hex.
+ */
+export type PoolGroupSectionUpdate =
+  | {
+      /** CONNECTION. */
+      policyClass: 'connection'
+      /** The fields to write; `remotePools` replaces the whole list. */
+      connection: Partial<PoolGroupConnectionSection>
+    }
+  | {
+      /** FEE (fee and overhead). */
+      policyClass: 'fee'
+      /** The fields to write, merged over the record's fee config. */
+      tokenTransferFeeConfig: Partial<TokenTransferFeeConfig>
+    }
+  | {
+      /** RATE_LIMIT. Edits do not refill the buckets. */
+      policyClass: 'rateLimit'
+      /** The buckets to write; each replaces that bucket. */
+      rateLimit: Partial<PoolGroupRateLimitSection>
+    }
+
+/** `add_group_chain`. Owner or policy admin. A copy of the default, lanes off. */
+export type AddPoolGroupChainParams = PoolGroupWriteParams & {
+  /** The remote chain. */
+  remoteChainSelector: bigint
+}
+/** `remove_group_chain`. Owner or policy admin. Needs `memberLaneCount == 0`; rent goes to the owner. */
+export type RemovePoolGroupChainParams = PoolGroupWriteParams & {
+  /** The remote chain. */
+  remoteChainSelector: bigint
+}
+/** `set_group_chain_policy`. The class writer. Merged with the record's current section. */
+export type SetPoolGroupChainPolicyParams = PoolGroupWriteParams & {
+  /** The chain record's chain. */
+  remoteChainSelector: bigint
+  /** The section to write. */
+  section: PoolGroupSectionUpdate
+  /** Required when the class still inherits the group default: the write detaches it, so later default writes no longer reach this chain. */
+  detachFromPoolGroupDefault?: boolean
+}
+/** `inherit_group_default`. The class writer. Not SECURITY. */
+export type InheritPoolGroupDefaultParams = PoolGroupWriteParams & {
+  /** The chain record's chain. */
+  remoteChainSelector: bigint
+  /** The class to follow the default again (copied now). */
+  policyClass: PoolGroupPolicyClass
+}
+/** `set_group_default`. The class writer. Merged with the current default; passes every chain record. */
+export type SetPoolGroupDefaultParams = PoolGroupWriteParams & {
+  /** The section to write. */
+  section: PoolGroupSectionUpdate
+}
+/** `create_policy`. Owner or policy admin. The id is `nextPolicyId` read now. */
+export type CreatePoolGroupPolicyParams = PoolGroupWriteParams & {
+  /** The classes the policy carries; at least one. */
+  classes: PoolGroupPolicyClass[]
+}
+/** Result fields of `createPoolGroupPolicy`. */
+export type CreatePoolGroupPolicyResult = {
+  /** The new policy's id. */
+  policyId: number
+  /** Its `Policy` PDA. */
+  policyAddress: string
+}
+/** Ref to one named policy. */
+export type PoolGroupPolicyRef = PoolGroupWriteParams & {
+  /** The policy id. */
+  policyId: number
+}
+/** `close_policy`. Owner or policy admin. Needs no chain records; rent goes to the owner. */
+export type ClosePoolGroupPolicyParams = PoolGroupPolicyRef
+/** `init_policy_chain_record` / `close_policy_chain_record`. Owner or policy admin. */
+export type PoolGroupPolicyChainParams = PoolGroupPolicyRef & {
+  /** The record's chain. */
+  remoteChainSelector: bigint
+}
+/** `edit_policy_chain_record`. The class writer. Merged; detaching from the policy default is explicit. */
+export type EditPoolGroupPolicyChainRecordParams = PoolGroupPolicyChainParams & {
+  /** The section to write; the policy must carry its class. */
+  section: PoolGroupSectionUpdate
+  /** Required when the class still follows the policy default. */
+  detachFromPolicyDefault?: boolean
+}
+/** `set_policy_default`. The class writer. Merged; passes every chain record of the policy. */
+export type SetPoolGroupPolicyDefaultParams = PoolGroupPolicyRef & {
+  /** The section to write; the policy must carry its class. */
+  section: PoolGroupSectionUpdate
+}
+/** Where a lane takes one class from, as an assignment. */
+export type PoolGroupClassSourceInputEntry =
+  | {
+      /** The lane's own value. */
+      kind: 'inline'
+    }
+  | {
+      /** The group chain record (the default). */
+      kind: 'default'
+    }
+  | {
+      /** A named policy's chain record. */
+      kind: 'policy'
+      /** The policy id. */
+      policyId: number
+    }
+/** Where a lane should take each class from. */
+export type PoolGroupClassSourceInput = Record<PoolGroupPolicyClass, PoolGroupClassSourceInputEntry>
+/** `assign_lane_policies`. Every lane's pool owner signs, plus the group owner unless membership is open. */
+export type AssignPoolGroupLanePoliciesParams = PoolGroupWriteParams & {
+  /** The lanes' chain. */
+  remoteChainSelector: bigint
+  /** The lanes' mints; linked to this group. */
+  tokenAddresses: string[]
+  /** The sources, applied to every lane. */
+  classSource: PoolGroupClassSourceInput
+  /** Group owner co-signer when membership is closed; defaults to the decoded owner. */
+  poolGroupOwner?: string
+}
+/** `reset_lane_buckets`. The rate limit writer. Refills lanes to their RATE_LIMIT record's capacities. */
+export type ResetPoolGroupLaneBucketsParams = PoolGroupWriteParams & {
+  /** The lanes' chain. */
+  remoteChainSelector: bigint
+  /** The lanes' mints; each must take RATE_LIMIT from the target record. */
+  tokenAddresses: string[]
+  /** The named policy whose record the lanes take RATE_LIMIT from; omitted, the group default. */
+  policyId?: number
+}
+
+/** Unsigned params of `addPoolGroupChain` (`add_group_chain`). */
+export type GenerateAddPoolGroupChainParams = SolanaGenerateParams<
+  AddPoolGroupChainParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `addPoolGroupChain`. */
+export type GenerateAddPoolGroupChainResult = PoolGroupUnsignedResult
+/** Signed params of `addPoolGroupChain`; durable nonces are refused here. */
+export type ExecuteAddPoolGroupChainParams = SolanaExecuteParams<AddPoolGroupChainParams>
+/** Signed result of `addPoolGroupChain`. */
+export type ExecuteAddPoolGroupChainResult = PoolGroupExecuteResult
+
+/** Unsigned params of `removePoolGroupChain` (`remove_group_chain`). */
+export type GenerateRemovePoolGroupChainParams = SolanaGenerateParams<
+  RemovePoolGroupChainParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `removePoolGroupChain`. */
+export type GenerateRemovePoolGroupChainResult = PoolGroupUnsignedResult
+/** Signed params of `removePoolGroupChain`; durable nonces are refused here. */
+export type ExecuteRemovePoolGroupChainParams = SolanaExecuteParams<RemovePoolGroupChainParams>
+/** Signed result of `removePoolGroupChain`. */
+export type ExecuteRemovePoolGroupChainResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupChainPolicy` (`set_group_chain_policy`). */
+export type GenerateSetPoolGroupChainPolicyParams = SolanaGenerateParams<
+  SetPoolGroupChainPolicyParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupChainPolicy`. */
+export type GenerateSetPoolGroupChainPolicyResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupChainPolicy`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupChainPolicyParams =
+  SolanaExecuteParams<SetPoolGroupChainPolicyParams>
+/** Signed result of `setPoolGroupChainPolicy`. */
+export type ExecuteSetPoolGroupChainPolicyResult = PoolGroupExecuteResult
+
+/** Unsigned params of `inheritPoolGroupDefault` (`inherit_group_default`). */
+export type GenerateInheritPoolGroupDefaultParams = SolanaGenerateParams<
+  InheritPoolGroupDefaultParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `inheritPoolGroupDefault`. */
+export type GenerateInheritPoolGroupDefaultResult = PoolGroupUnsignedResult
+/** Signed params of `inheritPoolGroupDefault`; durable nonces are refused here. */
+export type ExecuteInheritPoolGroupDefaultParams =
+  SolanaExecuteParams<InheritPoolGroupDefaultParams>
+/** Signed result of `inheritPoolGroupDefault`. */
+export type ExecuteInheritPoolGroupDefaultResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupDefault` (`set_group_default`). */
+export type GenerateSetPoolGroupDefaultParams = SolanaGenerateParams<
+  SetPoolGroupDefaultParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupDefault`. */
+export type GenerateSetPoolGroupDefaultResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupDefault`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupDefaultParams = SolanaExecuteParams<SetPoolGroupDefaultParams>
+/** Signed result of `setPoolGroupDefault`. */
+export type ExecuteSetPoolGroupDefaultResult = PoolGroupExecuteResult
+
+/** Unsigned params of `createPoolGroupPolicy` (`create_policy`). */
+export type GenerateCreatePoolGroupPolicyParams = SolanaGenerateParams<
+  CreatePoolGroupPolicyParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `createPoolGroupPolicy`. */
+export type GenerateCreatePoolGroupPolicyResult = PoolGroupUnsignedResult &
+  CreatePoolGroupPolicyResult
+/** Signed params of `createPoolGroupPolicy`; durable nonces are refused here. */
+export type ExecuteCreatePoolGroupPolicyParams = SolanaExecuteParams<CreatePoolGroupPolicyParams>
+/** Signed result of `createPoolGroupPolicy`. */
+export type ExecuteCreatePoolGroupPolicyResult = PoolGroupExecuteResult &
+  CreatePoolGroupPolicyResult
+
+/** Unsigned params of `closePoolGroupPolicy` (`close_policy`). */
+export type GenerateClosePoolGroupPolicyParams = SolanaGenerateParams<
+  ClosePoolGroupPolicyParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `closePoolGroupPolicy`. */
+export type GenerateClosePoolGroupPolicyResult = PoolGroupUnsignedResult
+/** Signed params of `closePoolGroupPolicy`; durable nonces are refused here. */
+export type ExecuteClosePoolGroupPolicyParams = SolanaExecuteParams<ClosePoolGroupPolicyParams>
+/** Signed result of `closePoolGroupPolicy`. */
+export type ExecuteClosePoolGroupPolicyResult = PoolGroupExecuteResult
+
+/** Unsigned params of `initPoolGroupPolicyChainRecord` (`init_policy_chain_record`). */
+export type GenerateInitPoolGroupPolicyChainRecordParams = SolanaGenerateParams<
+  PoolGroupPolicyChainParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `initPoolGroupPolicyChainRecord`. */
+export type GenerateInitPoolGroupPolicyChainRecordResult = PoolGroupUnsignedResult
+/** Signed params of `initPoolGroupPolicyChainRecord`; durable nonces are refused here. */
+export type ExecuteInitPoolGroupPolicyChainRecordParams =
+  SolanaExecuteParams<PoolGroupPolicyChainParams>
+/** Signed result of `initPoolGroupPolicyChainRecord`. */
+export type ExecuteInitPoolGroupPolicyChainRecordResult = PoolGroupExecuteResult
+
+/** Unsigned params of `closePoolGroupPolicyChainRecord` (`close_policy_chain_record`). */
+export type GenerateClosePoolGroupPolicyChainRecordParams = SolanaGenerateParams<
+  PoolGroupPolicyChainParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `closePoolGroupPolicyChainRecord`. */
+export type GenerateClosePoolGroupPolicyChainRecordResult = PoolGroupUnsignedResult
+/** Signed params of `closePoolGroupPolicyChainRecord`; durable nonces are refused here. */
+export type ExecuteClosePoolGroupPolicyChainRecordParams =
+  SolanaExecuteParams<PoolGroupPolicyChainParams>
+/** Signed result of `closePoolGroupPolicyChainRecord`. */
+export type ExecuteClosePoolGroupPolicyChainRecordResult = PoolGroupExecuteResult
+
+/** Unsigned params of `editPoolGroupPolicyChainRecord` (`edit_policy_chain_record`). */
+export type GenerateEditPoolGroupPolicyChainRecordParams = SolanaGenerateParams<
+  EditPoolGroupPolicyChainRecordParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `editPoolGroupPolicyChainRecord`. */
+export type GenerateEditPoolGroupPolicyChainRecordResult = PoolGroupUnsignedResult
+/** Signed params of `editPoolGroupPolicyChainRecord`; durable nonces are refused here. */
+export type ExecuteEditPoolGroupPolicyChainRecordParams =
+  SolanaExecuteParams<EditPoolGroupPolicyChainRecordParams>
+/** Signed result of `editPoolGroupPolicyChainRecord`. */
+export type ExecuteEditPoolGroupPolicyChainRecordResult = PoolGroupExecuteResult
+
+/** Unsigned params of `setPoolGroupPolicyDefault` (`set_policy_default`). */
+export type GenerateSetPoolGroupPolicyDefaultParams = SolanaGenerateParams<
+  SetPoolGroupPolicyDefaultParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `setPoolGroupPolicyDefault`. */
+export type GenerateSetPoolGroupPolicyDefaultResult = PoolGroupUnsignedResult
+/** Signed params of `setPoolGroupPolicyDefault`; durable nonces are refused here. */
+export type ExecuteSetPoolGroupPolicyDefaultParams =
+  SolanaExecuteParams<SetPoolGroupPolicyDefaultParams>
+/** Signed result of `setPoolGroupPolicyDefault`. */
+export type ExecuteSetPoolGroupPolicyDefaultResult = PoolGroupExecuteResult
+
+/** Unsigned params of `assignPoolGroupLanePolicies` (`assign_lane_policies`). */
+export type GenerateAssignPoolGroupLanePoliciesParams = SolanaGenerateParams<
+  AssignPoolGroupLanePoliciesParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `assignPoolGroupLanePolicies`. */
+export type GenerateAssignPoolGroupLanePoliciesResult = PoolGroupUnsignedResult
+/** Signed params of `assignPoolGroupLanePolicies`; durable nonces are refused here. */
+export type ExecuteAssignPoolGroupLanePoliciesParams =
+  SolanaExecuteParams<AssignPoolGroupLanePoliciesParams>
+/** Signed result of `assignPoolGroupLanePolicies`. */
+export type ExecuteAssignPoolGroupLanePoliciesResult = PoolGroupExecuteResult
+
+/** Unsigned params of `resetPoolGroupLaneBuckets` (`reset_lane_buckets`). */
+export type GenerateResetPoolGroupLaneBucketsParams = SolanaGenerateParams<
+  ResetPoolGroupLaneBucketsParams & PoolGroupGenerateBatchOptions
+>
+/** Unsigned result of `resetPoolGroupLaneBuckets`. */
+export type GenerateResetPoolGroupLaneBucketsResult = PoolGroupUnsignedResult
+/** Signed params of `resetPoolGroupLaneBuckets`; durable nonces are refused here. */
+export type ExecuteResetPoolGroupLaneBucketsParams =
+  SolanaExecuteParams<ResetPoolGroupLaneBucketsParams>
+/** Signed result of `resetPoolGroupLaneBuckets`. */
+export type ExecuteResetPoolGroupLaneBucketsResult = PoolGroupExecuteResult

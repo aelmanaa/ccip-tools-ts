@@ -508,6 +508,17 @@ export async function firstTransactionItemCount(input: PackPoolGroupInput): Prom
 }
 
 /**
+ * Whether all of `input.items` fit one transaction by bytes, locks, trace and heap (no
+ * simulation): for sizing a batched instruction before it becomes an item.
+ * @throws {@link CCTParamsInvalidError} if a limit is invalid
+ * @internal
+ */
+export async function fitsOneTransaction(input: PackPoolGroupInput): Promise<boolean> {
+  const limits = await resolveLimits(input)
+  return !misfit(input, limits, input.items, await prefundedPdas(input))
+}
+
+/**
  * Packs items into pool-group transactions: greedy chunks under the compiled message's bytes and
  * locks, the trace (pre-funded PDAs read in one paged call) and the heap; then each chunk simulated,
  * halved on a compute, heap or trace failure, and given a limit of 1.1 × the simulated CU and a price.

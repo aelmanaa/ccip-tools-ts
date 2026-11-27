@@ -12,6 +12,7 @@ import type { PublicKey, TransactionInstruction } from '@solana/web3.js'
 import { CCIPWalletInvalidError } from '../../../errors/index.ts'
 import type { SolanaChain } from '../../../solana/index.ts'
 import { isWallet } from '../../../solana/types.ts'
+import { canonicalHash } from '../../canonical.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import type { MultiTokenPoolSnapshot, MultiTokenPoolSnapshotCheck } from '../../multi-token-pool.ts'
 import { Operation } from '../../operation.ts'
@@ -30,6 +31,7 @@ import {
   packPoolGroupTransactions,
 } from './packer.ts'
 import { poolGroupTransactionsHash } from './snapshot.ts'
+import type { PoolGroupLaneKey } from './types.ts'
 import {
   type JudgePoolGroupWriteInput,
   type PoolGroupJudgement,
@@ -73,7 +75,15 @@ export type PoolGroupWritePlan<X extends object> = {
   /** Values the write keeps, merges or replaces, by dotted path. */
   expected: Record<string, unknown>
   /** Judge options; `null` skips the lane guard (a new group has no lanes). */
-  judge: Pick<JudgePoolGroupWriteInput, 'failsClosedSeverity' | 'goingLiveSeverity'> | null
+  judge: Pick<
+    JudgePoolGroupWriteInput,
+    'failsClosedSeverity' | 'goingLiveSeverity' | 'scope'
+  > | null
+  /**
+   * Judge each item as its own simulated transaction (batched lane ops whose items touch disjoint
+   * lanes and do not fit one transaction together); otherwise all items are simulated as one.
+   */
+  judgeEach?: boolean
   /** Op-specific result fields. */
   extra: X
   /** Follow-ups, from the judgement (`null` when the plan skips the lane guard). */
@@ -87,6 +97,36 @@ const expectedOf = (plan: PoolGroupWritePlan<object>): Record<string, unknown> =
   ...plan.expected,
   'group.address': plan.group.toBase58(),
 })
+
+/**
+ * Judges each group of instructions as its own simulated transaction, in order, and merges the
+ * judgements (lanes de-duplicated; the inputs hash covers every group).
+ */
+async function judgeGroups(
+  input: Omit<JudgePoolGroupWriteInput, 'instructions'>,
+  groups: readonly (readonly TransactionInstruction[])[],
+): Promise<PoolGroupJudgement> {
+  const parts: PoolGroupJudgement[] = []
+  for (const instructions of groups)
+    parts.push(await judgePoolGroupWrite({ ...input, instructions }))
+  if (parts.length === 1) return parts[0]!
+  const unique = <T extends PoolGroupLaneKey>(lanes: T[]) =>
+    lanes.filter(
+      (l, i) =>
+        lanes.findIndex(
+          (o) =>
+            o.tokenAddress === l.tokenAddress && o.remoteChainSelector === l.remoteChainSelector,
+        ) === i,
+    )
+  return {
+    affectedLanes: unique(parts.flatMap((p) => p.affectedLanes)),
+    goingLive: unique(parts.flatMap((p) => p.goingLive)),
+    findings: parts.flatMap((p) => p.findings),
+    failingClosed: parts.flatMap((p) => p.failingClosed),
+    guardInputsHash: canonicalHash(parts.map((p) => p.guardInputsHash)),
+    slot: parts.reduce((m, p) => (p.slot < m ? p.slot : m), parts[0]!.slot),
+  }
+}
 
 /** The fields shared by every write's raw params. */
 type RawWriteParams = {
@@ -205,18 +245,21 @@ export abstract class PoolGroupWriteOperation<
     const extra = plan.extra
     const empty = { affectedLanes: [], goingLive: [], findings: [] }
     if (!plan.items.length) return { result: { transactions: [], ...empty }, extra }
-    const instructions = plan.items.flatMap((i) => i.instructions)
     const judgement = plan.judge
-      ? await judgePoolGroupWrite({
-          operation: this.name,
-          chain,
-          program: parsed.program,
-          group: plan.group,
-          payer: parsed.payer,
-          instructions,
-          ...plan.judge,
-          ...parsed.guardOptions,
-        })
+      ? await judgeGroups(
+          {
+            operation: this.name,
+            chain,
+            program: parsed.program,
+            group: plan.group,
+            payer: parsed.payer,
+            ...plan.judge,
+            ...parsed.guardOptions,
+          },
+          plan.judgeEach
+            ? plan.items.map((i) => i.instructions)
+            : [plan.items.flatMap((i) => i.instructions)],
+        )
       : null
     const packed = await packPoolGroupTransactions({
       operation: this.name,
@@ -332,17 +375,19 @@ export abstract class PoolGroupWriteOperation<
     const parsed = this.fromInstructions(ref, instructions, guardOptions)
     const plan = await this.plan(chain, parsed)
     const judgement = plan.judge
-      ? await judgePoolGroupWrite({
-          operation: this.name,
-          chain,
-          program: ref.program,
-          group: plan.group,
-          payer: parsed.payer,
-          instructions,
-          ...plan.judge,
-          ...guardOptions,
-          reportFindings: true,
-        })
+      ? await judgeGroups(
+          {
+            operation: this.name,
+            chain,
+            program: ref.program,
+            group: plan.group,
+            payer: parsed.payer,
+            ...plan.judge,
+            ...guardOptions,
+            reportFindings: true,
+          },
+          plan.judgeEach ? instructions.map((ix) => [ix]) : [instructions],
+        )
       : null
     const { snapshotChanges } = await import('../../evm/pool-config-manager/guard-run.ts')
     const changed = snapshotChanges(snapshot, {

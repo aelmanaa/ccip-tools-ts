@@ -45,11 +45,13 @@ import {
   laneFailsClosedFinding,
   laneFormat,
   lanePauses,
+  laneSectionsFor,
 } from './lane.ts'
 import { listPoolGroupLaneRequests } from './operations/get-pool-group-lane.ts'
 import { readPoolGroupLaneStates } from './operations/lane.ts'
 import { POOL_GROUPS_PROGRAM_IDL } from './program.ts'
 import { laneRemotePools } from './remote-lane.ts'
+import { rateLimitsOf as sectionRateLimits } from './sections.ts'
 import type { PoolGroupLaneKey } from './types.ts'
 import type { PoolGroupGuardOptions } from './write-types.ts'
 
@@ -141,6 +143,14 @@ export type JudgePoolGroupWriteInput = PoolGroupGuardOptions & {
   goingLiveSeverity?: 'error' | 'warning'
   /** Report error findings instead of refusing (the snapshot check). */
   reportFindings?: boolean
+  /**
+   * Which lanes the lane rules judge (the write is always simulated): `'all'` (default) every lane
+   * it changes; `'loosened'` (a RATE_LIMIT write) only the lanes whose effective rate limits it
+   * loosens (a bucket disabled, more capacity or rate), so clamping a broken lane is never refused;
+   * `'none'` no lane is listed, for a write no lane reads by construction (a new record, or a closed
+   * one whose lane count the program requires to be 0).
+   */
+  scope?: 'all' | 'loosened' | 'none'
 }
 
 /** What a judged write reports. @internal */
@@ -295,7 +305,7 @@ export async function judgePoolGroupWrite(
     const b = before[writable.findIndex((w) => w.toBase58() === k)]
     return [k, b ? keccak256(b.data) : null]
   })
-  if (!changed.size)
+  if (!changed.size || input.scope === 'none')
     return {
       affectedLanes: [],
       goingLive: [],
@@ -318,6 +328,15 @@ export async function judgePoolGroupWrite(
     readPoolGroupLaneStates(chain, program, requests, { overlay: changed }),
   ])
   const severity = input.failsClosedSeverity ?? 'error'
+  const loosens =
+    input.scope === 'loosened'
+      ? (await import('../../evm/pool-config-manager/guards.ts')).loosensRateLimits
+      : undefined
+  const rateLimitsOf = (s: PoolGroupLaneState | null | Unread) => {
+    if (!s || isUnread(s)) return null
+    const sections = laneSectionsFor(s, 'rateLimit')
+    return sections && !isUnread(sections) ? sectionRateLimits(sections) : null
+  }
   const findings: MultiTokenPoolLaneFinding[] = []
   const affectedLanes: PoolGroupLaneKey[] = []
   const goingLive: PoolGroupLaneKey[] = []
@@ -336,6 +355,11 @@ export async function judgePoolGroupWrite(
     )
     if (!touches) return
     affectedLanes.push(key)
+    // a RATE_LIMIT write judges only the lanes it loosens: a clamp always builds
+    if (loosens && !isUnread(s1) && !loosens(rateLimitsOf(s0), rateLimitsOf(s1))) {
+      inputs.push({ lane: laneKey(key), clamped: true })
+      return
+    }
     const v0 = viewOf(s0)
     const v1 = viewOf(s1)
     inputs.push({ lane: laneKey(key), before: isUnread(v0) ? { unread: v0.reason } : v0 })

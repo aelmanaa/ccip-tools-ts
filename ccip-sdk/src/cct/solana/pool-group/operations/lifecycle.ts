@@ -26,14 +26,13 @@ import type { SolanaChain } from '../../../../solana/index.ts'
 import { getMultipleAccountsInfoPaged } from '../../../../solana/utils.ts'
 import { CCTOperationUnsupportedError, CCTParamsInvalidError } from '../../../errors.ts'
 import type { SolanaExecuteParams, SolanaGenerateParams } from '../../operation.ts'
-import { deriveEventAuthorityPda } from '../../programs/token-pool.ts'
 import {
   parsePublicKey,
   validateBigInt,
   validateInteger,
   validateUniqueChainSelectors,
 } from '../../validate.ts'
-import { poolGroupPdas, poolGroupsCoder } from '../accounts.ts'
+import { poolGroupPdas } from '../accounts.ts'
 import { decodeRoles, keyOrNull, toBigInt } from '../decode.ts'
 import { clockUnixTimestamp } from '../lane.ts'
 import { type PoolGroupPackItem, firstTransactionItemCount } from '../packer.ts'
@@ -62,10 +61,22 @@ import {
   decodeOwned,
   orThrow,
   parsePoolGroupProgram,
-  parsePoolGroupRef,
   readPoolGroup,
   validateSelector,
 } from './common.ts'
+import {
+  type ParsedGroupWrite,
+  bigField,
+  chainRecordMetas,
+  decodeOne,
+  eventAccounts,
+  field,
+  keyField,
+  minCCVActivationDelayOf,
+  parseGroupWrite,
+  proposalBase,
+  requireOwner,
+} from './write-common.ts'
 
 /** `MAX_GROUP_CHAINS` (base-token-pool `groups.rs:40`). */
 const MAX_POOL_GROUP_CHAINS = 24
@@ -137,104 +148,6 @@ function parseDelay(operation: string, value: unknown): bigint {
   const v = typeof value === 'number' && Number.isInteger(value) ? BigInt(value) : value
   validateBigInt(operation, 'minCCVActivationDelay', v, 0n, MAX_MIN_CCV_ACTIVATION_DELAY)
   return v
-}
-
-/** The accounts every `#[event_cpi]` instruction ends with. */
-const eventAccounts = (program: PublicKey) => ({
-  eventAuthority: deriveEventAuthorityPda(program),
-  program,
-})
-
-/** A field of a decoded instruction's data, as `unknown`. */
-const field = (o: unknown, ...path: string[]): unknown =>
-  path.reduce<unknown>(
-    (v, k) => (typeof v === 'object' && v !== null ? Reflect.get(v, k) : undefined),
-    o,
-  )
-
-/** A decoded integer field (`BN` or number), or `undefined`. */
-function bigField(v: unknown): bigint | undefined {
-  if (BN.isBN(v)) return BigInt(v.toString())
-  if (typeof v === 'number') return BigInt(v)
-  return undefined
-}
-
-/** A decoded `PublicKey` field. */
-function keyField(operation: string, o: unknown, ...path: string[]): PublicKey {
-  const v = field(o, ...path)
-  if (!(v instanceof PublicKey))
-    throw new CCTParamsInvalidError(
-      operation,
-      'transactions',
-      `the instruction has no ${path.join('.')}`,
-    )
-  return v
-}
-
-/**
- * A proposal's pool-program instructions, decoded; each must be one of `names`.
- * @throws {@link CCTParamsInvalidError} if the proposal holds anything else
- */
-function decodeOne(
-  operation: string,
-  instructions: readonly TransactionInstruction[],
-  names: readonly string[],
-  single = true,
-): { name: string; data: unknown; ix: TransactionInstruction }[] {
-  if (!instructions.length || (single && instructions.length !== 1))
-    throw new CCTParamsInvalidError(
-      operation,
-      'transactions',
-      `must hold ${single ? 'exactly one' : 'at least one'} pool-program instruction of this op`,
-    )
-  return instructions.map((ix, i) => {
-    const decoded = poolGroupsCoder.instruction.decode(Buffer.from(ix.data))
-    if (!decoded || !names.includes(decoded.name))
-      throw new CCTParamsInvalidError(
-        operation,
-        `transactions.instructions[${i}]`,
-        `is not one of ${names.join(', ')}: pass this op's proposal`,
-      )
-    return { name: decoded.name, data: decoded.data, ix }
-  })
-}
-
-/** The pool group owner check of roles, settings and transfer (`GroupOwnerOnly`). */
-function requireOwner(operation: string, owner: PublicKey, authority: PublicKey, ix: string): void {
-  if (!owner.equals(authority))
-    throw new CCTParamsInvalidError(
-      operation,
-      'authority',
-      `${authority.toBase58()} is not the pool group owner (${owner.toBase58()}), who alone signs ${ix}`,
-    )
-}
-
-/** The group chain records of every chain, in `chain_selectors` order, writable. */
-function chainRecordMetas(
-  program: PublicKey,
-  group: PublicKey,
-  selectors: readonly BN[],
-): AccountMeta[] {
-  return selectors.map((s) => ({
-    pubkey: poolGroupPdas.groupChain(program, group, toBigInt(s)),
-    isSigner: false,
-    isWritable: true,
-  }))
-}
-
-/** The CCV notice in force at `now`: a pending decrease applies once its time has come. */
-function minCCVActivationDelayOf(
-  group: {
-    minCcvActivationDelay: { toString(): string }
-    pendingMinCcvActivationDelay: { toString(): string }
-    pendingMinCcvActivationDelayAt: { toString(): string }
-  },
-  now: bigint,
-): bigint {
-  const pendingAt = toBigInt(group.pendingMinCcvActivationDelayAt)
-  return pendingAt !== 0n && now >= pendingAt
-    ? toBigInt(group.pendingMinCcvActivationDelay)
-    : toBigInt(group.minCcvActivationDelay)
 }
 
 // ─── create ──────────────────────────────────────────────────────────────────────────────────
@@ -613,24 +526,6 @@ export class CreatePoolGroup extends PoolGroupWriteOperation<
 }
 
 // ─── roles ───────────────────────────────────────────────────────────────────────────────────
-
-type ParsedGroupWrite = ParsedPoolGroupWrite & { ref: ParsedPoolGroupRef }
-
-/** Parses the ref and the shared write fields. */
-function parseGroupWrite(
-  operation: string,
-  params: SolanaGenerateParams<SetPoolGroupRolesParams | AcceptPoolGroupOwnershipParams>,
-): ParsedGroupWrite {
-  const ref = parsePoolGroupRef(operation, params)
-  return { ...parseWriteBase(operation, ref.program, params), ref }
-}
-
-/** A ref for a proposal's group, from the check's ref. */
-const proposalBase = (
-  ref: ParsedPoolGroupRef,
-  authority: PublicKey,
-  guardOptions: PoolGroupGuardOptions,
-): ParsedGroupWrite => ({ payer: authority, authority, program: ref.program, guardOptions, ref })
 
 type ParsedRoles = ParsedGroupWrite & { roles: Partial<PoolGroupRoles> }
 

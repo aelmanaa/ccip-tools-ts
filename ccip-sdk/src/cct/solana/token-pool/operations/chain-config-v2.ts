@@ -130,7 +130,13 @@ function parseRecord(operation: string, param: string, value: unknown): Record<s
   return value as Record<string, unknown>
 }
 
-function parseAllowedFinality(
+/**
+ * Parses an allowed finality into the program's `FinalityConfig` (`{ finalityDepth: 0 }` when
+ * omitted). Shared with the pool-group CONNECTION sections.
+ * @throws {@link CCTParamsInvalidError} if it is malformed
+ * @internal
+ */
+export function parseAllowedFinality(
   operation: string,
   value: unknown,
 ): ParsedChainConfigV2Params['allowedFinalityConfig'] {
@@ -143,7 +149,13 @@ function parseAllowedFinality(
   return { flags: finalitySafe ? 1 : 0, blockDepth: finalityDepth as number }
 }
 
-function parseTokenTransferFeeConfig(
+/**
+ * Parses a token transfer fee config into the program's `TokenTransferFeeConfig` (all zero when
+ * omitted), with the program's overhead floor. Shared with the pool-group FEE sections.
+ * @throws {@link CCTParamsInvalidError} if it is malformed
+ * @internal
+ */
+export function parseTokenTransferFeeConfig(
   operation: string,
   value: unknown,
 ): ParsedChainConfigV2Params['tokenTransferFeeConfig'] {
