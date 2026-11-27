@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { Interface, ZeroHash, getAddress, zeroPadValue } from 'ethers'
+import { Interface, ZeroHash, getAddress, id, zeroPadValue } from 'ethers'
 
 import '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
@@ -76,11 +76,18 @@ describe('GetMultiTokenPoolProvider (cct/evm multi-token-pool-providers)', () =>
     state.views.getAdditionalPoolData = () => {
       throw new Error('a bare revert, with no data')
     }
-    // the token answers uid(), so the bare revert is not "no UID"
-    state.others[TOKEN] = 'FactoryToken 1.0.0'
-    state.views.uid = () => ['0x' + '11'.repeat(32)]
+    // the token answers uid() (IHasUID, not an MTTP ABI), so the bare revert is not "no UID"
+    const { chain } = stackChain(state)
+    const call = chain.provider.call.bind(chain.provider)
+    const uid = id('uid()').slice(0, 10)
+    chain.provider.call = async (tx) =>
+      typeof tx.to === 'string' &&
+      getAddress(tx.to) === getAddress(TOKEN) &&
+      String(tx.data).startsWith(uid)
+        ? '0x' + '11'.repeat(32)
+        : call(tx)
     await assert.rejects(
-      new GetMultiTokenPoolProvider().query(stackChain(state).chain, {
+      new GetMultiTokenPoolProvider().query(chain, {
         provider: PROVIDER,
         tokenAddress: TOKEN,
       }),
