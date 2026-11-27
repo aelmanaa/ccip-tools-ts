@@ -10,7 +10,6 @@ import { getAddress } from 'ethers'
 
 import type { LaneRecordType } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
-import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { laneFamilyOf } from '../../../remote-address.ts'
@@ -51,17 +50,6 @@ import {
   type PoolConfigManagerWriteParams,
   PoolConfigManagerWriteOperation,
 } from '../write-operation.ts'
-
-/**
- * The policy names of one record type from a `getPolicyNames` result (one list per type, in
- * `LANE_RECORD_TYPES` order), as lower-case words.
- * @internal
- */
-export function policyNamesOf(lists: readonly unknown[], type: LaneRecordType): Set<string> {
-  return new Set(
-    ((lists[LANE_RECORD_TYPES.indexOf(type)] ?? []) as string[]).map((w) => w.toLowerCase()),
-  )
-}
 
 /** The removal and set lists of a policy record write. @internal */
 export type PolicyRecordWrite = {

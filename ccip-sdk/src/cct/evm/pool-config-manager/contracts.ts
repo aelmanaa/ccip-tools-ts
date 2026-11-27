@@ -18,10 +18,11 @@ import {
   isHexString,
 } from 'ethers'
 
-import type { TransferDirection } from '../../../chain.ts'
+import type { LaneRecordType, TransferDirection } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import {
   type PoolConfigManagerStores,
+  LANE_RECORD_TYPES,
   decodeLaneConnection,
   decodePoolConfigManagerStaticConfig,
   decodeTokenProfileFields,
@@ -593,5 +594,18 @@ export async function assertProviderHasCode(
     param,
     `${provider} has no code, so the store refuses it (ProviderHasNoCode): ${fix}`,
     context && { context },
+  )
+}
+
+/**
+ * One record type's policy names from a `getPolicyNames` result (one list per type, in
+ * `LANE_RECORD_TYPES` order), as lower-case words.
+ * @internal
+ */
+export function policyNamesOf(lists: readonly unknown[], type: LaneRecordType): Set<string> {
+  return new Set(
+    ((lists[LANE_RECORD_TYPES.indexOf(type)] ?? []) as unknown[]).map((w) =>
+      String(w).toLowerCase(),
+    ),
   )
 }

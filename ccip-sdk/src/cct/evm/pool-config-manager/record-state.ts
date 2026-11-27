@@ -25,6 +25,7 @@ import {
   LANE_BATCH_SIZE,
   decodeTokenProfile,
   policyNameOf,
+  policyNamesOf,
   readChainPauseFlags,
   readConfiguredTokens,
   readInBatches,
@@ -203,9 +204,7 @@ export async function readMultiTokenPoolRecordState(
     blockNumber,
   )
   const policyNames = {} as Record<LaneRecordType, ReadonlySet<string>>
-  LANE_RECORD_TYPES.forEach((type, t) => {
-    policyNames[type] = new Set((nameLists[t] ?? []).map((w) => String(w).toLowerCase()))
-  })
+  for (const type of LANE_RECORD_TYPES) policyNames[type] = policyNamesOf(nameLists, type)
   return { state, blockNumber, lanes, staticConfig, policyNames, rateLimitPolicyDecimals }
 }
 

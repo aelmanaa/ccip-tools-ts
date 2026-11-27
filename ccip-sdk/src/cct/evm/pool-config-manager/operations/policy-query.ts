@@ -6,7 +6,7 @@
  */
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
+import type { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
 import { latestBlock } from '../../mined-block.ts'
 import { poolConfigManagerContract } from '../../multi-token-pool/contracts.ts'
 import { EVMQuery } from '../../query.ts'
@@ -16,6 +16,7 @@ import {
   type PoolConfigManagerTarget,
   encodePolicyName,
   policyNameOf,
+  policyNamesOf,
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
 } from '../contracts.ts'
@@ -90,12 +91,10 @@ export abstract class PolicyQuery<
       this.readPolicy(pcm, params, { chain, blockTag }),
       pcm.getPolicyNames({ blockTag }),
     ])
-    const word = params.policyWord.toLowerCase()
-    const list = names[LANE_RECORD_TYPES.indexOf(this.recordType)] ?? []
     return {
       ...records,
       policyName: policyNameOf(params.policyWord),
-      exists: list.some((w) => String(w).toLowerCase() === word),
+      exists: policyNamesOf(names, this.recordType).has(params.policyWord.toLowerCase()),
     }
   }
 }

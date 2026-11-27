@@ -84,10 +84,25 @@ export async function readContractTypeOrNull(
   chain: Pick<Chain, 'typeAndVersion'>,
   address: string,
 ): Promise<string | null> {
+  const read = await typeAndVersionOf(chain, address)
+  return 'typeAndVersion' in read ? read.typeAndVersion[0] : null
+}
+
+/**
+ * `typeAndVersion` of an address, or the error that shows it is not a CCIP contract (no code, no
+ * `typeAndVersion`, or an unparseable one). Transport errors propagate. The one catch both readers
+ * share.
+ */
+async function typeAndVersionOf(
+  chain: Pick<Chain, 'typeAndVersion'>,
+  address: string,
+): Promise<
+  { typeAndVersion: Awaited<ReturnType<Chain['typeAndVersion']>> } | { notCcip: unknown }
+> {
   try {
-    return (await chain.typeAndVersion(address))[0]
+    return { typeAndVersion: await chain.typeAndVersion(address) }
   } catch (err) {
-    if (isNotCcipContract(err)) return null
+    if (isNotCcipContract(err)) return { notCcip: err }
     throw err
   }
 }
@@ -108,16 +123,13 @@ export async function readContractType(
   address: string,
   expected: string,
 ): Promise<Awaited<ReturnType<EVMChain['typeAndVersion']>>> {
-  try {
-    return await chain.typeAndVersion(address)
-  } catch (cause) {
-    if (!isNotCcipContract(cause)) throw cause
-    throw new CCTContractTypeInvalidError(
-      address,
-      expected,
-      'unknown',
-      'the address reports no typeAndVersion — it has no code, or is not a CCIP contract',
-      { cause: cause instanceof Error ? cause : undefined },
-    )
-  }
+  const read = await typeAndVersionOf(chain, address)
+  if ('typeAndVersion' in read) return read.typeAndVersion
+  throw new CCTContractTypeInvalidError(
+    address,
+    expected,
+    'unknown',
+    'the address reports no typeAndVersion — it has no code, or is not a CCIP contract',
+    { cause: read.notCcip instanceof Error ? read.notCcip : undefined },
+  )
 }
