@@ -164,8 +164,12 @@ export function rateLimitBucketOf(
   return direction
 }
 
-/** `IPoolV2.MessageDirection` on chain: `Outbound` is 0, `Inbound` is 1. @internal */
-export const MESSAGE_DIRECTIONS = [
+/**
+ * Both transfer directions, outbound first: also `IPoolV2.MessageDirection` on chain (`Outbound` is 0,
+ * `Inbound` is 1), so an index here is the ABI value.
+ * @internal
+ */
+export const TRANSFER_DIRECTIONS = [
   'outbound',
   'inbound',
 ] as const satisfies readonly TransferDirection[]
@@ -886,4 +890,20 @@ export function inlineRecordOf<T extends LaneRecordType>(
       | MultiTokenPoolTokenRecords['inline'][T]
       | undefined
   )?.find((r) => r.remoteChainSelector === lane.remoteChainSelector)
+}
+
+/** A policy's record of one type for one chain in a state (chain `0n`: its default), or `undefined`. @internal */
+export function policyRecordOf<T extends LaneRecordType>(
+  state: Pick<MultiTokenPoolRecordState, 'policies'>,
+  type: T,
+  key: PolicyRecordKey,
+): MultiTokenPoolPolicyRecords[T][number] | undefined {
+  const word = policyKey(key.policyName, 'policyName')
+  return (state.policies[type] as readonly MultiTokenPoolPolicyRecords[T][number][]).find(
+    (r) =>
+      'policyName' in r &&
+      policyKey(r.policyName, 'policyName') === word &&
+      'remoteChainSelector' in r &&
+      r.remoteChainSelector === key.remoteChainSelector,
+  )
 }

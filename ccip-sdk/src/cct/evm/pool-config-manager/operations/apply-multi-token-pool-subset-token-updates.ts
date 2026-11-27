@@ -12,13 +12,20 @@ import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
-  TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
+  policyRolesGate,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateAddress, validateArray } from '../../validate.ts'
+import type { DecodedMultiTokenPoolWrite } from '../calldata.ts'
 import { encodePolicyName, validatePolicyRecordKey } from '../contracts.ts'
-import { policyKey, recordKey, subsetKey, tokenRecordsOf } from '../projection.ts'
+import {
+  type MultiTokenPoolRecordState,
+  policyKey,
+  recordKey,
+  subsetKey,
+  tokenRecordsOf,
+} from '../projection.ts'
 import type { PolicyRecordKey } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -76,7 +83,7 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
   }
 
   protected gate(): readonly PoolConfigManagerRole[] {
-    return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES.connection]
+    return policyRolesGate('connection')
   }
 
   protected override errorContext(): Record<string, unknown> {
@@ -89,14 +96,8 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
     { version, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
     const context = { recordType: 'connection' }
-    const recordOf = (e: MultiTokenPoolSubsetToken) =>
-      state.policies.connection.find(
-        (r) =>
-          policyKey(r.policyName, 'policyName') === policyKey(e.policyName, 'policyName') &&
-          r.remoteChainSelector === e.remoteChainSelector,
-      )
-    const isMember = (e: MultiTokenPoolSubsetToken) =>
-      !!recordOf(e)?.subsetTokens.some((t) => getAddress(t) === getAddress(e.tokenAddress))
+    const recordOf = (e: MultiTokenPoolSubsetToken) => subsetRecordOf(state, e)
+    const isMember = (e: MultiTokenPoolSubsetToken) => subsetMember(state, e, e.tokenAddress)
     // the store's refusals, named before the eth_call would
     ;(params.remove ?? []).forEach((e, i) => {
       if (!isMember(e))
@@ -149,13 +150,42 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
       multiTokenPoolFunctionOf(this.name),
       [args(params.remove, 'remove'), args(params.add, 'add')],
     )
-    // the values the write replaces: each touched membership as it was
-    const expected = Object.fromEntries(
-      [...(params.remove ?? []), ...(params.add ?? [])].map((e) => [
-        `subsets.${recordKey(e.policyName, e.remoteChainSelector)}.${getAddress(e.tokenAddress)}`,
-        isMember(e),
-      ]),
-    )
-    return { data, expected }
+    return { data }
   }
+
+  /** Each subset membership the calldata adds or removes, as it was. */
+  protected sealedFrom(
+    _chain: EVMChain,
+    { changes }: DecodedMultiTokenPoolWrite,
+    { state }: PoolConfigManagerWriteContext,
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      changes.flatMap((c) =>
+        c.kind === 'updateSubsetTokens'
+          ? [...(c.remove ?? []), ...(c.add ?? [])].map((t) => [
+              `subsets.${recordKey(c.policyName, c.remoteChainSelector)}.${getAddress(t)}`,
+              subsetMember(state, c, t),
+            ])
+          : [],
+      ),
+    )
+  }
+}
+
+/** The connection policy record `key` names, as stored. */
+function subsetRecordOf(state: MultiTokenPoolRecordState, key: PolicyRecordKey) {
+  return state.policies.connection.find(
+    (r) =>
+      policyKey(r.policyName, 'policyName') === policyKey(key.policyName, 'policyName') &&
+      r.remoteChainSelector === key.remoteChainSelector,
+  )
+}
+
+/** Whether `token` is in the subset of the connection policy record `key`. */
+function subsetMember(
+  state: MultiTokenPoolRecordState,
+  key: PolicyRecordKey,
+  token: string,
+): boolean {
+  return !!subsetRecordOf(state, key)?.subsetTokens.some((t) => getAddress(t) === getAddress(token))
 }

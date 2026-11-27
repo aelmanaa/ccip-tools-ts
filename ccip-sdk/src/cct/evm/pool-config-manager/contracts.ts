@@ -18,10 +18,11 @@ import {
   isHexString,
 } from 'ethers'
 
-import type { TransferDirection } from '../../../chain.ts'
+import type { LaneRecordType, TransferDirection } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
 import {
   type PoolConfigManagerStores,
+  LANE_RECORD_TYPES,
   decodeLaneConnection,
   decodePoolConfigManagerStaticConfig,
   decodeTokenProfileFields,
@@ -33,6 +34,8 @@ import type {
   MultiTokenPoolInlineRemotePoolDrop,
   MultiTokenPoolLaneKey,
 } from '../../multi-token-pool.ts'
+import type { DefaultAdminTransferSchedule } from '../default-admin.ts'
+import { latestBlock } from '../mined-block.ts'
 import {
   type LockOrBurnFlavor,
   type MultiTokenPoolVersion,
@@ -138,7 +141,7 @@ export async function readPagesAtBlock<T>(
       'pageSize',
       'must be an integer of at least 1',
     )
-  const blockNumber = blockTag ?? (await chain.provider.getBlockNumber())
+  const blockNumber = blockTag ?? (await latestBlock(chain))
   const items: T[] = []
   for (let pages = 0; pages < MAX_PAGES; pages++) {
     const page = await fetch(BigInt(items.length), BigInt(pageSize), blockNumber)
@@ -254,7 +257,7 @@ export async function scanLogs(
   scanned: { fromBlock: number; toBlock: number }
   complete: boolean
 }> {
-  const toBlock = range.toBlock ?? (await chain.provider.getBlockNumber())
+  const toBlock = range.toBlock ?? (await latestBlock(chain))
   // a scan from block 0 is complete by definition, so it needs no deployment search
   const deployed = range.fromBlock === 0 ? 0 : await findDeploymentBlock(chain, address, toBlock)
   const fromBlock = range.fromBlock ?? deployed
@@ -592,5 +595,66 @@ export async function assertProviderHasCode(
     param,
     `${provider} has no code, so the store refuses it (ProviderHasNoCode): ${fix}`,
     context && { context },
+  )
+}
+
+/** A PoolConfigManager's `AccessControlDefaultAdminRules` state, raw. @internal */
+export type PoolConfigManagerAdminState = {
+  /** Holder of `DEFAULT_ADMIN_ROLE` (`ZeroAddress` once renounced). */
+  defaultAdmin: string
+  /** The scheduled transfer; `schedule` `0n` when none, `newAdmin` `ZeroAddress` for a renounce. */
+  pending: DefaultAdminTransferSchedule
+  /** Seconds a transfer waits. */
+  delay: number
+  /** The scheduled delay change; `schedule` `0n` when none. */
+  pendingDelay: { newDelay: number; schedule: bigint }
+  /** Seconds a delay increase waits before it applies. */
+  delayIncreaseWait: number
+}
+
+/**
+ * Reads a PCM's default admin, its scheduled transfer and its delays, pinned to `blockTag` when
+ * given (the two pending getters return two outputs each: destructured positionally).
+ * @internal
+ */
+export async function readPoolConfigManagerAdmin(
+  pcm: Pick<
+    ReturnType<typeof poolConfigManagerContract>,
+    | 'defaultAdmin'
+    | 'pendingDefaultAdmin'
+    | 'defaultAdminDelay'
+    | 'pendingDefaultAdminDelay'
+    | 'defaultAdminDelayIncreaseWait'
+  >,
+  blockTag?: number,
+): Promise<PoolConfigManagerAdminState> {
+  const at = blockTag === undefined ? [] : ([{ blockTag }] as const)
+  const [admin, [newAdmin, adminSchedule], delay, [newDelay, delaySchedule], wait] =
+    await Promise.all([
+      pcm.defaultAdmin(...at),
+      pcm.pendingDefaultAdmin(...at),
+      pcm.defaultAdminDelay(...at),
+      pcm.pendingDefaultAdminDelay(...at),
+      pcm.defaultAdminDelayIncreaseWait(...at),
+    ])
+  return {
+    defaultAdmin: getAddress(resultToObject(admin)),
+    pending: { newAdmin: getAddress(resultToObject(newAdmin)), schedule: BigInt(adminSchedule) },
+    delay: Number(delay),
+    pendingDelay: { newDelay: Number(newDelay), schedule: BigInt(delaySchedule) },
+    delayIncreaseWait: Number(wait),
+  }
+}
+
+/**
+ * One record type's policy names from a `getPolicyNames` result (one list per type, in
+ * `LANE_RECORD_TYPES` order), as lower-case words.
+ * @internal
+ */
+export function policyNamesOf(lists: readonly unknown[], type: LaneRecordType): Set<string> {
+  return new Set(
+    ((lists[LANE_RECORD_TYPES.indexOf(type)] ?? []) as unknown[]).map((w) =>
+      String(w).toLowerCase(),
+    ),
   )
 }

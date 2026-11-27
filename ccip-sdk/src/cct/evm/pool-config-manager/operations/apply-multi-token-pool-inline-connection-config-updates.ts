@@ -8,7 +8,6 @@
 import { getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
 import { encodeRemoteAddress, parseRemoteAddress } from '../../../remote-address.ts'
 import type { MultiTokenPoolLaneKey } from '../contracts.ts'
 import {
@@ -88,11 +87,9 @@ export class ApplyMultiTokenPoolInlineConnectionConfigUpdates extends InlineReco
       const was = inlineRecordOf(state, 'connection', lane)?.remoteToken
       const policy = lane.connection.remoteToken
       if (policy !== null && was !== undefined && policy !== was)
-        throw new CCTParamsInvalidError(
-          this.name,
+        throw this.refuse(
           `remove[${i}]`,
           `removing it falls the lane back to its connection policy, which resolves remote token ${policy}, not ${was} (PolicyRemoteTokenMismatch): in-flight messages would name the wrong token; align the policy first, or keep the inline record`,
-          { context: { recordType: 'connection' } },
         )
     })
   }

@@ -24,6 +24,7 @@ import {
   validateOneOf,
   validateUint64,
 } from '../../validate.ts'
+import type { DecodedMultiTokenPoolWrite } from '../calldata.ts'
 import { readChainPauseFlags } from '../contracts.ts'
 import { tokenRecordsOf } from '../projection.ts'
 import { type PauseDirection, PAUSE_DIRECTIONS } from '../records.ts'
@@ -106,16 +107,10 @@ abstract class PauseWriteOperation<
     return ['DEFAULT_ADMIN_ROLE', this.pauses ? 'PAUSER_ROLE' : 'UNPAUSER_ROLE']
   }
 
-  // a pause is never judged (the guard reads that from the calldata); an unpause makes lanes live:
-  // no attestations
-  protected override makesLive(): boolean {
-    return !this.pauses
-  }
-
   protected async encode(
     chain: EVMChain,
     params: P,
-    { address, version, blockTag, state }: PoolConfigManagerWriteContext,
+    { version }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
     const iface = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version)
     const fn = multiTokenPoolFunctionOf(this.name)
@@ -127,45 +122,59 @@ abstract class PauseWriteOperation<
             this.scope === 'tokens' ? params.tokenAddresses : params.remoteChainSelectors,
             direction,
           ])
-    // the values the write replaces: each pause flag as it is (a chain no record names is read)
-    const named = params.remoteChainSelectors ?? []
+    return { data }
+  }
+
+  /** Each pause flag the calldata sets, as it is (a chain no record names is read). */
+  protected async sealedFrom(
+    chain: EVMChain,
+    { changes }: DecodedMultiTokenPoolWrite,
+    { address, version, blockTag, state }: PoolConfigManagerWriteContext,
+  ): Promise<Record<string, unknown>> {
+    const chains = changes.flatMap((c) =>
+      c.kind === 'setChainPause' ? [c.remoteChainSelector] : [],
+    )
     const known = new Set(state.chainPauses.map((p) => p.remoteChainSelector))
-    const extra = named.length
+    const unknown = chains.filter((c) => !known.has(c))
+    const extra = unknown.length
       ? (
           await readChainPauseFlags(
             poolConfigManagerContract(chain, address, version),
             address,
-            named.filter((c) => !known.has(c)),
+            unknown,
             blockTag,
           )
         ).chains
       : []
-    const expected =
-      this.scope === 'global'
-        ? { 'pauses.global': state.isGloballyPaused }
-        : this.scope === 'tokens'
-          ? Object.fromEntries(
-              params.tokenAddresses!.map((t) => {
-                const token = tokenRecordsOf(state, t)
-                return [
-                  `pauses.token.${t}`,
-                  {
-                    outbound: token?.isOutboundPaused ?? false,
-                    inbound: token?.isInboundPaused ?? false,
-                  },
-                ]
-              }),
-            )
-          : Object.fromEntries(
-              params.remoteChainSelectors!.map((c) => {
-                const p = [...state.chainPauses, ...extra].find((x) => x.remoteChainSelector === c)
-                return [
-                  `pauses.chain.${c}`,
-                  { outbound: p?.outbound ?? false, inbound: p?.inbound ?? false },
-                ]
-              }),
-            )
-    return { data, expected }
+    return Object.fromEntries(
+      changes.flatMap((c): [string, unknown][] => {
+        if (c.kind === 'setGlobalPause') return [['pauses.global', state.isGloballyPaused]]
+        if (c.kind === 'setTokenPause') {
+          const token = tokenRecordsOf(state, c.tokenAddress)
+          return [
+            [
+              `pauses.token.${c.tokenAddress}`,
+              {
+                outbound: token?.isOutboundPaused ?? false,
+                inbound: token?.isInboundPaused ?? false,
+              },
+            ],
+          ]
+        }
+        if (c.kind === 'setChainPause') {
+          const p = [...state.chainPauses, ...extra].find(
+            (x) => x.remoteChainSelector === c.remoteChainSelector,
+          )
+          return [
+            [
+              `pauses.chain.${c.remoteChainSelector}`,
+              { outbound: p?.outbound ?? false, inbound: p?.inbound ?? false },
+            ],
+          ]
+        }
+        return []
+      }),
+    )
   }
 }
 

@@ -26,6 +26,7 @@ import {
   POOL_IFACE,
   STORE_IFACE,
   TAR_IFACE,
+  WRITE_IFACE,
   roleId,
 } from './stack.test.helpers.ts'
 
@@ -68,6 +69,7 @@ describe('stack stub vs vendored ABIs (cct/evm multi-token-pool)', () => {
     assertSubset(PCM_IFACE, vendored([POOL_CONFIG_MANAGER_TYPE, ...STORE_TYPES]), 'PCM_IFACE')
     assertSubset(STORE_IFACE, vendored(STORE_TYPES), 'STORE_IFACE')
     assertSubset(AUX_IFACE, vendored(ALL), 'AUX_IFACE')
+    assertSubset(WRITE_IFACE, vendored(ALL), 'WRITE_IFACE')
     assertSubset(TAR_IFACE, [new Interface(TOKEN_ADMIN_REGISTRY_V1_5_0_ABI)], 'TAR_IFACE')
   })
 

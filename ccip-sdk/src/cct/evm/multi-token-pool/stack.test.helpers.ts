@@ -77,6 +77,35 @@ export const AUX_IFACE = new Interface([
   'function getTokenFactory() view returns (address)',
   'function getAdditionalPoolData(address localToken, uint64 remoteChainSelector, bytes4 finality, bytes extraArgs) view returns (bytes)',
 ])
+/** The ERC20 view a fee withdrawal reads (a token in `others`, answered through `state.views`). */
+export const ERC20_IFACE = new Interface([
+  'function balanceOf(address account) view returns (uint256)',
+])
+/**
+ * The writes a simulation sends: the PCM's role, admin and withdrawal writes, and the owner-gated
+ * writes of the pool, the stores and the hooks. Served by `state.writes` (a throw reverts), else
+ * they succeed.
+ */
+export const WRITE_IFACE = new Interface([
+  'function grantRole(bytes32 role, address account)',
+  'function revokeRole(bytes32 role, address account)',
+  'function renounceRole(bytes32 role, address account)',
+  'function beginDefaultAdminTransfer(address newAdmin)',
+  'function acceptDefaultAdminTransfer()',
+  'function cancelDefaultAdminTransfer()',
+  'function changeDefaultAdminDelay(uint48 newDelay)',
+  'function rollbackDefaultAdminDelay()',
+  'function withdrawFeeTokens(address pool, address[] feeTokens, address recipient)',
+  'function transferOwnership(address to)',
+  'function acceptOwnership()',
+  'function setRouter(address newRouter)',
+  'function setPoolConfigManager(address newPoolConfigManager)',
+  'function applyAuthorizedCallerUpdates(tuple(address[] addedCallers, address[] removedCallers) authorizedCallerArgs)',
+  'function applyAllowListUpdates(address[] removes, address[] adds)',
+  'function setPolicyEngine(address newPolicyEngine)',
+  'function setPolicyEngineAllowFailedDetach(address newPolicyEngine)',
+  'function setBlocklist(address blocklist)',
+])
 /** The TokenAdminRegistry view the registry reads use. */
 export const TAR_IFACE = new Interface([
   'function getTokenConfig(address token) view returns ((address administrator, address pendingAdministrator, address tokenPool))',
@@ -132,6 +161,19 @@ export type StackState = {
   auxOwners: Record<string, { owner: string; pendingOwner: string }>
   /** Raw logs served by `getLogs` besides the role logs. */
   logs: { address: string; topics: string[]; data: string; blockNumber: number }[]
+  /**
+   * Simulated writes ({@link WRITE_IFACE}), keyed by function name: throwing reverts the call; a
+   * write with no entry succeeds.
+   */
+  writes?: Record<string, (args: readonly unknown[], to: string, from: string | undefined) => void>
+  /** The timestamp of every block (`getBlock`); defaults to 0. */
+  timestamp?: number
+  /** A node without archive state: historical `getCode` fails as pruned. */
+  pruned?: boolean
+  /** Addresses with no code at any block (EOAs). */
+  eoas?: string[]
+  /** The PCM-wide pause, as the lane views report it. */
+  globallyPaused?: boolean
 }
 
 /** A consistent default stack: one owner everywhere, PCM authorized on every store. */
@@ -238,9 +280,30 @@ export function stackChain(state: StackState = defaultStack()) {
         ? state.pcm.typeAndVersion
         : (state.stores[to]?.typeAndVersion ?? state.others[to])
   const provider = {
-    call: async ({ to, data, blockTag }: { to: string; data: string; blockTag?: unknown }) => {
+    call: async ({
+      to,
+      data,
+      blockTag,
+      from,
+    }: {
+      to: string
+      data: string
+      blockTag?: unknown
+      from?: string
+    }) => {
       const addr = getAddress(to)
       calls.push(`call:${addr}:${data.slice(0, 10)}`)
+      const write = WRITE_IFACE.parseTransaction({ data })
+      if (write) {
+        callBlocks.push({ name: write.name, blockTag })
+        try {
+          state.writes?.[write.name]?.(write.args, addr, from)
+        } catch (err) {
+          const revertData = (err as { revertData?: string }).revertData
+          throw revertData ? Object.assign(callException(), { data: revertData }) : callException()
+        }
+        return '0x'
+      }
       const fn = [POOL_IFACE, PCM_IFACE, STORE_IFACE]
         .map((i) => i.getFunction(data.slice(0, 10)))
         .find(Boolean)
@@ -285,6 +348,14 @@ export function stackChain(state: StackState = defaultStack()) {
               const name = Object.keys(pcm.roles).find((r) => roleId(r) === role)
               return [!!name && pcm.roles[name]!.includes(getAddress(account))]
             }
+            // the pause reads: no connection, every flag clear but the global one
+            case 'getLaneConnectionBatch': {
+              const [lanes] = args as [unknown[]]
+              const g = !!state.globallyPaused
+              return [
+                lanes.map(() => [false, g, g, g, false, false, false, false, false, '0x', []]),
+              ]
+            }
             case 'getAllConfiguredTokens': {
               const [start, max] = args as [bigint, bigint]
               return [pcm.tokens.slice(Number(start), Number(start + max))]
@@ -315,11 +386,15 @@ export function stackChain(state: StackState = defaultStack()) {
         })
       // auxiliary contracts (hooks, providers): every answer comes from `state.views`
       if (state.others[addr])
-        return answer(AUX_IFACE, data, (name, args) => {
-          const view = state.views[name]
-          if (!view) throw callException()
-          return view(args, addr)
-        })
+        return answer(
+          AUX_IFACE.getFunction(data.slice(0, 10)) ? AUX_IFACE : ERC20_IFACE,
+          data,
+          (name, args) => {
+            const view = state.views[name]
+            if (!view) throw callException()
+            return view(args, addr)
+          },
+        )
       throw callException()
     },
     getStorage: async (address: string, slot: bigint) => {
@@ -329,17 +404,31 @@ export function stackChain(state: StackState = defaultStack()) {
       if (!holder) return word(ZeroAddress)
       return word(slot === 1n ? holder.owner : holder.pendingOwner)
     },
-    getCode: async (address: string, block: number) => {
+    getCode: async (address: string, block?: number) => {
       calls.push(`getCode:${getAddress(address)}:${block}`)
-      return block >= state.deploymentBlock ? '0x60806040' : '0x'
+      if (state.pruned && block !== undefined && block < state.latestBlock)
+        throw makeError('missing trie node', 'SERVER_ERROR')
+      if (state.eoas?.includes(getAddress(address))) return '0x'
+      return (block ?? state.latestBlock) >= state.deploymentBlock ? '0x60806040' : '0x'
     },
     getBlockNumber: async () => {
       calls.push('getBlockNumber')
       return state.latestBlock
     },
+    getBlock: async (tag: number) => {
+      calls.push(`getBlock:${tag}`)
+      return { number: tag, timestamp: state.timestamp ?? 0 }
+    },
+    // no eth_simulateV1: the projection is not cross-checked
+    send: async (method: string) => {
+      throw makeError(`the method ${method} does not exist`, 'UNSUPPORTED_OPERATION')
+    },
   }
   const chain = {
     provider,
+    // Ethereum Sepolia: `generate` pins every transaction to it
+    network: { chainId: 11155111 },
+    logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
     typeAndVersion: async (address: string) => {
       const addr = getAddress(address)
       calls.push(`typeAndVersion:${addr}`)

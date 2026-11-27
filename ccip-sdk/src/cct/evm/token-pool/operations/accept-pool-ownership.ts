@@ -16,6 +16,7 @@ import type { Interface } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
+import { redirectMultiTokenPool } from '../../multi-token-pool/pool-reads.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
 import {
@@ -72,7 +73,17 @@ export class AcceptPoolOwnership extends EVMOperation<AcceptPoolOwnershipParams>
     chain: EVMChain,
     params: AcceptPoolOwnershipParams,
   ): Promise<UnsignedEVMTx> {
-    const { type, version } = await resolveTokenPool(chain, params.poolAddress)
+    const { type, version } = await resolveTokenPool(chain, params.poolAddress).catch(
+      (err: unknown) =>
+        redirectMultiTokenPool(
+          err,
+          'acceptMultiTokenPoolOwnership',
+          'the same poolAddress, signed by the pending owner',
+          {
+            perToken: false,
+          },
+        ),
+    )
     const encode = resolveEncoder(this.encoders, version, this.name)
     return encode(getTokenPoolInterface(type, version), params)
   }

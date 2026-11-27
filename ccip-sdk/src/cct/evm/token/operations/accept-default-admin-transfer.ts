@@ -9,11 +9,11 @@
  * @packageDocumentation
  */
 
-import { type Interface, ZeroAddress, getAddress } from 'ethers'
+import type { Interface } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
+import { assertDefaultAdminTransferAcceptable } from '../../default-admin.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
 import {
@@ -44,26 +44,12 @@ const buildV1: Builder = async (iface, _chain, { tokenAddress }) =>
   callTx(tokenAddress, iface.encodeFunctionData('acceptOwnership', []))
 
 const buildV2: Builder = async (iface, chain, { tokenAddress, sender }, operation) => {
-  const { newAdmin, schedule } = await readPendingTokenDefaultAdmin(chain, tokenAddress)
-  if (schedule === 0n)
-    throw new CCTParamsInvalidError(
-      operation,
-      'tokenAddress',
-      `has no pending default-admin transfer`,
-    )
-  // A zero pending admin is the separate, deliberate renunciation path and cannot accept.
-  if (newAdmin === ZeroAddress)
-    throw new CCTParamsInvalidError(
-      operation,
-      'tokenAddress',
-      'has a pending default-admin renunciation, which must be completed with renounceRole',
-    )
-  if (sender !== undefined && getAddress(sender) !== newAdmin)
-    throw new CCTParamsInvalidError(
-      operation,
-      'sender',
-      `must be the pending default admin (${newAdmin})`,
-    )
+  assertDefaultAdminTransferAcceptable(
+    operation,
+    'tokenAddress',
+    await readPendingTokenDefaultAdmin(chain, tokenAddress),
+    sender,
+  )
   return callTx(tokenAddress, iface.encodeFunctionData('acceptDefaultAdminTransfer', []))
 }
 

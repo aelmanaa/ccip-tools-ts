@@ -75,6 +75,7 @@ import LOCK_RELEASE_TOKEN_POOL_V2_0_0_BYTECODE from '../artifacts/bytecode/V2_0_
 import SILOED_LOCK_RELEASE_TOKEN_POOL_V2_0_0_BYTECODE from '../artifacts/bytecode/V2_0_0/siloed-lock-release-token-pool.ts'
 import type { DeployArtifact } from '../operation.ts'
 import { getTypedContract } from '../query.ts'
+import { validateArray, validateNonZeroAddress, validateUint32 } from '../validate.ts'
 
 /**
  * Pool families, grouping types by how CCT ops treat them; the ABI and version allowlist are per
@@ -1807,4 +1808,134 @@ export function resolveEncoderIn<V extends string, F>(
     if (encoder !== undefined) return encoder
   }
   throw new CCTOperationUnsupportedError(op, version)
+}
+
+/**
+ * The destination overhead fields of a token transfer fee config: `uint32` gas, non-zero, and
+ * `uint32` bytes. Shared by `applyTokenTransferFeeConfigUpdates` and the multi-token pool overhead
+ * records.
+ * @throws {@link CCTParamsInvalidError} at `<param>.<field>`
+ * @internal
+ */
+export function validateDestOverheadFields(
+  operation: string,
+  param: string,
+  config: Record<string, unknown>,
+): void {
+  validateUint32(operation, `${param}.destGasOverhead`, config.destGasOverhead)
+  validateUint32(operation, `${param}.destBytesOverhead`, config.destBytesOverhead)
+  if (config.destGasOverhead === 0)
+    throw new CCTParamsInvalidError(
+      operation,
+      `${param}.destGasOverhead`,
+      'must be greater than zero',
+    )
+}
+
+/**
+ * The fee fields of a token transfer fee config: `uint32` USD cents per tier, and transfer fee bps
+ * per tier below 10,000. Shared by `applyTokenTransferFeeConfigUpdates` and the multi-token pool fee
+ * records.
+ * @throws {@link CCTParamsInvalidError} at `<param>.<field>`
+ * @internal
+ */
+export function validateTokenTransferFeeFields(
+  operation: string,
+  param: string,
+  config: Record<string, unknown>,
+): void {
+  for (const field of ['finalityFeeUSDCents', 'fastFinalityFeeUSDCents'])
+    validateUint32(operation, `${param}.${field}`, config[field])
+  for (const field of ['finalityTransferFeeBps', 'fastFinalityTransferFeeBps']) {
+    const value = config[field]
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value >= 10000)
+      throw new CCTParamsInvalidError(
+        operation,
+        `${param}.${field}`,
+        'must be an integer in [0, 9999]',
+      )
+  }
+}
+
+/**
+ * Validates every entry of one array and returns it checksummed, rejecting duplicates. Compared
+ * on checksummed form, so the same address in two different casings still counts as a duplicate.
+ *
+ * The zero address is rejected outright: the holder skips it in `adds` (`if (toAdd == address(0))
+ * continue`) and can never hold it, so it is a silent no-op in either array.
+ * @throws {@link CCTParamsInvalidError} if an entry is not a valid address or is the zero address
+ * (reported as `param[i]`), or the array holds duplicates
+ */
+function normalizeAddresses(operation: string, param: string, addresses: string[]): string[] {
+  const normalized = addresses.map((address, i) => {
+    validateNonZeroAddress(operation, `${param}[${i}]`, address)
+    return getAddress(address)
+  })
+  if (new Set(normalized).size !== normalized.length)
+    throw new CCTParamsInvalidError(operation, param, 'must not contain duplicate addresses')
+  return normalized
+}
+
+/**
+ * The `removes` / `adds` of an allowlist update, validated and checksummed: each array a dense array
+ * of non-zero, distinct addresses, at least one address in all, and no address in both (removes
+ * apply first, so it would end up allowlisted). Shared by every `applyAllowListUpdates` op.
+ * @throws {@link CCTParamsInvalidError} as `applyAllowlistUpdates`'s `prepare` documents
+ * @internal
+ */
+export function parseAllowlistUpdates(
+  operation: string,
+  rawRemoves: unknown,
+  rawAdds: unknown,
+): { removes: string[]; adds: string[] } {
+  validateArray(operation, 'removes', rawRemoves)
+  validateArray(operation, 'adds', rawAdds)
+  if (rawRemoves.length + rawAdds.length === 0) {
+    throw new CCTParamsInvalidError(
+      operation,
+      'adds',
+      'at least one address must be added or removed',
+    )
+  }
+
+  const removes = normalizeAddresses(operation, 'removes', rawRemoves as string[])
+  const adds = normalizeAddresses(operation, 'adds', rawAdds as string[])
+  const removed = new Set(removes)
+  const overlap = adds.find((address) => removed.has(address))
+  if (overlap !== undefined) {
+    throw new CCTParamsInvalidError(
+      operation,
+      'adds',
+      `${overlap} is also in removes; removes are applied first on-chain, so it would end up allowlisted — list it in one array only`,
+    )
+  }
+  return { removes, adds }
+}
+
+/**
+ * Refuses an allowlist update that would mine as a no-op against the current `entries`: removing an
+ * address that is not allowlisted, or adding one that already is (the holder silently skips both).
+ * @throws {@link CCTParamsInvalidError} at `removes` or `adds`
+ * @internal
+ */
+export function assertAllowlistUpdatesChange(
+  operation: string,
+  entries: readonly string[],
+  { removes, adds }: { removes: readonly string[]; adds: readonly string[] },
+): void {
+  const allowlisted = new Set(entries)
+  const absent = removes.find((address) => !allowlisted.has(address))
+  if (absent !== undefined)
+    throw new CCTParamsInvalidError(
+      operation,
+      'removes',
+      `${absent} is not allowlisted (allowlisted: ${entries.join(', ') || 'none'}); it would be ignored and the tx would change nothing`,
+    )
+  const present = adds.find((address) => allowlisted.has(address))
+  if (present !== undefined)
+    throw new CCTParamsInvalidError(
+      operation,
+      'adds',
+      `${present} is already allowlisted; it would be ignored and the tx would change nothing`,
+    )
 }

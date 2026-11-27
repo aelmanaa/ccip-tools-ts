@@ -40,6 +40,7 @@ import MULTI_TOKEN_POOL_HOOKS_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/m
 import POOL_CONFIG_MANAGER_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/pool-config-manager.ts'
 import SAME_ADDRESS_REMOTE_TOKEN_ADDRESS_PROVIDER_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/same-address-remote-token-address-provider.ts'
 import SECURITY_POLICY_STORE_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/security-policy-store.ts'
+import { latestBlock } from '../mined-block.ts'
 import { getTypedContract, isMissingFunction, readContractType } from '../query.ts'
 
 /**
@@ -442,6 +443,24 @@ export const TOKEN_POLICY_ROLES = {
   destOverhead: 'DEST_OVERHEAD_ROLE',
   security: 'SECURITY_ROLE',
 } as const satisfies Record<LaneRecordType, PoolConfigManagerRole>
+
+/**
+ * Who may write a token's own records of a type (`PoolConfigManager._checkTokenRoles`): any one of
+ * these roles.
+ * @internal
+ */
+export function tokenRolesGate(type: LaneRecordType): readonly PoolConfigManagerRole[] {
+  return ['CONFIG_ROLE', 'TOKEN_MANAGER_ROLE', TOKEN_POLICY_ROLES[type]]
+}
+
+/**
+ * Who may write a policy of a type, its records and subsets (`PoolConfigManager._checkPolicyRoles`):
+ * any one of these roles.
+ * @internal
+ */
+export function policyRolesGate(type: LaneRecordType): readonly PoolConfigManagerRole[] {
+  return ['CONFIG_ROLE', 'POLICY_ROLE', TOKEN_POLICY_ROLES[type]]
+}
 
 /** An MTTP op name, or an existing CCT op a planner step runs. */
 export type MultiTokenPoolOperationName =
@@ -855,7 +874,7 @@ export async function readOwnership(
 ): Promise<PendingOwner & { owner: string }> {
   // one block for the getter and both slots, so a transfer landing in between cannot look like a
   // layout mismatch
-  const block = blockTag ?? (await chain.provider.getBlockNumber())
+  const block = blockTag ?? (await latestBlock(chain))
   const [owner, ownerWord, pendingWord] = await Promise.all([
     multiTokenPoolProbe(chain, address)
       .owner({ blockTag: block })

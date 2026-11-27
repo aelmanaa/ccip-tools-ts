@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+import { ZeroAddress } from 'ethers'
+
 import { CCTContractTypeInvalidError, CCTParamsInvalidError } from '../../../errors.ts'
 import {
   CPS,
@@ -46,6 +48,15 @@ describe('GetPoolConfigManagerState (cct/evm pool-config-manager)', () => {
     assert.deepEqual(r.pendingDefaultAdminDelay, { newDelay: 0, schedule: 1_800_000_100n })
   })
 
+  it('reports a scheduled renounce (zero new admin, schedule set) as pending', async () => {
+    const state = defaultStack()
+    state.pcm.pendingDefaultAdmin = [ZeroAddress, 1_800_000_000n]
+    const r = await new GetPoolConfigManagerState().query(stackChain(state).chain, {
+      poolConfigManager: PCM,
+    })
+    assert.deepEqual(r.pendingDefaultAdmin, { newAdmin: ZeroAddress, schedule: 1_800_000_000n })
+  })
+
   it('resolves the PCM by its own typeAndVersion and refuses another contract', async () => {
     const state = defaultStack()
     state.pcm.typeAndVersion = 'ConnectionPolicyStore 2.1.0-dev'
@@ -63,5 +74,22 @@ describe('GetPoolConfigManagerState (cct/evm pool-config-manager)', () => {
         (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'poolAddress',
       )
     assert.deepEqual(calls, [])
+  })
+
+  it('reads every admin getter and the static config at one block (E7 m7)', async () => {
+    const { chain, callBlocks } = stackChain()
+    await new GetPoolConfigManagerState().query(chain, { poolConfigManager: PCM })
+    const pinned = callBlocks.filter((c) =>
+      [
+        'getStaticConfig',
+        'defaultAdmin',
+        'pendingDefaultAdmin',
+        'defaultAdminDelay',
+        'pendingDefaultAdminDelay',
+        'defaultAdminDelayIncreaseWait',
+      ].includes(c.name),
+    )
+    assert.equal(pinned.length, 6)
+    assert.deepEqual(new Set(pinned.map((c) => c.blockTag)), new Set([1_000]))
   })
 })

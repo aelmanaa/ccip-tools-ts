@@ -22,7 +22,6 @@ import {
   validateArray,
   validateBoolean,
   validateNonZeroAddress,
-  validateUint32,
   validateUint64,
 } from '../../validate.ts'
 import {
@@ -31,6 +30,8 @@ import {
   getTokenPoolInterface,
   resolveEncoder,
   resolveTokenPool,
+  validateDestOverheadFields,
+  validateTokenTransferFeeFields,
 } from '../contracts.ts'
 
 /** One destination-chain token-transfer fee update. */
@@ -77,29 +78,8 @@ const encodeApplyTokenTransferFeeConfigUpdates: Encoder = (
 
 function validateFeeConfig(operation: string, param: string, value: unknown): void {
   const config = parseRecord(operation, param, value, 'token transfer fee config')
-  for (const field of [
-    'destGasOverhead',
-    'destBytesOverhead',
-    'finalityFeeUSDCents',
-    'fastFinalityFeeUSDCents',
-  ])
-    validateUint32(operation, `${param}.${field}`, config[field])
-  if (config.destGasOverhead === 0)
-    throw new CCTParamsInvalidError(
-      operation,
-      `${param}.destGasOverhead`,
-      'must be greater than zero',
-    )
-
-  for (const field of ['finalityTransferFeeBps', 'fastFinalityTransferFeeBps']) {
-    const value = config[field]
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value >= 10000)
-      throw new CCTParamsInvalidError(
-        operation,
-        `${param}.${field}`,
-        'must be an integer in [0, 9999]',
-      )
-  }
+  validateDestOverheadFields(operation, param, config)
+  validateTokenTransferFeeFields(operation, param, config)
   validateBoolean(operation, `${param}.isEnabled`, config.isEnabled)
   if (!config.isEnabled)
     throw new CCTParamsInvalidError(
@@ -196,7 +176,7 @@ export class ApplyTokenTransferFeeConfigUpdates extends EVMOperation<
         redirectMultiTokenPool(
           err,
           'applyMultiTokenPoolInlineFeeConfigUpdates and applyMultiTokenPoolInlineDestOverheadConfigUpdates',
-          'two records, two transactions: the fees in set: [{ tokenAddress, remoteChainSelector, feeConfig }], the gas and bytes in set: [{ tokenAddress, remoteChainSelector, destOverheadConfig }]; a disable is a remove: [{ tokenAddress, remoteChainSelector }] on each',
+          "two records, two transactions: the fees in set: [{ tokenAddress, remoteChainSelector, feeConfig }], the gas and bytes in set: [{ tokenAddress, remoteChainSelector, destOverheadConfig }]. There is no disable: a lane must keep both records, and removing an inline record falls back to the token's fee or overhead policy",
         ),
     )
     const encode = resolveEncoder(this.encoders, version, this.name)

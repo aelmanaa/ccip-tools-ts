@@ -36,6 +36,7 @@ import {
   validateOneOf,
   validateUint8,
 } from '../../validate.ts'
+import type { DecodedMultiTokenPoolWrite } from '../calldata.ts'
 import { type MultiTokenPoolTokenProfileFields, assertProviderHasCode } from '../contracts.ts'
 import {
   type MultiTokenPoolRecordState,
@@ -371,9 +372,16 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
       // without decimals() takes the given ones, as the store's try/catch does
       const read = await chain.getTokenInfo(token).then(
         (info) => info.decimals,
-        (err: unknown) => {
-          if (!(err instanceof CCIPTokenDecimalsUnavailableError)) throw err
-          return undefined
+        async (err: unknown) => {
+          if (err instanceof CCIPTokenDecimalsUnavailableError) return undefined
+          // no code: decoding the empty answer to decimals() reverts the store, outside its catch
+          if ((await chain.provider.getCode(token, blockTag)) === '0x')
+            throw new CCTParamsInvalidError(
+              this.name,
+              `profilesToSet[${i}].tokenAddress`,
+              `${token} has no code: the store's decimals() call reverts on it, so it cannot be registered (pass the token contract)`,
+            )
+          throw err
         },
       )
       if (read === undefined && p.localDecimals === undefined)
@@ -471,15 +479,31 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
         next.additionalPoolDataProvider ?? ZeroAddress,
       ]),
     ])
-    // the values the write replaces: each touched token's stored profile
-    // an unregistered token seals as such: a registration before the send moves the snapshot
-    const expected = Object.fromEntries(
-      tokens.map((t) => [
-        `profiles.${t}`,
-        stored.get(t) ?? { tokenAddress: t, isRegistered: false },
-      ]),
+    return { data }
+  }
+
+  /**
+   * Each token the calldata removes or sets, its stored profile; an unregistered token seals as
+   * such, so a registration before the send moves the snapshot.
+   */
+  protected sealedFrom(
+    _chain: EVMChain,
+    { profiles }: DecodedMultiTokenPoolWrite,
+    { state }: PoolConfigManagerWriteContext,
+  ): Record<string, unknown> {
+    const tokens = new Set([
+      ...(profiles?.remove ?? []),
+      ...(profiles?.set ?? []).map((p) => p.tokenAddress),
+    ])
+    return Object.fromEntries(
+      [...tokens].map((t) => {
+        const profile = tokenRecordsOf(state, t)?.profile
+        return [
+          `profiles.${t}`,
+          profile?.isRegistered ? profile : { tokenAddress: t, isRegistered: false },
+        ]
+      }),
     )
-    return { data, expected }
   }
 
   /** The store's flavor and address rules, refused before the eth_call names them. */

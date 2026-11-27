@@ -4,6 +4,7 @@
  * @packageDocumentation
  */
 
+import type { EVMChain } from '../../../../evm/index.ts'
 import type { PoolConfigManagerReader } from '../contracts.ts'
 import { POLICY_RECORD_READERS } from '../record-reads.ts'
 import type { RateLimitPolicyRecord } from '../records.ts'
@@ -20,7 +21,10 @@ import {
 export type GetMultiTokenPoolRateLimitPolicyResult = MultiTokenPoolPolicyIdentity & {
   /** Number of tokens assigned to the policy: the blast radius of a write to it. */
   tokenCount: number
-  /** Decimals the policy's amounts are in, or `null` before its first record. */
+  /**
+   * Decimals the policy's amounts are in, or `null` when the policy does not exist. Fixed when it is
+   * created, they stay after its last record is removed (every assignment is checked against them).
+   */
   localDecimals: number | null
   /** The policy's records; chain `0n` is the default. */
   records: RateLimitPolicyRecord[]
@@ -46,5 +50,14 @@ export class GetMultiTokenPoolRateLimitPolicy extends PolicyQuery<
     { blockTag }: PolicyReadContext,
   ): Promise<PolicyRecords<GetMultiTokenPoolRateLimitPolicyResult>> {
     return POLICY_RECORD_READERS.rateLimit(pcm, policyWord, { blockTag })
+  }
+
+  /** Reports `localDecimals: null` for a policy that does not exist (its stored decimals read `0`). */
+  protected override async read(
+    chain: EVMChain,
+    params: ParsedPolicyParams<GetMultiTokenPoolPolicyParams>,
+  ): Promise<GetMultiTokenPoolRateLimitPolicyResult> {
+    const result = await super.read(chain, params)
+    return result.exists ? result : { ...result, localDecimals: null }
   }
 }

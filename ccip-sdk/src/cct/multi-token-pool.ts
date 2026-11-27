@@ -21,6 +21,7 @@ import type {
   ChainGetter,
   LaneRecordType,
   LaneStatus,
+  PoolDataFormat,
   RateLimiterState,
   TokenTransferFeeConfig,
   TransferDirection,
@@ -36,18 +37,8 @@ import { encodeRemoteAddress } from './remote-address.ts'
 /** A transfer direction: core {@link TransferDirection}, the one direction type of the SDK. */
 export type MultiTokenPoolDirection = TransferDirection
 
-/**
- * The pool data a lane sends.
- * - `'legacy'`: `abi.encode(uint256 decimals)`, 32 bytes, which every 2.0 pool accepts.
- * - `'long'`: `abi.encode(uint256 decimals, bytes sourceToken, bytes additionalData)`, at least
- *   192 bytes (224 with a 32-byte factory UID). Only a remote EVM multi-token pool, or a Solana
- *   pool-group lane whose format is `'long'`, reads it; any other remote pool burns on the source and
- *   never mints. A canonical Solana pool on interface 1 counts as "does not read long data":
- *   it ignores the data now and strands it after a later move to interface 2.
- */
-export type PoolDataFormat = (typeof POOL_DATA_FORMATS)[number]
-/** Every {@link PoolDataFormat}, for validation. @internal */
-export const POOL_DATA_FORMATS = ['legacy', 'long'] as const
+// owned by core (chain.ts), next to `LaneRecordType`; re-exported for the CCT surfaces
+export { type PoolDataFormat, POOL_DATA_FORMATS } from '../chain.ts'
 
 /** A reference to a shared policy: an EVM policy name, or a Solana policy id. */
 export type MultiTokenPoolPolicyRef =
@@ -103,6 +94,14 @@ export type MultiTokenPoolRateLimits = {
   /** Inbound faster-than-finality bucket. */
   fastFinalityInbound: RateLimitConfig
 }
+
+/** The four buckets of a {@link MultiTokenPoolRateLimits}, in one place. @internal */
+export const RATE_LIMIT_BUCKETS = [
+  'outbound',
+  'inbound',
+  'fastFinalityOutbound',
+  'fastFinalityInbound',
+] as const satisfies readonly (keyof MultiTokenPoolRateLimits)[]
 
 /** The four rate-limit buckets of one lane, as core `RateLimiterState` (`null` = disabled). */
 export type MultiTokenPoolLaneRateLimits = {
@@ -745,7 +744,11 @@ export type MultiTokenPoolStalePendingStep = {
 
 /** A plan: remaining steps from chain state. */
 export type MultiTokenPoolPlan<Name extends string, Op extends string = string> = {
-  /** Steps ready to run now (at most `maxReadySteps` on the unsigned path). */
+  /**
+   * The remaining steps, in plan order, from chain state (empty once the flow is done). The ready
+   * ones are those the ready-step rule selects; the unsigned path builds them (at most
+   * `maxReadySteps`).
+   */
   steps: MultiTokenPoolPlanStep<Name, Op>[]
   /** Why the remaining steps cannot run now, if they cannot. */
   blockedBy?: MultiTokenPoolPlanBlock
@@ -807,17 +810,45 @@ export type MultiTokenPoolPlanOptions = MultiTokenPoolRemoteCheckOptions & {
   /** Proposed, not yet executed steps: `step.id` → `step.inputsHash`. */
   pendingStepHashes?: Record<string, string>
   /**
-   * Most ready steps the unsigned path returns at once; defaults to 1. A Safe or Squads caller raises
-   * it; `moreReady` reports what the cap held back.
+   * Most ready steps the unsigned path returns at once; defaults to 20. Ready steps commute, so a
+   * whole wave fits one approval round (20 is one Squads batch); `moreReady` reports what the cap
+   * held back. Pass 1 to review one step at a time.
    */
   maxReadySteps?: number
   /**
    * Ids of this run's steps that have landed. The signed `<flow>` tracks them itself; the unsigned
    * path takes them from the caller (from `onStep`, the execute result's steps, or the multisig's
    * executed proposals). Used only to decide which pauses this run may lift: a pause this run did not
-   * land is never lifted.
+   * land is never lifted. Per run: pass it with the same `runId`, and discard both once the run
+   * completes.
    */
   landedStepIds?: string[]
+  /**
+   * The run this call belongs to: the `runId` a plan of this run returned (omitted: a new run). Every
+   * pause step id carries it, so a `landedStepIds` list kept from another run never lifts a later
+   * pause (an incident pause, say). Pass it on every call of one run, also across flows (enable,
+   * then onboard).
+   */
+  runId?: string
+}
+
+/** A token's counterpart on one remote chain (the shared planners' `remoteTokens`). */
+export type MultiTokenPoolRemoteToken = {
+  /** CCIP selector of the remote chain. */
+  remoteChainSelector: bigint
+  /** The counterpart token, in the remote chain's own format (`0x…` for EVM, base58 for Solana). */
+  remoteTokenAddress: string
+  /** Decimals of the token on the remote chain, not on this chain. */
+  remoteTokenDecimals: number
+}
+
+/** A local token's counterpart on the chain being enabled (`enableMultiTokenPoolChain.remoteTokens`). */
+export type MultiTokenPoolChainRemoteToken = Omit<
+  MultiTokenPoolRemoteToken,
+  'remoteChainSelector'
+> & {
+  /** The local token; it must be admitted by `tokenAddresses`. */
+  tokenAddress: string
 }
 
 /** A landed step, as `onStep` and the execute results report it. */
@@ -871,7 +902,11 @@ export type MultiTokenPoolLaneKey = {
   remoteChainSelector: bigint
 }
 
-/** Flags a write may turn off on a lane's trusted pools, confirmed in `confirmDropped`. */
+/**
+ * Flags a write may turn off on a lane's trusted pools, confirmed in `confirmDropped` (the type of
+ * `MultiTokenPoolInlineRemotePoolDrop.flags` is derived from it).
+ * @internal
+ */
 export const DROPPABLE_REMOTE_POOL_FLAGS = [
   'trustPolicyRemotePools',
   'allowLegacyPoolData',

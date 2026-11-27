@@ -19,6 +19,7 @@ import {
 } from '../token-pool/contracts.ts'
 import {
   type MultiTokenPoolVersion,
+  MULTI_TOKEN_POOL_HOOKS_TYPES,
   getMultiTokenPoolInterface,
   multiTokenPoolContract,
   reportsMultiTokenPool,
@@ -40,17 +41,32 @@ export function isMultiTokenPoolRefusal(err: unknown): err is CCTContractTypeInv
  * Rethrows `resolveTokenPool`'s refusal of a multi-token pool with a reason naming the multi-token
  * pool op to use instead; any other error propagates unchanged. A single-token op keeps its target
  * contract and authorization model, so it never silently becomes a PCM write (design §4.5).
+ * `perToken: false` for a pool-wide setting (ownership, the Router), which the multi-token pool keeps
+ * too, behind its own op.
+ * With `alsoHooks`, a refusal of a multi-token pool's hooks contract (`MultiTokenPoolHooks…`, given
+ * where `AdvancedPoolHooks` was expected) is redirected too.
  * @throws {@link CCTContractTypeInvalidError} always
  * @internal
  */
-export function redirectMultiTokenPool(err: unknown, instead: string, how: string): never {
-  if (!isMultiTokenPoolRefusal(err)) throw err
+export function redirectMultiTokenPool(
+  err: unknown,
+  instead: string,
+  how: string,
+  { alsoHooks = false, perToken = true }: { alsoHooks?: boolean; perToken?: boolean } = {},
+): never {
+  const hooks =
+    alsoHooks &&
+    err instanceof CCTContractTypeInvalidError &&
+    (MULTI_TOKEN_POOL_HOOKS_TYPES as readonly string[]).includes(String(err.context.actual))
+  if (!isMultiTokenPoolRefusal(err) && !hooks) throw err
   const { address, expected, actual } = err.context
   throw new CCTContractTypeInvalidError(
     String(address),
     String(expected),
     String(actual),
-    `a multi-token pool configures this per token: use ${instead} (${how})`,
+    perToken
+      ? `a multi-token pool configures this per token: use ${instead} (${how})`
+      : `a multi-token pool has its own op for this: use ${instead} (${how})`,
     { cause: err },
   )
 }

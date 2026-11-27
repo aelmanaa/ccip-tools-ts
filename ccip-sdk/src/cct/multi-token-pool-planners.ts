@@ -12,18 +12,9 @@ import type {
   MultiTokenPoolPlanOptions,
   MultiTokenPoolRateLimits,
   MultiTokenPoolRemotePool,
+  MultiTokenPoolRemoteToken,
   PoolDataFormat,
 } from './multi-token-pool.ts'
-
-/** A token's counterpart on one remote chain (field names as `TokenOnboardingRemoteChain`). @internal */
-export type MultiTokenPoolRemoteToken = {
-  /** CCIP selector of the remote chain. */
-  remoteChainSelector: bigint
-  /** The counterpart token, in the remote chain's own format (`0x…` for EVM, base58 for Solana). */
-  remoteTokenAddress: string
-  /** Decimals of the token on the remote chain, not on this chain. */
-  remoteTokenDecimals: number
-}
 
 /** The family extension keys. @internal */
 export type MultiTokenPoolExtensionKey = 'evm' | 'solana'

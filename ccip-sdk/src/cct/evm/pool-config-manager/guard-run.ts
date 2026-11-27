@@ -30,6 +30,7 @@ import type {
   MultiTokenPoolSnapshot,
 } from '../../multi-token-pool.ts'
 import { decodeRemoteAddress } from '../../remote-address.ts'
+import { latestBlock } from '../mined-block.ts'
 import {
   type MultiTokenPoolVersion,
   ANY_FINALITY_CONFIG,
@@ -62,6 +63,7 @@ import {
   multiTokenPoolChainLanes,
   multiTokenPoolDroppedPools,
   multiTokenPoolLaneTransitions,
+  multiTokenPoolMakesLive,
   multiTokenPoolPcmCheckedLanes,
   multiTokenPoolPcmLaneCheck,
   requiredMultiTokenPoolGuardFacts,
@@ -109,8 +111,6 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   getChain?: ChainGetter
   /** Long-data facts for remote families the SDK cannot read. */
   remoteAttestations?: MultiTokenPoolRemoteAttestation[]
-  /** `true` for checks that make lanes live (unpauses): attestations are never used. */
-  makesLive?: boolean
   /** Block to read at; defaults to the latest block, read once. */
   blockTag?: number
   /** Return error findings in `findings` instead of refusing (the snapshot check reports them). */
@@ -121,6 +121,8 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   errorContext?: Record<string, unknown>
   /** The op's own state read at `blockTag`, so a build reads the state once. */
   stateRead?: MultiTokenPoolRecordStateRead
+  /** A move of a sealed value the op accepts (a balance that only grew): never reported. */
+  tolerate?: (change: CCTStateChange) => boolean
 }
 
 /** What a guarded write reports (the fields of `MultiTokenPoolUnsignedTx`). @internal */
@@ -160,7 +162,7 @@ export async function runMultiTokenPoolGuards(
   const { chain, operation, poolConfigManager, version, data, sender } = input
   const errorOperation = input.errorOperation ?? operation
   const decoded = decodeMultiTokenPoolWrite(data, version)
-  const blockNumber = input.blockTag ?? (await chain.provider.getBlockNumber())
+  const blockNumber = input.blockTag ?? (await latestBlock(chain))
   const { state: before, staticConfig } = await stateBefore(input, decoded, blockNumber)
   const after = applyMultiTokenPoolRecordChanges(before, decoded.changes)
   // both sides need provider answers for every lane they resolve from a policy
@@ -181,13 +183,10 @@ export async function runMultiTokenPoolGuards(
   // a pause is the emergency action: it never reads remote facts, and never refuses on what is
   // wrong with the lanes it stops (it is still gated, simulated and sealed); a bucket write judges
   // only the lanes it loosens
-  const scope = laneJudgingOf(decoded.functionName)
-  const judged =
-    scope === 'none'
-      ? []
-      : scope === 'loosened'
-        ? lanes.filter((l) => loosensRateLimits(l.before.rateLimits, l.after.rateLimits))
-        : lanes
+  const judged = judgedLanesOf(laneJudgingOf(decoded.functionName), lanes)
+  // "makes lanes live" (no attestations) is derived from the projection, so every op and the
+  // snapshot re-check apply it alike
+  const makesLive = multiTokenPoolMakesLive(lanes)
   const judge = judged.length > 0
   const facts: MultiTokenPoolGuardFacts = !judge
     ? {
@@ -208,7 +207,7 @@ export async function runMultiTokenPoolGuards(
         ...(input.getChain && { getChain: input.getChain }),
         ...(input.remoteAttestations && { remoteAttestations: input.remoteAttestations }),
         now: BigInt(Math.floor(Date.now() / 1000)),
-        ...(input.makesLive && { makesLive: true }),
+        ...(makesLive && { makesLive: true }),
         ...(profiles.providers.size && { providerOverrides: profiles.providers }),
         storedProviders: new Map(
           before.tokens.flatMap((t) =>
@@ -327,7 +326,7 @@ export async function runMultiTokenPoolGuards(
     ? await crossCheckWithSimulateV1(chain, input, bundle, afterLanes, blockNumber)
     : false
 
-  const guardInputsHash = hashGuardInputs(lanes, chainLanes, facts)
+  const guardInputsHash = guardInputsHashOf(judge, lanes, chainLanes, facts)
   // the thresholds and confirmations the write was judged with travel in the snapshot, under its
   // hash, so a re-check of the proposal applies the same ones
   const expected = {
@@ -338,11 +337,16 @@ export async function runMultiTokenPoolGuards(
     ...(input.poolAddress !== undefined && { [GUARD_POOL_PATH]: getAddress(input.poolAddress) }),
   }
   if (input.expectedSnapshot)
-    assertSnapshotHolds(operation, input.expectedSnapshot, {
-      calldataHash: keccak256(data),
-      guardInputsHash,
-      expected,
-    })
+    assertSnapshotHolds(
+      operation,
+      input.expectedSnapshot,
+      {
+        calldataHash: keccak256(data),
+        guardInputsHash,
+        expected,
+      },
+      input.tolerate,
+    )
   const snapshot = sealMultiTokenPoolSnapshot({
     observedAt: BigInt(blockNumber),
     operation,
@@ -505,6 +509,22 @@ function profileLanes(
 }
 
 /** Every input the rules read, canonically hashed: equal when nothing they read has moved. */
+/**
+ * The hash of every input the guard judged on. The chain's other lanes feed only the lane rules
+ * (F3's shared remote tokens, for one), so a judged write seals them; a write that judges nothing (a
+ * pause, a stop, a clamp) seals just its own lanes, so an unrelated edit on the chain never makes it
+ * stale.
+ * @internal
+ */
+export function guardInputsHashOf(
+  judge: boolean,
+  lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
+  chainLanes: readonly ProjectedMultiTokenPoolLane[],
+  facts: MultiTokenPoolGuardFacts,
+): string {
+  return hashGuardInputs(lanes, judge ? chainLanes : [], facts)
+}
+
 function hashGuardInputs(
   lanes: readonly { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane }[],
   chainLanes: readonly ProjectedMultiTokenPoolLane[],
@@ -536,6 +556,7 @@ function hashGuardInputs(
 export function snapshotChanges(
   snapshot: MultiTokenPoolSnapshot,
   current: { guardInputsHash: string; expected: Record<string, unknown> },
+  tolerate?: (change: CCTStateChange) => boolean,
 ): CCTStateChange[] {
   const changed: CCTStateChange[] = []
   const paths = new Set([...Object.keys(snapshot.expected), ...Object.keys(current.expected)])
@@ -548,7 +569,7 @@ export function snapshotChanges(
       expected: snapshot.guardInputsHash,
       actual: current.guardInputsHash,
     })
-  return changed
+  return tolerate ? changed.filter((c) => !tolerate(c)) : changed
 }
 
 /**
@@ -561,6 +582,7 @@ export function assertSnapshotHolds(
   operation: string,
   snapshot: MultiTokenPoolSnapshot,
   current: { calldataHash: string; guardInputsHash: string; expected: Record<string, unknown> },
+  tolerate?: (change: CCTStateChange) => boolean,
 ): void {
   if (snapshot.operation !== operation)
     throw new CCTParamsInvalidError(
@@ -574,7 +596,7 @@ export function assertSnapshotHolds(
       'expectedSnapshot',
       'covers other calldata: pass the snapshot built with these exact params',
     )
-  const changed = snapshotChanges(snapshot, current)
+  const changed = snapshotChanges(snapshot, current, tolerate)
   if (changed.length)
     throw new CCTStateChangedError(
       operation,
@@ -813,6 +835,25 @@ async function crossCheckWithSimulateV1(
 }
 
 /**
+ * The lanes a scope judges, from the write's projected lanes: none; the ones whose rate limits it
+ * loosens; the ones it makes live (an unpause: a lane still held by another pause or a stop sends
+ * nothing, so it never blocks the recovery of the rest); or all of them.
+ * @internal
+ */
+export function judgedLanesOf<
+  L extends { before: ProjectedMultiTokenPoolLane; after: ProjectedMultiTokenPoolLane },
+>(scope: ReturnType<typeof laneJudgingOf>, lanes: readonly L[]): L[] {
+  if (scope === 'none') return []
+  if (scope === 'loosened')
+    return lanes.filter((l) => loosensRateLimits(l.before.rateLimits, l.after.rateLimits))
+  if (scope === 'goingLive') {
+    const live = new Set(multiTokenPoolLaneTransitions(lanes).goingLive.map((l) => guardLaneKey(l)))
+    return lanes.filter((l) => live.has(guardLaneKey(l.after)))
+  }
+  return [...lanes]
+}
+
+/**
  * Which lanes the lane rules judge for a PCM function (the write is always projected, simulated and
  * sealed, and the scope is read from the calldata, so a snapshot re-check judges as the build did):
  * - a pause, the emergency action: `'none'`, and no remote fact is read;
@@ -820,14 +861,19 @@ async function crossCheckWithSimulateV1(
  *   `'loosened'`, only the lanes whose rate limits it loosens (a stop lifted, a bucket disabled, more
  *   capacity or rate, a lane left with no limit), so a write that only tightens or stops a lane is
  *   never refused by a lane rule and an operator can always clamp a broken lane;
+ * - an unpause: `'goingLive'`, only the lanes it makes live in some direction (a lane still held by
+ *   another pause or a stop is not judged, so it cannot block the recovery of the rest);
  * - any other write: `'all'`, every lane it changes.
  * @internal
  */
-export function laneJudgingOf(functionName: string): 'all' | 'loosened' | 'none' {
+export function laneJudgingOf(functionName: string): 'all' | 'loosened' | 'goingLive' | 'none' {
   return LANE_JUDGING[functionName] ?? 'all'
 }
 
-const LANE_JUDGING: Readonly<Record<string, 'loosened' | 'none'>> = {
+const LANE_JUDGING: Readonly<Record<string, 'loosened' | 'goingLive' | 'none'>> = {
+  [multiTokenPoolFunctionOf('unpauseMultiTokenPoolGlobally')]: 'goingLive',
+  [multiTokenPoolFunctionOf('unpauseMultiTokenPoolTokens')]: 'goingLive',
+  [multiTokenPoolFunctionOf('unpauseMultiTokenPoolChains')]: 'goingLive',
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolGlobally')]: 'none',
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolTokens')]: 'none',
   [multiTokenPoolFunctionOf('pauseMultiTokenPoolChains')]: 'none',
@@ -840,8 +886,10 @@ const LANE_JUDGING: Readonly<Record<string, 'loosened' | 'none'>> = {
 /**
  * The refusal of a write whose simulation reverts, single `eth_call` or `eth_simulateV1` bundle
  * alike: the decoded revert (`errorName`, `errorArgs`, `revertData`) and who it was simulated from.
+ * Every MTTP write refuses a reverting simulation with it.
+ * @internal
  */
-function revertRefusal(
+export function revertRefusal(
   input: Pick<RunMultiTokenPoolGuardsInput, 'operation' | 'errorOperation' | 'errorContext'>,
   param: string,
   reason: string,

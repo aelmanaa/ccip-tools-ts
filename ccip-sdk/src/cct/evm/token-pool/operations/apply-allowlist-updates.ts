@@ -16,7 +16,7 @@
  * @packageDocumentation
  */
 
-import { ZeroAddress, getAddress } from 'ethers'
+import { ZeroAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
@@ -26,11 +26,13 @@ import {
   assertAdvancedPoolHooksOwner,
 } from '../../advanced-pool-hooks/contracts.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
-import { validateArray, validateNonZeroAddress } from '../../validate.ts'
+import { validateNonZeroAddress } from '../../validate.ts'
 import {
   TokenPoolVersion,
+  assertAllowlistUpdatesChange,
   assertPoolOwner,
   getTokenPoolInterface,
+  parseAllowlistUpdates,
   readTokenPoolAllowlist,
   resolveAllowlistHolder,
 } from '../contracts.ts'
@@ -78,25 +80,6 @@ type ParsedApplyAllowlistUpdatesParams = {
 }
 
 /**
- * Validates every entry of one array and returns it checksummed, rejecting duplicates. Compared
- * on checksummed form, so the same address in two different casings still counts as a duplicate.
- *
- * The zero address is rejected outright: the holder skips it in `adds` (`if (toAdd == address(0))
- * continue`) and can never hold it, so it is a silent no-op in either array.
- * @throws {@link CCTParamsInvalidError} if an entry is not a valid address or is the zero address
- * (reported as `param[i]`), or the array holds duplicates
- */
-function normalizeAddresses(operation: string, param: string, addresses: string[]): string[] {
-  const normalized = addresses.map((address, i) => {
-    validateNonZeroAddress(operation, `${param}[${i}]`, address)
-    return getAddress(address)
-  })
-  if (new Set(normalized).size !== normalized.length)
-    throw new CCTParamsInvalidError(operation, param, 'must not contain duplicate addresses')
-  return normalized
-}
-
-/**
  * Applies allowlist removals and additions to an EVM token pool's allowlist in one
  * `applyAllowListUpdates` call: on the pool (v1.5.0–v1.6.1) or its bound `AdvancedPoolHooks`
  * (v2.0.0).
@@ -139,27 +122,7 @@ export class ApplyAllowlistUpdates extends EVMOperation<
     sender,
   }: ApplyAllowlistUpdatesParams): ParsedApplyAllowlistUpdatesParams {
     validateNonZeroAddress(this.name, 'poolAddress', poolAddress)
-    validateArray(this.name, 'removes', rawRemoves)
-    validateArray(this.name, 'adds', rawAdds)
-    if (rawRemoves.length + rawAdds.length === 0) {
-      throw new CCTParamsInvalidError(
-        this.name,
-        'adds',
-        'at least one address must be added or removed',
-      )
-    }
-
-    const removes = normalizeAddresses(this.name, 'removes', rawRemoves)
-    const adds = normalizeAddresses(this.name, 'adds', rawAdds)
-    const removed = new Set(removes)
-    const overlap = adds.find((address) => removed.has(address))
-    if (overlap !== undefined) {
-      throw new CCTParamsInvalidError(
-        this.name,
-        'adds',
-        `${overlap} is also in removes; removes are applied first on-chain, so it would end up allowlisted — list it in one array only`,
-      )
-    }
+    const { removes, adds } = parseAllowlistUpdates(this.name, rawRemoves, rawAdds)
     return { poolAddress, removes, adds, sender }
   }
 
@@ -223,21 +186,7 @@ export class ApplyAllowlistUpdates extends EVMOperation<
           : 'pool was deployed without an allowlist and can never have one (`allowlistEnabled` is immutable and false); applyAllowListUpdates reverts AllowListNotEnabled',
       )
 
-    const allowlisted = new Set(entries)
-    const absent = params.removes.find((address) => !allowlisted.has(address))
-    if (absent !== undefined)
-      throw new CCTParamsInvalidError(
-        this.name,
-        'removes',
-        `${absent} is not allowlisted (allowlisted: ${entries.join(', ') || 'none'}); it would be ignored and the tx would change nothing`,
-      )
-    const present = params.adds.find((address) => allowlisted.has(address))
-    if (present !== undefined)
-      throw new CCTParamsInvalidError(
-        this.name,
-        'adds',
-        `${present} is already allowlisted; it would be ignored and the tx would change nothing`,
-      )
+    assertAllowlistUpdatesChange(this.name, entries, params)
 
     chain.logger.debug(
       `${this.name}: pool = ${params.poolAddress}, holder = ${holder}, allowlisted = ${entries.length}, removes = ${params.removes.length}, adds = ${params.adds.length}`,

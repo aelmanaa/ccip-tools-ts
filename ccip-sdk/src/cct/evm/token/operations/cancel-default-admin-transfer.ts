@@ -12,7 +12,7 @@ import { type Interface, ZeroAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
+import { assertDefaultAdminTransferPending } from '../../default-admin.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
 import {
@@ -47,13 +47,11 @@ const buildV1: Builder = async (iface, chain, { tokenAddress, sender }, operatio
 }
 
 const buildV2: Builder = async (iface, chain, { tokenAddress, sender }, operation) => {
-  const { schedule } = await readPendingTokenDefaultAdmin(chain, tokenAddress)
-  if (schedule === 0n)
-    throw new CCTParamsInvalidError(
-      operation,
-      'tokenAddress',
-      'has no pending default-admin transfer to cancel',
-    )
+  assertDefaultAdminTransferPending(
+    operation,
+    'tokenAddress',
+    await readPendingTokenDefaultAdmin(chain, tokenAddress),
+  )
   if (sender !== undefined) await assertTokenDefaultAdmin(operation, chain, tokenAddress, sender)
   return callTx(tokenAddress, iface.encodeFunctionData('cancelDefaultAdminTransfer', []))
 }

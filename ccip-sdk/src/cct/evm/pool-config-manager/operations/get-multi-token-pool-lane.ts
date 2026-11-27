@@ -19,6 +19,7 @@ import {
   type MultiTokenPoolRateLimits,
   isLaneStopped,
 } from '../../../multi-token-pool.ts'
+import { latestBlock } from '../../mined-block.ts'
 import {
   type MultiTokenPoolVersion,
   poolConfigManagerContract,
@@ -206,13 +207,7 @@ export class GetMultiTokenPoolLane extends EVMQuery<MultiTokenPoolLaneParams, Mu
   ): Promise<MultiTokenPoolLane> {
     const poolAddress = await resolveLanePool(this.name, chain, params)
     const pcm = await resolvePoolConfigManagerTarget(chain, { poolAddress })
-    return readMultiTokenPoolLane(
-      chain,
-      pcm,
-      params,
-      await chain.provider.getBlockNumber(),
-      this.#reads,
-    )
+    return readMultiTokenPoolLane(chain, pcm, params, await latestBlock(chain), this.#reads)
   }
 }
 
