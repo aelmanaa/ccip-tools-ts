@@ -5,7 +5,7 @@
  * @packageDocumentation
  */
 
-import { getAddress, hexlify } from 'ethers'
+import { getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
 import { resultToObject } from '../../../../evm/types.ts'
@@ -13,17 +13,14 @@ import { CCTParamsInvalidError } from '../../../errors.ts'
 import { decodeRemoteAddress } from '../../../remote-address.ts'
 import {
   type MultiTokenPoolProviderType,
-  ANY_FINALITY_CONFIG,
   MULTI_TOKEN_POOL_PROVIDER_TYPES,
-  MultiTokenPoolVersion,
   SAME_ADDRESS_PROVIDER_TYPE,
-  UID_PROVIDER_TYPE,
   assertMultiTokenPoolAuxContract,
-  getMultiTokenPoolInterface,
+  readProviderPoolData,
   sameAddressProviderContract,
   uidProviderContract,
 } from '../../multi-token-pool/contracts.ts'
-import { EVMQuery, isRevertWith } from '../../query.ts'
+import { EVMQuery } from '../../query.ts'
 import { validateAddress, validateNonZeroAddress, validateUint64 } from '../../validate.ts'
 
 /** Parameters for `getMultiTokenPoolProvider`. */
@@ -50,11 +47,6 @@ export type GetMultiTokenPoolProviderResult = {
   /** SameAddress provider with `tokenAddress` and `remoteChainSelector`: the remote token it answers. */
   remoteToken?: string
 }
-
-const UID_PROVIDER_INTERFACE = getMultiTokenPoolInterface(
-  UID_PROVIDER_TYPE,
-  MultiTokenPoolVersion.V2_1_0_DEV,
-)
 
 /**
  * Reads a provider.
@@ -102,21 +94,14 @@ export class GetMultiTokenPoolProvider extends EVMQuery<
     const c = uidProviderContract(chain, provider)
     const tokenFactory = getAddress(resultToObject(await c.getTokenFactory()))
     if (tokenAddress === undefined) return { type, tokenFactory }
-    let additionalPoolData: string | null
-    try {
-      additionalPoolData = hexlify(
-        await c.getAdditionalPoolData(
-          getAddress(tokenAddress),
-          remoteChainSelector ?? 0n,
-          ANY_FINALITY_CONFIG,
-          '0x',
-        ),
-      )
-    } catch (err) {
-      // only `TokenNotFromFactory` means "no UID": other reverts and transport errors propagate
-      if (!isRevertWith(err, UID_PROVIDER_INTERFACE, 'TokenNotFromFactory')) throw err
-      additionalPoolData = null
-    }
-    return { type, tokenFactory, additionalPoolData }
+    const read = await readProviderPoolData(
+      chain,
+      provider,
+      tokenAddress,
+      remoteChainSelector ?? 0n,
+    )
+    // only `TokenNotFromFactory` means "no UID": other reverts and transport errors propagate
+    if ('refused' in read && read.errorName !== 'TokenNotFromFactory') throw read.cause
+    return { type, tokenFactory, additionalPoolData: 'data' in read ? read.data : null }
   }
 }

@@ -9,7 +9,15 @@
  * @packageDocumentation
  */
 
-import { Interface, ZeroAddress, getAddress, id as keccak256Utf8, toBeHex } from 'ethers'
+import {
+  Interface,
+  ZeroAddress,
+  getAddress,
+  hexlify,
+  id as keccak256Utf8,
+  isError,
+  toBeHex,
+} from 'ethers'
 import type { TypedContract } from 'ethers-abitype'
 
 import type { LaneRecordType } from '../../../chain.ts'
@@ -32,7 +40,7 @@ import MULTI_TOKEN_POOL_HOOKS_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/m
 import POOL_CONFIG_MANAGER_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/pool-config-manager.ts'
 import SAME_ADDRESS_REMOTE_TOKEN_ADDRESS_PROVIDER_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/same-address-remote-token-address-provider.ts'
 import SECURITY_POLICY_STORE_V2_1_0_DEV_ABI from '../artifacts/abi/V2_1_0_DEV/security-policy-store.ts'
-import { getTypedContract, readContractType } from '../query.ts'
+import { getTypedContract, isMissingFunction, readContractType } from '../query.ts'
 
 /**
  * Multi-token pool contract types the CCT layer accepts. Kept apart from `TOKEN_POOL_TYPES`, so no
@@ -177,6 +185,8 @@ export {
   LOCK_OR_BURN_FLAVORS,
   nullableAddress,
 } from '../../../evm/multi-token-pool.ts'
+import { getErrorData } from '../../../evm/errors.ts'
+import { decodeError } from '../simulate.ts'
 
 /**
  * The finality `bytes4` the MTTP views take where finality does not change the answer (CCVs, a
@@ -723,6 +733,52 @@ export function uidProviderContract(
     address,
     MULTI_TOKEN_POOL_ABIS.FactoryTokenWithUIDPoolDataProvider[MultiTokenPoolVersion.V2_1_0_DEV],
   )
+}
+
+/** A provider's `getAdditionalPoolData` answer, or why it refuses (a revert, or no such function). @internal */
+export type ProviderPoolData =
+  | { data: string }
+  | {
+      /** The decoded revert, or that it has no `getAdditionalPoolData`. */
+      refused: string
+      /** The revert's error name, when it decodes. */
+      errorName?: string
+      /** The underlying error. */
+      cause: unknown
+    }
+
+/**
+ * Reads the pool data a provider adds to a send of `token` toward `remoteChainSelector`. A provider
+ * that reverts (its own custom errors decoded against every known ABI), or has no such function,
+ * is a refusal: every send reverts. Transport errors propagate. Each caller picks its own policy.
+ * @internal
+ */
+export async function readProviderPoolData(
+  chain: EVMChain,
+  provider: string,
+  token: string,
+  remoteChainSelector: bigint,
+  blockTag?: number,
+): Promise<ProviderPoolData> {
+  try {
+    return {
+      data: hexlify(
+        await uidProviderContract(chain, provider).getAdditionalPoolData(
+          getAddress(token),
+          remoteChainSelector,
+          ANY_FINALITY_CONFIG,
+          '0x',
+          ...(blockTag === undefined ? [] : [{ blockTag }]),
+        ),
+      ),
+    }
+  } catch (err) {
+    if (!isMissingFunction(err)) throw err
+    if (!isError(err, 'CALL_EXCEPTION'))
+      return { refused: 'it has no getAdditionalPoolData', cause: err }
+    const { errorName } = decodeError(getErrorData(err) ?? '0x')
+    return { refused: errorName ?? err.shortMessage, ...(errorName && { errorName }), cause: err }
+  }
 }
 
 /**

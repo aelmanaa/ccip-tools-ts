@@ -57,6 +57,20 @@ export async function poolConfigManagerOf(
   if (type === null || !reportsMultiTokenPool(type)) return undefined
   // any multi-token pool version answers `getPoolConfigManager`; a pool of an unknown version that
   // calls this PCM still serves it, so it is counted rather than refused
+  return readPoolConfigManagerAddress(chain, pool, version, blockTag)
+}
+
+/**
+ * The PoolConfigManager a pool already known to be a multi-token pool calls (checksummed), or
+ * `undefined` when it has no `getPoolConfigManager`. Transport errors propagate.
+ * @internal
+ */
+export async function readPoolConfigManagerAddress(
+  chain: EVMChain,
+  pool: string,
+  version: MultiTokenPoolVersion,
+  blockTag?: number,
+): Promise<string | undefined> {
   return multiTokenPoolContract(chain, pool, version)
     .getPoolConfigManager(blockTag === undefined ? {} : { blockTag })
     .then(
