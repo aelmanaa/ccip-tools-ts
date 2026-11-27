@@ -9,12 +9,12 @@ import type { EVMChain } from '../../../../evm/index.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { laneFamilyOf } from '../../../remote-address.ts'
+import { SAME_ADDRESS_PROVIDER_TYPE } from '../../multi-token-pool/contracts.ts'
 import { readContractTypeOrNull } from '../../query.ts'
 import { validateBoolean } from '../../validate.ts'
 import { policyKey } from '../projection.ts'
 import type { ConnectionPolicyRecord, PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
 import type { MultiTokenPoolWriteGuards, PoolConfigManagerWriteParams } from '../write-operation.ts'
-import { SAME_ADDRESS_PROVIDER_TYPE } from './apply-multi-token-pool-remote-token-address-provider-updates.ts'
 import { type RecordWriteContext, PolicyRecordWriteOperation } from './record-writes.ts'
 
 /** Parameters of `applyMultiTokenPoolConnectionPolicyConfigUpdates`. */

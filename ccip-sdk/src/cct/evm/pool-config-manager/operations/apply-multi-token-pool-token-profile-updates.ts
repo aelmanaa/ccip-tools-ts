@@ -21,6 +21,7 @@ import {
   type MultiTokenPoolType,
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
+  UID_PROVIDER_TYPE,
   getMultiTokenPoolInterface,
   isSupportedMultiTokenPoolType,
   multiTokenPoolFunctionOf,
@@ -119,9 +120,6 @@ export type ApplyMultiTokenPoolTokenProfileUpdatesParams = PoolConfigManagerWrit
      */
     servingPool?: string
   }
-
-/** The factory UID provider's type (chainlink-ccip c950d9bc `FactoryTokenWithUIDPoolDataProvider.sol`). */
-const UID_PROVIDER_TYPE = 'FactoryTokenWithUIDPoolDataProvider'
 
 /** The conventional burn sink, exempt from `confirmBurnAddress`. */
 const DEAD = getAddress('0x000000000000000000000000000000000000dead')

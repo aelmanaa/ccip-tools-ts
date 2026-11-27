@@ -14,6 +14,7 @@ import { laneFamilyOf } from '../../../remote-address.ts'
 import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
+  SAME_ADDRESS_PROVIDER_TYPE,
   TOKEN_POLICY_ROLES,
   getMultiTokenPoolInterface,
   multiTokenPoolFunctionOf,
@@ -45,9 +46,6 @@ export type ApplyMultiTokenPoolRemoteTokenAddressProviderUpdatesParams =
       /** The updates, at least one; each policy at most once. */
       updates: MultiTokenPoolRemoteTokenAddressProviderUpdate[]
     }
-
-/** The provider that answers the local token's own address (chainlink-ccip c950d9bc). @internal */
-export const SAME_ADDRESS_PROVIDER_TYPE = 'SameAddressRemoteTokenAddressProvider'
 
 /**
  * Sets connection policies' remote token address providers. A provider answers the remote token of
