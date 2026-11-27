@@ -251,10 +251,8 @@ describe('MTTP role, admin and fee writes (Sepolia fork)', { skip, timeout: 600_
   it('runs the default admin lifecycle: cancel, delay change and rollback, accept, renounce', async (t) => {
     if (!deployed) return t.skip('mttp-core not deployed')
     const { defaultAdminDelay } = await cct.getPoolConfigManagerState(target)
-    const wait = async () => {
-      await provider.send('evm_increaseTime', [defaultAdminDelay + 1])
-      await provider.send('evm_mine', [])
-    }
+    // the warp records the mined head: a build must never pin before it (E7 M4)
+    const wait = () => warp(defaultAdminDelay + 1)
     // nothing pending: cancel and rollback are refused
     await assert.rejects(
       cct.generateUnsignedCancelMultiTokenPoolDefaultAdminTransfer({ ...target, sender: admin }),
