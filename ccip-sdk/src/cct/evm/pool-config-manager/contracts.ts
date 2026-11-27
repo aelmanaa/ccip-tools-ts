@@ -33,6 +33,7 @@ import type {
   MultiTokenPoolInlineRemotePoolDrop,
   MultiTokenPoolLaneKey,
 } from '../../multi-token-pool.ts'
+import type { DefaultAdminTransferSchedule } from '../default-admin.ts'
 import {
   type LockOrBurnFlavor,
   type MultiTokenPoolVersion,
@@ -593,4 +594,52 @@ export async function assertProviderHasCode(
     `${provider} has no code, so the store refuses it (ProviderHasNoCode): ${fix}`,
     context && { context },
   )
+}
+
+/** A PoolConfigManager's `AccessControlDefaultAdminRules` state, raw. @internal */
+export type PoolConfigManagerAdminState = {
+  /** Holder of `DEFAULT_ADMIN_ROLE` (`ZeroAddress` once renounced). */
+  defaultAdmin: string
+  /** The scheduled transfer; `schedule` `0n` when none, `newAdmin` `ZeroAddress` for a renounce. */
+  pending: DefaultAdminTransferSchedule
+  /** Seconds a transfer waits. */
+  delay: number
+  /** The scheduled delay change; `schedule` `0n` when none. */
+  pendingDelay: { newDelay: number; schedule: bigint }
+  /** Seconds a delay increase waits before it applies. */
+  delayIncreaseWait: number
+}
+
+/**
+ * Reads a PCM's default admin, its scheduled transfer and its delays, pinned to `blockTag` when
+ * given (the two pending getters return two outputs each: destructured positionally).
+ * @internal
+ */
+export async function readPoolConfigManagerAdmin(
+  pcm: Pick<
+    ReturnType<typeof poolConfigManagerContract>,
+    | 'defaultAdmin'
+    | 'pendingDefaultAdmin'
+    | 'defaultAdminDelay'
+    | 'pendingDefaultAdminDelay'
+    | 'defaultAdminDelayIncreaseWait'
+  >,
+  blockTag?: number,
+): Promise<PoolConfigManagerAdminState> {
+  const at = blockTag === undefined ? [] : ([{ blockTag }] as const)
+  const [admin, [newAdmin, adminSchedule], delay, [newDelay, delaySchedule], wait] =
+    await Promise.all([
+      pcm.defaultAdmin(...at),
+      pcm.pendingDefaultAdmin(...at),
+      pcm.defaultAdminDelay(...at),
+      pcm.pendingDefaultAdminDelay(...at),
+      pcm.defaultAdminDelayIncreaseWait(...at),
+    ])
+  return {
+    defaultAdmin: getAddress(resultToObject(admin)),
+    pending: { newAdmin: getAddress(resultToObject(newAdmin)), schedule: BigInt(adminSchedule) },
+    delay: Number(delay),
+    pendingDelay: { newDelay: Number(newDelay), schedule: BigInt(delaySchedule) },
+    delayIncreaseWait: Number(wait),
+  }
 }

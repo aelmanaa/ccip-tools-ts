@@ -4,10 +4,9 @@
  * @packageDocumentation
  */
 
-import { ZeroAddress, getAddress } from 'ethers'
+import { getAddress } from 'ethers'
 
 import type { EVMChain } from '../../../../evm/index.ts'
-import { resultToObject } from '../../../../evm/types.ts'
 import {
   type MultiTokenPoolVersion,
   poolConfigManagerContract,
@@ -16,6 +15,7 @@ import { EVMQuery } from '../../query.ts'
 import type { PendingTokenDefaultAdmin } from '../../token/operations/get-token-default-admin.ts'
 import {
   type PoolConfigManagerTarget,
+  readPoolConfigManagerAdmin,
   readPoolConfigManagerStaticConfig,
   resolvePoolConfigManagerTarget,
   validatePoolConfigManagerTarget,
@@ -40,8 +40,8 @@ export type GetPoolConfigManagerStateResult = {
   /** Holder of `DEFAULT_ADMIN_ROLE`. */
   defaultAdmin: string
   /**
-   * A scheduled default-admin transfer, present only when one is pending (as
-   * `getTokenDefaultAdmin`): test with `'pendingDefaultAdmin' in result`.
+   * A scheduled default-admin transfer, present only when one is pending: test with
+   * `'pendingDefaultAdmin' in result`. A `newAdmin` of `ZeroAddress` is a scheduled renounce.
    */
   pendingDefaultAdmin?: PendingTokenDefaultAdmin
   /** Seconds a default-admin transfer waits; `0` makes PCM governance changes instant. */
@@ -81,38 +81,23 @@ export class GetPoolConfigManagerState extends EVMQuery<
   ): Promise<GetPoolConfigManagerStateResult> {
     const { address, version } = await resolvePoolConfigManagerTarget(chain, target)
     const pcm = poolConfigManagerContract(chain, address, version)
-    const [[, , typeAndVersion], staticConfig, admin, pending, delay, pendingDelay, wait] =
-      await Promise.all([
-        chain.typeAndVersion(address),
-        readPoolConfigManagerStaticConfig(chain, address, version),
-        pcm.defaultAdmin(),
-        pcm.pendingDefaultAdmin(),
-        pcm.defaultAdminDelay(),
-        pcm.pendingDefaultAdminDelay(),
-        pcm.defaultAdminDelayIncreaseWait(),
-      ])
-    // positional: the two pending getters return two outputs each
-    const [newAdmin, adminSchedule] = pending
-    const [newDelay, delaySchedule] = pendingDelay
+    const [[, , typeAndVersion], staticConfig, admin] = await Promise.all([
+      chain.typeAndVersion(address),
+      readPoolConfigManagerStaticConfig(chain, address, version),
+      readPoolConfigManagerAdmin(pcm),
+    ])
     return {
       poolConfigManager: getAddress(address),
       version,
       typeAndVersion,
       ...staticConfig,
-      defaultAdmin: getAddress(resultToObject(admin)),
-      // OpenZeppelin AccessControlDefaultAdminRules resets both fields together; the token read
-      // (`getTokenDefaultAdmin`) tests `newAdmin`, so this does too
-      ...(getAddress(resultToObject(newAdmin)) !== ZeroAddress && {
-        pendingDefaultAdmin: {
-          newAdmin: getAddress(resultToObject(newAdmin)),
-          schedule: BigInt(adminSchedule),
-        },
-      }),
-      defaultAdminDelay: Number(delay),
-      ...(BigInt(delaySchedule) !== 0n && {
-        pendingDefaultAdminDelay: { newDelay: Number(newDelay), schedule: BigInt(delaySchedule) },
-      }),
-      defaultAdminDelayIncreaseWait: Number(wait),
+      defaultAdmin: admin.defaultAdmin,
+      // a scheduled transfer, or a scheduled renounce (`newAdmin` zero, schedule set): both are
+      // pending, so the schedule decides
+      ...(admin.pending.schedule !== 0n && { pendingDefaultAdmin: admin.pending }),
+      defaultAdminDelay: admin.delay,
+      ...(admin.pendingDelay.schedule !== 0n && { pendingDefaultAdminDelay: admin.pendingDelay }),
+      defaultAdminDelayIncreaseWait: admin.delayIncreaseWait,
     }
   }
 }

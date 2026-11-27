@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+import { ZeroAddress } from 'ethers'
+
 import { CCTContractTypeInvalidError, CCTParamsInvalidError } from '../../../errors.ts'
 import {
   CPS,
@@ -44,6 +46,15 @@ describe('GetPoolConfigManagerState (cct/evm pool-config-manager)', () => {
     })
     assert.deepEqual(r.pendingDefaultAdmin, { newAdmin: OTHER, schedule: 1_800_000_000n })
     assert.deepEqual(r.pendingDefaultAdminDelay, { newDelay: 0, schedule: 1_800_000_100n })
+  })
+
+  it('reports a scheduled renounce (zero new admin, schedule set) as pending', async () => {
+    const state = defaultStack()
+    state.pcm.pendingDefaultAdmin = [ZeroAddress, 1_800_000_000n]
+    const r = await new GetPoolConfigManagerState().query(stackChain(state).chain, {
+      poolConfigManager: PCM,
+    })
+    assert.deepEqual(r.pendingDefaultAdmin, { newAdmin: ZeroAddress, schedule: 1_800_000_000n })
   })
 
   it('resolves the PCM by its own typeAndVersion and refuses another contract', async () => {
