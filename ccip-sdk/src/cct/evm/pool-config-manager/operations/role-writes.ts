@@ -273,13 +273,14 @@ export class RenounceMultiTokenPoolDefaultAdmin extends RoleWriteOperation<Renou
         at,
         `has no scheduled renounce${admin.pending.schedule === 0n ? '' : ` (a transfer to ${admin.pending.newAdmin} is pending)`}: schedule one with beginMultiTokenPoolDefaultAdminTransfer({ newAdmin: ZeroAddress }), wait ${admin.delay}s, then renounce`,
       )
-    // the chain's own check, named before the eth_call: the delay must have passed
+    // the chain's own check, named before the eth_call: OZ `_hasSchedulePassed` is
+    // `schedule < block.timestamp`, so a renounce at the schedule's own second still reverts
     const now = BigInt(block?.timestamp ?? 0)
-    if (admin.pending.schedule > now)
+    if (admin.pending.schedule >= now)
       throw new CCTParamsInvalidError(
         this.name,
         at,
-        `the scheduled renounce matures at ${admin.pending.schedule} (unix seconds), ${admin.pending.schedule - now}s from now: send it after that (AccessControlEnforcedDefaultAdminDelay)`,
+        `the scheduled renounce matures at ${admin.pending.schedule} (unix seconds): send it in a block after that, ${admin.pending.schedule - now + 1n}s from now at the earliest (AccessControlEnforcedDefaultAdminDelay)`,
       )
     return {
       data: this.calldata(ctx.version, [
