@@ -12,7 +12,7 @@ import { reachableRpcEndpoint } from '../../../../../../scripts/test-endpoints.t
 import { useResource } from '../../../../../../scripts/useResource.ts'
 import type { ChainGetter } from '../../../../chain.ts'
 import { EVMChain } from '../../../../evm/index.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
+import { CCTContractTypeInvalidError, CCTParamsInvalidError } from '../../../errors.ts'
 import { EVMTokenManager } from '../../index.ts'
 import {
   MultiTokenPoolVersion,
@@ -294,5 +294,78 @@ describe('MTTP write ops, built read-only (Sepolia)', { skip, timeout: 600_000 }
     }
     // one full state read for the op and the guard; the profiles come from it
     assert.deepEqual(counts, { getPolicyNames: 1, getTokenConfigBatch: 1 })
+  })
+
+  it('redirects every single-token op given a multi-token pool to its MTTP op', async (t) => {
+    if (!deployed) return t.skip('v5v9 not deployed')
+    const FUJI_SELECTOR = 14767482510784806043n
+    const pool = { poolAddress: CORE_POOL }
+    const redirects: [Promise<unknown>, RegExp][] = [
+      [
+        cct.generateUnsignedAddRemotePool({
+          ...pool,
+          remoteChainSelector: FUJI_SELECTOR,
+          remotePoolAddress: CORE_POOL,
+        }),
+        /applyMultiTokenPoolInlineRemotePoolConfigUpdates/,
+      ],
+      [
+        cct.generateUnsignedRemoveRemotePool({
+          ...pool,
+          remoteChainSelector: FUJI_SELECTOR,
+          remotePoolAddress: CORE_POOL,
+        }),
+        /applyMultiTokenPoolInlineRemotePoolConfigUpdates/,
+      ],
+      [
+        cct.generateUnsignedSetAllowedFinalityConfig({
+          ...pool,
+          allowedFinality: { finalityDepth: 5 },
+        }),
+        /applyMultiTokenPoolTokenProfileUpdates/,
+      ],
+      [
+        cct.generateUnsignedSetChainRateLimiterConfigs({
+          ...pool,
+          updates: [
+            {
+              remoteChainSelector: FUJI_SELECTOR,
+              outboundRateLimiterConfig: { enabled: false },
+              inboundRateLimiterConfig: { enabled: false },
+            },
+          ],
+        }),
+        /applyMultiTokenPoolInlineRateLimitConfigUpdates/,
+      ],
+      [
+        cct.generateUnsignedApplyTokenTransferFeeConfigUpdates({
+          ...pool,
+          updates: [],
+          disables: [FUJI_SELECTOR],
+        }),
+        /applyMultiTokenPoolInlineFeeConfigUpdates and applyMultiTokenPoolInlineDestOverheadConfigUpdates/,
+      ],
+      [
+        cct.generateUnsignedApplyCCVConfigUpdates({
+          ...pool,
+          ccvConfigArgs: [
+            {
+              remoteChainSelector: FUJI_SELECTOR,
+              outboundCCVs: [],
+              thresholdOutboundCCVs: [],
+              inboundCCVs: [],
+              thresholdInboundCCVs: [],
+            },
+          ],
+        }),
+        /applyMultiTokenPoolInlineSecurityConfigUpdates/,
+      ],
+    ]
+    for (const [built, op] of redirects)
+      await assert.rejects(
+        built,
+        (e: unknown) =>
+          e instanceof CCTContractTypeInvalidError && op.test(String(e.context.reason)),
+      )
   })
 })

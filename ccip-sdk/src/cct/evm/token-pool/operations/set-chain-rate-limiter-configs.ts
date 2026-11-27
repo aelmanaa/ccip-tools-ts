@@ -18,6 +18,7 @@ import { type Interface, ZeroAddress, getAddress } from 'ethers'
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { redirectMultiTokenPool } from '../../multi-token-pool/pool-reads.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import { validateArray, validateNonZeroAddress, validateUint64 } from '../../validate.ts'
 import {
@@ -302,7 +303,14 @@ export class SetChainRateLimiterConfigs extends EVMOperation<SetChainRateLimiter
     chain: EVMChain,
     params: SetChainRateLimiterConfigsParams,
   ): Promise<UnsignedEVMTx> {
-    const { type, version } = await resolveTokenPool(chain, params.poolAddress)
+    const { type, version } = await resolveTokenPool(chain, params.poolAddress).catch(
+      (err: unknown) =>
+        redirectMultiTokenPool(
+          err,
+          'applyMultiTokenPoolInlineRateLimitConfigUpdates',
+          'set: [{ tokenAddress, remoteChainSelector, rateLimits }] with all four buckets (outbound, inbound and their fast-finality buckets), since a set replaces the record; for one bucket, applyMultiTokenPoolInlineRateLimitBucketUpdates; for a policy every token shares, applyMultiTokenPoolRateLimitPolicyConfigUpdates; to stop a lane, stopMultiTokenPoolLanes',
+        ),
+    )
     const encode = resolveEncoder(this.encoders, version, this.name)
     const unsigned = encode(getTokenPoolInterface(type, version), params, version)
     if (params.sender !== undefined)

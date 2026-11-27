@@ -20,6 +20,7 @@ import { getAddress } from 'ethers'
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { redirectMultiTokenPool } from '../../multi-token-pool/pool-reads.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import { parseRecord, validateAddress, validateArray, validateUint64 } from '../../validate.ts'
 import {
@@ -131,7 +132,14 @@ export class ApplyCCVConfigUpdates extends EVMOperation<ApplyCCVConfigUpdatesPar
     params: ApplyCCVConfigUpdatesParams,
   ): Promise<UnsignedEVMTx> {
     const { ccvConfigArgs, sender } = params
-    const hooks = await resolveAdvancedPoolHooksTarget(this.name, chain, params)
+    const hooks = await resolveAdvancedPoolHooksTarget(this.name, chain, params).catch(
+      (err: unknown) =>
+        redirectMultiTokenPool(
+          err,
+          'applyMultiTokenPoolInlineSecurityConfigUpdates',
+          'set: [{ tokenAddress, remoteChainSelector, securityConfig: { outboundCCVs, inboundCCVs, hook } }] per lane, since a multi-token pool keeps its CCVs in the PoolConfigManager, not in AdvancedPoolHooks; for a policy every token shares, applyMultiTokenPoolSecurityPolicyConfigUpdates',
+        ),
+    )
     if (sender !== undefined) await assertAdvancedPoolHooksOwner(this.name, chain, hooks, sender)
     return callTx(
       hooks,

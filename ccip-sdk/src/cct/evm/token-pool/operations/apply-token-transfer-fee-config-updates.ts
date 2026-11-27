@@ -15,6 +15,7 @@ import type { TokenTransferFeeConfig } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import type { UnsignedEVMTx } from '../../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import { redirectMultiTokenPool } from '../../multi-token-pool/pool-reads.ts'
 import { EVMOperation, callTx } from '../../operation.ts'
 import {
   parseRecord,
@@ -190,7 +191,14 @@ export class ApplyTokenTransferFeeConfigUpdates extends EVMOperation<
    * @throws {@link CCTParamsInvalidError} if `sender` is supplied and is not the pool owner
    */
   protected async buildUnsigned(chain: EVMChain, params: ParsedParams): Promise<UnsignedEVMTx> {
-    const { type, version } = await resolveTokenPool(chain, params.poolAddress)
+    const { type, version } = await resolveTokenPool(chain, params.poolAddress).catch(
+      (err: unknown) =>
+        redirectMultiTokenPool(
+          err,
+          'applyMultiTokenPoolInlineFeeConfigUpdates and applyMultiTokenPoolInlineDestOverheadConfigUpdates',
+          'two records, two transactions: the fees in set: [{ tokenAddress, remoteChainSelector, feeConfig }], the gas and bytes in set: [{ tokenAddress, remoteChainSelector, destOverheadConfig }]; a disable is a remove: [{ tokenAddress, remoteChainSelector }] on each',
+        ),
+    )
     const encode = resolveEncoder(this.encoders, version, this.name)
     if (params.sender !== undefined)
       await assertPoolOwner(this.name, chain, params.poolAddress, params.sender)
