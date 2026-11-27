@@ -14,7 +14,6 @@ import {
   LANE_RECORD_TYPES,
   LOCK_OR_BURN_FLAVORS,
 } from '../../../../evm/multi-token-pool.ts'
-import { resultToObject } from '../../../../evm/types.ts'
 import { type FinalityAllowed, encodeFinality } from '../../../../extra-args.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import type { MultiTokenPoolLaneFinding } from '../../../multi-token-pool.ts'
@@ -24,7 +23,6 @@ import {
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
   isSupportedMultiTokenPoolType,
-  poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
 import { isNotCcipContract } from '../../query.ts'
 import { validateAllowedFinality } from '../../token-pool/operations/set-allowed-finality-config.ts'
@@ -36,9 +34,12 @@ import {
   validateOneOf,
   validateUint8,
 } from '../../validate.ts'
-import { type MultiTokenPoolTokenProfileFields, decodeTokenProfile } from '../contracts.ts'
-import { multiTokenPoolSupportedChains } from '../projection.ts'
-import { readMultiTokenPoolRecordState } from '../record-state.ts'
+import type { MultiTokenPoolTokenProfileFields } from '../contracts.ts'
+import {
+  type MultiTokenPoolRecordState,
+  multiTokenPoolSupportedChains,
+  tokenRecordsOf,
+} from '../projection.ts'
 import {
   type PoolConfigManagerServingPools,
   poolConfigManagerOf,
@@ -308,33 +309,33 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
   protected async encode(
     chain: EVMChain,
     params: ApplyMultiTokenPoolTokenProfileUpdatesParams,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
+    ctx: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
+    const { address, version, blockTag, state, staticConfig } = ctx
     const remove = (params.tokensToRemove ?? []).map((t) => getAddress(t))
     const set = params.profilesToSet ?? []
     const update = params.profilesToUpdate ?? []
     const tokens = [
       ...new Set([...remove, ...[...set, ...update].map((p) => getAddress(p.tokenAddress))]),
     ]
-    const pcm = poolConfigManagerContract(chain, address, version)
-    const [configs, { state, staticConfig }] = await Promise.all([
-      pcm.getTokenConfigBatch(tokens, { blockTag }),
-      readMultiTokenPoolRecordState(chain, address, version, { tokenAddresses: tokens, blockTag }),
-    ])
+    // the stored profiles, from the build's one state read (an unregistered token is not in it)
     const stored = new Map(
-      tokens.map((t, i) => [t, decodeTokenProfile(t, resultToObject(configs[i]!), address)]),
+      tokens.map((t) => {
+        const profile = tokenRecordsOf(state, t)?.profile
+        return [t, profile?.isRegistered ? profile : undefined] as const
+      }),
     )
     const removed = new Set(remove)
 
     // removals: registered, with no policy and no inline record left (the stores revert otherwise)
     remove.forEach((token, i) => {
-      if (!stored.get(token)!.isRegistered)
+      if (!stored.get(token))
         throw new CCTParamsInvalidError(
           this.name,
           `tokensToRemove[${i}]`,
           `${token} is not registered`,
         )
-      const records = state.tokens.find((t) => getAddress(t.tokenAddress) === token)
+      const records = tokenRecordsOf(state, token)
       const policies = records
         ? LANE_RECORD_TYPES.filter((type) => records.policies[type] !== null)
         : []
@@ -358,8 +359,7 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
     const changes: ProfileChange[] = []
     for (const [i, p] of set.entries()) {
       const token = getAddress(p.tokenAddress)
-      const current = stored.get(token)!
-      if (current.isRegistered && !removed.has(token))
+      if (stored.get(token) && !removed.has(token))
         throw new CCTParamsInvalidError(
           this.name,
           `profilesToSet[${i}].tokenAddress`,
@@ -402,8 +402,8 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
     }
     for (const [i, p] of update.entries()) {
       const token = getAddress(p.tokenAddress)
-      const current = stored.get(token)!
-      if (!current.isRegistered)
+      const current = stored.get(token)
+      if (!current)
         throw new CCTParamsInvalidError(
           this.name,
           `profilesToUpdate[${i}].tokenAddress`,
@@ -441,7 +441,7 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
 
     for (const c of changes) this.#checkProfile(c)
     this.#checkLiveChanges(params, changes, state)
-    await this.#checkServingPool(chain, params, { address, version, blockTag })
+    await this.#checkServingPool(chain, params, ctx)
     await this.#checkServedFlavors(chain, params, changes)
     // the pools serving this PCM for the changed tokens, and their registry entries
     const serving = await readPoolsServingPoolConfigManager(chain, {
@@ -470,7 +470,13 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
       ]),
     ])
     // the values the write replaces: each touched token's stored profile
-    const expected = Object.fromEntries(tokens.map((t) => [`profiles.${t}`, stored.get(t)]))
+    // an unregistered token seals as such: a registration before the send moves the snapshot
+    const expected = Object.fromEntries(
+      tokens.map((t) => [
+        `profiles.${t}`,
+        stored.get(t) ?? { tokenAddress: t, isRegistered: false },
+      ]),
+    )
     return { data, expected }
   }
 
@@ -496,7 +502,7 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
   #checkLiveChanges(
     params: ApplyMultiTokenPoolTokenProfileUpdatesParams,
     changes: readonly ProfileChange[],
-    state: Awaited<ReturnType<typeof readMultiTokenPoolRecordState>>['state'],
+    state: MultiTokenPoolRecordState,
   ): void {
     if (params.allowLiveProfileChange) return
     for (const { param, next, current } of changes) {

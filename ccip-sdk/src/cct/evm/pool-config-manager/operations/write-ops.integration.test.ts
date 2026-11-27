@@ -14,6 +14,11 @@ import type { ChainGetter } from '../../../../chain.ts'
 import { EVMChain } from '../../../../evm/index.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { EVMTokenManager } from '../../index.ts'
+import {
+  MultiTokenPoolVersion,
+  POOL_CONFIG_MANAGER_TYPE,
+  getMultiTokenPoolInterface,
+} from '../../multi-token-pool/contracts.ts'
 import type { ApplyMultiTokenPoolTokenPolicyUpdatesParams } from './apply-multi-token-pool-token-policy-updates.ts'
 
 const skip = !!process.env.SKIP_INTEGRATION_TESTS
@@ -258,5 +263,36 @@ describe('MTTP write ops, built read-only (Sepolia)', { skip, timeout: 600_000 }
         e.context.recordType === 'rateLimit' &&
         /InvalidRateLimitPolicyDecimals/.test(e.message),
     )
+  })
+
+  it('reads the PoolConfigManager state once per build (D38)', async (t) => {
+    if (!deployed) return t.skip('v5v9 not deployed')
+    const pcm = getMultiTokenPoolInterface(
+      POOL_CONFIG_MANAGER_TYPE,
+      MultiTokenPoolVersion.V2_1_0_DEV,
+    )
+    const counted = {
+      [pcm.getFunction('getPolicyNames')!.selector]: 'getPolicyNames',
+      [pcm.getFunction('getTokenConfigBatch')!.selector]: 'getTokenConfigBatch',
+    }
+    const counts: Record<string, number> = {}
+    const provider = cct.chain.provider
+    const call = provider.call.bind(provider)
+    provider.call = (tx) => {
+      const name = counted[String(tx.data).slice(0, 10)]
+      if (name) counts[name] = (counts[name] ?? 0) + 1
+      return call(tx)
+    }
+    try {
+      await cct.generateUnsignedApplyMultiTokenPoolTokenProfileUpdates({
+        ...core,
+        getChain,
+        profilesToUpdate: [{ tokenAddress: CORE_TOKEN, allowedFinality: { finalityDepth: 5 } }],
+      })
+    } finally {
+      provider.call = call
+    }
+    // one full state read for the op and the guard; the profiles come from it
+    assert.deepEqual(counts, { getPolicyNames: 1, getTokenConfigBatch: 1 })
   })
 })

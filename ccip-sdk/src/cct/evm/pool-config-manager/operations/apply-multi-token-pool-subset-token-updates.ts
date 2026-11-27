@@ -17,7 +17,6 @@ import {
 import { assertUnique, validateAddress, validateArray, validateUint64 } from '../../validate.ts'
 import { encodePolicyName } from '../contracts.ts'
 import { policyKey } from '../projection.ts'
-import { readMultiTokenPoolRecordState } from '../record-state.ts'
 import type { PolicyRecordKey } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -89,9 +88,8 @@ export class ApplyMultiTokenPoolSubsetTokenUpdates extends PoolConfigManagerWrit
   protected async encode(
     chain: EVMChain,
     params: ApplyMultiTokenPoolSubsetTokenUpdatesParams,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
+    { version, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
-    const { state } = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
     const context = { recordType: 'connection' }
     const recordOf = (e: MultiTokenPoolSubsetToken) =>
       state.policies.connection.find(

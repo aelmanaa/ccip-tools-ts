@@ -23,7 +23,6 @@ import {
   validateUint64,
 } from '../../validate.ts'
 import { MESSAGE_DIRECTIONS, rateLimitBucketOf } from '../projection.ts'
-import { readMultiTokenPoolRecordState } from '../record-state.ts'
 import type { InlineRateLimitBucketUpdate } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -85,9 +84,8 @@ export class ApplyMultiTokenPoolInlineRateLimitBucketUpdates extends PoolConfigM
   protected async encode(
     chain: EVMChain,
     { updates }: ApplyMultiTokenPoolInlineRateLimitBucketUpdatesParams,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
+    { version, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
-    const { state } = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
     const recordOf = (u: InlineRateLimitBucketUpdate) =>
       state.tokens
         .find((t) => getAddress(t.tokenAddress) === getAddress(u.tokenAddress))

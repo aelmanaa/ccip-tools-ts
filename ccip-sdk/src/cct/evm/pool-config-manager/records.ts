@@ -90,6 +90,16 @@ export type RateLimitPolicyRecord = PolicyRecordKey & {
   rateLimits: MultiTokenPoolRateLimits
 }
 
+/** The directions a pause or stop covers. */
+export type PauseDirection = TransferDirection | 'both'
+
+/** `ConnectionPolicyStore.PauseDirection` on chain: `Outbound` 0, `Inbound` 1, `Both` 2. @internal */
+export const PAUSE_DIRECTIONS = [
+  'outbound',
+  'inbound',
+  'both',
+] as const satisfies readonly PauseDirection[]
+
 /** One bucket of an existing inline rate limit record: a direction and finality tier. */
 export type InlineRateLimitBucketUpdate = MultiTokenPoolLaneKey & {
   /** The direction. */

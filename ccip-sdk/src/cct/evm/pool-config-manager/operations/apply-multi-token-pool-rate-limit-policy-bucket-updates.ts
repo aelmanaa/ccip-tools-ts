@@ -21,7 +21,6 @@ import {
 } from '../../validate.ts'
 import { encodePolicyName } from '../contracts.ts'
 import { MESSAGE_DIRECTIONS, policyKey, rateLimitBucketOf } from '../projection.ts'
-import { readMultiTokenPoolRecordState } from '../record-state.ts'
 import type { RateLimitPolicyBucketUpdate } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -83,9 +82,8 @@ export class ApplyMultiTokenPoolRateLimitPolicyBucketUpdates extends PoolConfigM
   protected async encode(
     chain: EVMChain,
     { updates }: ApplyMultiTokenPoolRateLimitPolicyBucketUpdatesParams,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
+    { version, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
-    const { state } = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
     const recordOf = (u: RateLimitPolicyBucketUpdate) =>
       state.policies.rateLimit.find(
         (r) =>

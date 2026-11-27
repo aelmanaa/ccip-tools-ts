@@ -13,7 +13,7 @@ import { type Result, getAddress, keccak256, toBeHex } from 'ethers'
 
 import type { ChainGetter } from '../../../chain.ts'
 import type { EVMChain } from '../../../evm/index.ts'
-import { decodeLaneConnection, decodeTokenProfileFields } from '../../../evm/multi-token-pool.ts'
+import { LOCK_OR_BURN_FLAVORS, decodeLaneConnection } from '../../../evm/multi-token-pool.ts'
 import { resultToObject } from '../../../evm/types.ts'
 import { ChainFamily } from '../../../networks.ts'
 import { canonicalHash, sealMultiTokenPoolSnapshot } from '../../canonical.ts'
@@ -42,6 +42,7 @@ import { type DecodedMultiTokenPoolWrite, decodeMultiTokenPoolWrite } from './ca
 import {
   type MultiTokenPoolLaneKey,
   type PoolConfigManagerStaticConfig,
+  readChainPauseFlags,
   toAbiLaneKey,
 } from './contracts.ts'
 import { type AbiRateLimits, decodeRateLimits } from './decode.ts'
@@ -67,10 +68,16 @@ import {
   type ProjectedMultiTokenPoolLane,
   applyMultiTokenPoolRecordChanges,
   multiTokenPoolChangeChains,
+  multiTokenPoolRecordChains,
   multiTokenPoolSupportedChains,
   resolveMultiTokenPoolLanes,
+  tokenRecordsOf,
 } from './projection.ts'
-import { fillProviderAnswers, readMultiTokenPoolRecordState } from './record-state.ts'
+import {
+  type MultiTokenPoolRecordStateRead,
+  fillProviderAnswers,
+  readMultiTokenPoolRecordState,
+} from './record-state.ts'
 
 /** Inputs of {@link runMultiTokenPoolGuards}. @internal */
 export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
@@ -106,6 +113,13 @@ export type RunMultiTokenPoolGuardsInput = MultiTokenPoolGuardOptions & {
   errorOperation?: string
   /** Extra context every refusal carries (e.g. the `recordType` of a merged op). */
   errorContext?: Record<string, unknown>
+  /** The op's own state read at `blockTag`, so a build reads the state once. */
+  stateRead?: MultiTokenPoolRecordStateRead
+  /**
+   * `false` for a pause: the lanes are projected, the write simulated and the snapshot sealed, but no
+   * remote fact is read and no lane rule refuses. Defaults to `true`.
+   */
+  judgeLanes?: boolean
 }
 
 /** What a guarded write reports (the fields of `MultiTokenPoolUnsignedTx`). @internal */
@@ -146,16 +160,7 @@ export async function runMultiTokenPoolGuards(
   const errorOperation = input.errorOperation ?? operation
   const decoded = decodeMultiTokenPoolWrite(data, version)
   const blockNumber = input.blockTag ?? (await chain.provider.getBlockNumber())
-  const { state: before, staticConfig } = await readMultiTokenPoolRecordState(
-    chain,
-    poolConfigManager,
-    version,
-    {
-      blockTag: blockNumber,
-      // chains the write names may have no record yet, and can already be paused
-      extraChains: multiTokenPoolChangeChains(decoded.changes),
-    },
-  )
+  const { state: before, staticConfig } = await stateBefore(input, decoded, blockNumber)
   const after = applyMultiTokenPoolRecordChanges(before, decoded.changes)
   // both sides need provider answers for every lane they resolve from a policy
   const candidates = multiTokenPoolCandidateLanes(before, after)
@@ -164,7 +169,7 @@ export async function runMultiTokenPoolGuards(
 
   // a profile write changes no record, but what a token's lanes send and accept: its open lanes are
   // judged again, with the provider the write leaves
-  const profiles = await profileChanges(input, decoded, blockNumber)
+  const profiles = profileChanges(before, decoded)
   const lanes = [
     ...multiTokenPoolAffectedLanes(before, after),
     ...profileLanes(before, after, profiles.changedTokens),
@@ -172,30 +177,42 @@ export async function runMultiTokenPoolGuards(
     (l, i, all) => all.findIndex((o) => guardLaneKey(o.after) === guardLaneKey(l.after)) === i,
   )
   const afterLanes = lanes.map((l) => l.after)
-  const facts = await readMultiTokenPoolGuardFacts({
-    chain,
-    poolConfigManager,
-    version,
-    tokenAdminRegistry: staticConfig.tokenAdminRegistry,
-    blockTag: blockNumber,
-    ...(input.poolAddress && { poolAddress: input.poolAddress }),
-    requests: requiredMultiTokenPoolGuardFacts(afterLanes),
-    ...(input.getChain && { getChain: input.getChain }),
-    ...(input.remoteAttestations && { remoteAttestations: input.remoteAttestations }),
-    now: BigInt(Math.floor(Date.now() / 1000)),
-    ...(input.makesLive && { makesLive: true }),
-    ...(profiles.providers.size && { providerOverrides: profiles.providers }),
-  })
+  // a pause is the emergency action: it never reads remote facts, and never refuses on what is
+  // wrong with the lanes it stops (it is still gated, simulated and sealed)
+  const judge = input.judgeLanes !== false
+  const facts: MultiTokenPoolGuardFacts = !judge
+    ? {
+        remoteLanes: new Map(),
+        remotePools: new Map(),
+        hookCallers: new Map(),
+        servingPools: [],
+        additionalPoolDataBytes: new Map(),
+      }
+    : await readMultiTokenPoolGuardFacts({
+        chain,
+        poolConfigManager,
+        version,
+        tokenAdminRegistry: staticConfig.tokenAdminRegistry,
+        blockTag: blockNumber,
+        ...(input.poolAddress && { poolAddress: input.poolAddress }),
+        requests: requiredMultiTokenPoolGuardFacts(afterLanes),
+        ...(input.getChain && { getChain: input.getChain }),
+        ...(input.remoteAttestations && { remoteAttestations: input.remoteAttestations }),
+        now: BigInt(Math.floor(Date.now() / 1000)),
+        ...(input.makesLive && { makesLive: true }),
+        ...(profiles.providers.size && { providerOverrides: profiles.providers }),
+        storedProviders: new Map(
+          before.tokens.flatMap((t) =>
+            t.profile ? [[getAddress(t.tokenAddress), t.profile.additionalPoolDataProvider]] : [],
+          ),
+        ),
+      })
   const chainLanes = multiTokenPoolChainLanes(after, [
     ...new Set(afterLanes.map((l) => l.remoteChainSelector)),
   ])
-  const { findings, factFailures } = evaluateMultiTokenPoolGuards({
-    after,
-    lanes,
-    chainLanes,
-    facts,
-    options: input,
-  })
+  const { findings, factFailures } = judge
+    ? evaluateMultiTokenPoolGuards({ after, lanes, chainLanes, facts, options: input })
+    : { findings: [], factFailures: [] }
 
   if (factFailures.length) {
     const unknown = factFailures.some((f) => f.status === 'unknown')
@@ -433,32 +450,68 @@ export function guardOptionsOf(o: MultiTokenPoolGuardOptions): MultiTokenPoolGua
 }
 
 /**
- * The tokens a profile write changes (a field other than the pauses differs from the stored profile),
- * and the provider each set profile leaves.
+ * The state the write is judged on: the build's own read when the op passed it (one read per build),
+ * else a fresh one. A chain the write names but no record does may already be paused, so its flags
+ * are read on top.
  */
-async function profileChanges(
-  { chain, poolConfigManager, version }: RunMultiTokenPoolGuardsInput,
+async function stateBefore(
+  { chain, poolConfigManager, version, stateRead }: RunMultiTokenPoolGuardsInput,
   decoded: DecodedMultiTokenPoolWrite,
   blockTag: number,
-): Promise<{ changedTokens: Set<string>; providers: Map<string, string | null> }> {
+): Promise<Pick<MultiTokenPoolRecordStateRead, 'state' | 'staticConfig'>> {
+  const named = multiTokenPoolChangeChains(decoded.changes)
+  if (!stateRead)
+    return readMultiTokenPoolRecordState(chain, poolConfigManager, version, {
+      blockTag,
+      extraChains: named,
+    })
+  // the projection fills provider answers in: never mutate the op's read
+  const state = structuredClone(stateRead.state)
+  const known = new Set(multiTokenPoolRecordChains(state))
+  const extra = named.filter((c) => !known.has(c))
+  if (extra.length) {
+    const pcm = poolConfigManagerContract(chain, poolConfigManager, version)
+    const { chains } = await readChainPauseFlags(pcm, poolConfigManager, extra, blockTag)
+    state.chainPauses.push(...chains.filter((p) => p.outbound || p.inbound))
+  }
+  return { state, staticConfig: stateRead.staticConfig }
+}
+
+/**
+ * The tokens a profile write changes (a field other than the pauses differs from the stored profile,
+ * or the token is not registered), and the provider each set profile leaves.
+ */
+function profileChanges(
+  before: MultiTokenPoolRecordState,
+  decoded: DecodedMultiTokenPoolWrite,
+): { changedTokens: Set<string>; providers: Map<string, string | null> } {
   const set = decoded.profiles?.set ?? []
   const providers = new Map(set.map((p) => [p.tokenAddress, p.additionalPoolDataProvider]))
-  if (!set.length) return { changedTokens: new Set(), providers }
-  const configs = await poolConfigManagerContract(
-    chain,
-    poolConfigManager,
-    version,
-  ).getTokenConfigBatch(
-    set.map((p) => p.tokenAddress),
-    { blockTag },
-  )
   const changedTokens = new Set(
     set
-      .filter((p, i) => {
-        const raw = resultToObject(configs[i]!)
-        if (!raw.isRegistered) return true
-        const { tokenAddress: _, ...next } = p
-        return canonicalHash([next]) !== canonicalHash([decodeTokenProfileFields(raw)])
+      .filter((p) => {
+        const stored = tokenRecordsOf(before, p.tokenAddress)?.profile
+        if (!stored?.isRegistered) return true
+        return (
+          canonicalHash([
+            {
+              localDecimals: p.localDecimals,
+              lockOrBurnFlavor: LOCK_OR_BURN_FLAVORS[p.lockOrBurnFlavor],
+              allowedFinality: p.allowedFinality,
+              lockOrBurnAddress: p.lockOrBurnAddress,
+              additionalPoolDataProvider: p.additionalPoolDataProvider,
+            },
+          ]) !==
+          canonicalHash([
+            {
+              localDecimals: stored.localDecimals,
+              lockOrBurnFlavor: stored.lockOrBurnFlavor,
+              allowedFinality: stored.allowedFinality,
+              lockOrBurnAddress: stored.lockOrBurnAddress,
+              additionalPoolDataProvider: stored.additionalPoolDataProvider,
+            },
+          ])
+        )
       })
       .map((p) => p.tokenAddress),
   )
@@ -586,6 +639,22 @@ function forwardedStoreCalls(
     'connectionPolicyStore' | 'feePolicyStore' | 'securityPolicyStore'
   >,
 ): WriteCall[] {
+  const from = getAddress(poolConfigManager)
+  const tx = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).parseTransaction({
+    data,
+  })
+  const store = getMultiTokenPoolInterface('ConnectionPolicyStore', version)
+  // the pauses call a ConnectionPolicyStore setter (PoolConfigManager.sol pauseGlobally, pauseTokens,
+  // pauseChains and the unpauses), not the same function
+  const pause = tx && PAUSE_STORE_CALLS[tx.name]
+  if (tx && pause)
+    return [
+      {
+        from,
+        to: stores.connectionPolicyStore,
+        data: store.encodeFunctionData(pause.setter, pause.args([...tx.args])),
+      },
+    ]
   const selector = data.slice(0, 10)
   return (
     [
@@ -595,7 +664,32 @@ function forwardedStoreCalls(
     ] as const
   )
     .filter(([type]) => getMultiTokenPoolInterface(type, version).getFunction(selector) !== null)
-    .map(([, to]) => ({ from: getAddress(poolConfigManager), to, data }))
+    .map(([, to]) => ({ from, to, data }))
+}
+
+/** The ConnectionPolicyStore setter each PCM pause function calls, with its arguments. */
+const PAUSE_STORE_CALLS: Record<
+  string,
+  { setter: string; args: (pcmArgs: unknown[]) => unknown[] }
+> = {
+  pauseGlobally: { setter: 'setGlobalPause', args: () => [true] },
+  unpauseGlobally: { setter: 'setGlobalPause', args: () => [false] },
+  pauseTokens: {
+    setter: 'setTokenPause',
+    args: ([tokens, direction]) => [tokens, direction, true],
+  },
+  unpauseTokens: {
+    setter: 'setTokenPause',
+    args: ([tokens, direction]) => [tokens, direction, false],
+  },
+  pauseChains: {
+    setter: 'setChainPause',
+    args: ([chains, direction]) => [chains, direction, true],
+  },
+  unpauseChains: {
+    setter: 'setChainPause',
+    args: ([chains, direction]) => [chains, direction, false],
+  },
 }
 
 /**

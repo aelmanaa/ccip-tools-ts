@@ -14,11 +14,7 @@ import { policyKey } from '../projection.ts'
 import { parseMultiTokenPoolRateLimits } from '../record-values.ts'
 import type { PolicyRecordKey, PolicyRemovalOptions, RateLimitPolicyRecord } from '../records.ts'
 import type { MultiTokenPoolWriteGuards, PoolConfigManagerWriteParams } from '../write-operation.ts'
-import {
-  type RecordWriteContext,
-  PolicyRecordWriteOperation,
-  policyNamesOf,
-} from './record-writes.ts'
+import { type RecordWriteContext, PolicyRecordWriteOperation } from './record-writes.ts'
 
 /** Parameters of `applyMultiTokenPoolRateLimitPolicyConfigUpdates`. Records are removed, then policies, then records set. */
 export type ApplyMultiTokenPoolRateLimitPolicyConfigUpdatesParams = PoolConfigManagerWriteParams &
@@ -78,10 +74,10 @@ export class ApplyMultiTokenPoolRateLimitPolicyConfigUpdates extends PolicyRecor
       recordsToSet = [],
       policiesToRemove = [],
     }: ApplyMultiTokenPoolRateLimitPolicyConfigUpdatesParams,
-    { address, version, blockTag }: RecordWriteContext,
+    { address, version, blockTag, policyNames }: RecordWriteContext,
   ): Promise<void> {
     const pcm = poolConfigManagerContract(chain, address, version)
-    const names = policyNamesOf(await pcm.getPolicyNames({ blockTag }), 'rateLimit')
+    const names = policyNames.rateLimit
     const removed = new Set(policiesToRemove.map((n) => policyKey(n, 'policyName')))
     for (const [i, r] of recordsToSet.entries()) {
       const word = policyKey(r.policyName, `recordsToSet[${i}].policyName`)

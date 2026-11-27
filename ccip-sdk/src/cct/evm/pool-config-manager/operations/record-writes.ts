@@ -16,19 +16,16 @@ import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
-  poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateArray, validateUint64 } from '../../validate.ts'
 import {
   type MultiTokenPoolLaneKey,
   type PolicyName,
-  type PoolConfigManagerReader,
   encodePolicyName,
   toAbiLaneKey,
   validateLaneKeys,
 } from '../contracts.ts'
 import { type MultiTokenPoolRecordState, policyKey } from '../projection.ts'
-import { readMultiTokenPoolRecordState } from '../record-state.ts'
 import type { PolicyRecordKey, PolicyRemovalOptions } from '../records.ts'
 import {
   type MultiTokenPoolWriteGuards,
@@ -108,14 +105,12 @@ export function validatePolicyRecordWrite(
  * (`PolicyInUse`) or keeps records after the removals (`PolicyHasRecords`).
  * @internal
  */
-export async function checkPolicyRecordWrite(
+export function checkPolicyRecordWrite(
   operation: string,
-  pcm: PoolConfigManagerReader,
-  state: MultiTokenPoolRecordState,
+  { state, policyNames }: Pick<RecordWriteContext, 'state' | 'policyNames'>,
   type: LaneRecordType,
   { recordsToRemove = [], policiesToRemove = [] }: PolicyRecordWrite,
-  blockTag: number,
-): Promise<void> {
+): void {
   const records = state.policies[type] as readonly PolicyRecordKey[]
   const key = (k: PolicyRecordKey) =>
     `${policyKey(k.policyName, 'policyName')}:${k.remoteChainSelector}`
@@ -130,7 +125,7 @@ export async function checkPolicyRecordWrite(
       )
   })
   if (!policiesToRemove.length) return
-  const names = policyNamesOf(await pcm.getPolicyNames({ blockTag }), type)
+  const names = policyNames[type]
   const removed = new Set(recordsToRemove.map(key))
   policiesToRemove.forEach((name, i) => {
     const word = policyKey(name, `policiesToRemove[${i}]`)
@@ -255,11 +250,8 @@ export type PolicyRecordWriteParams<R extends PolicyRecordKey> = PoolConfigManag
     recordsToSet?: R[]
   }
 
-/** The context a record write's own state checks get. @internal */
-export type RecordWriteContext = PoolConfigManagerWriteContext & {
-  /** The PCM's stored records at the build block. */
-  state: MultiTokenPoolRecordState
-}
+/** The context a record write's own state checks get: the write context. @internal */
+export type RecordWriteContext = PoolConfigManagerWriteContext
 
 /**
  * Base of the policy record writes (`apply<Type>PolicyConfigUpdates`): the lists are validated before
@@ -318,12 +310,11 @@ export abstract class PolicyRecordWriteOperation<
   protected async encode(
     chain: EVMChain,
     params: P,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
+    ctx: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
-    const { state } = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
-    const pcm = poolConfigManagerContract(chain, address, version)
-    await checkPolicyRecordWrite(this.name, pcm, state, this.recordType, params, blockTag)
-    await this.checkState(chain, params, { address, version, blockTag, state })
+    const { state, version } = ctx
+    checkPolicyRecordWrite(this.name, ctx, this.recordType, params)
+    await this.checkState(chain, params, ctx)
     const word = (name: PolicyName, at: string) => encodePolicyName(this.name, at, name)
     const remove = (params.recordsToRemove ?? []).map((k, i) => [
       word(k.policyName, `recordsToRemove[${i}].policyName`),
@@ -413,11 +404,11 @@ export abstract class InlineRecordWriteOperation<
   protected async encode(
     chain: EVMChain,
     params: P,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
+    ctx: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
-    const { state } = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
+    const { state, version } = ctx
     checkInlineRecordWrite(this.name, state, this.recordType, params)
-    await this.checkState(chain, params, { address, version, blockTag, state })
+    await this.checkState(chain, params, ctx)
     const data = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version).encodeFunctionData(
       this.functionName,
       [

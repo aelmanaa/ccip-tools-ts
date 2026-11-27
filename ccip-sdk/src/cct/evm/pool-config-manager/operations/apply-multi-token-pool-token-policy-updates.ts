@@ -10,7 +10,6 @@ import { ZeroHash, getAddress } from 'ethers'
 import type { LaneRecordType } from '../../../../chain.ts'
 import type { EVMChain } from '../../../../evm/index.ts'
 import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
-import { resultToObject } from '../../../../evm/types.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import {
   type PoolConfigManagerRole,
@@ -21,10 +20,8 @@ import {
   poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
 import { validateAddress, validateArray, validateOneOf } from '../../validate.ts'
-import { type PolicyName, decodeTokenProfile, encodePolicyName } from '../contracts.ts'
-import { decodeTokenPolicies } from '../decode.ts'
-import { policyKey } from '../projection.ts'
-import { readMultiTokenPoolRecordState } from '../record-state.ts'
+import { type PolicyName, encodePolicyName } from '../contracts.ts'
+import { policyKey, tokenRecordsOf } from '../projection.ts'
 import {
   type MultiTokenPoolWriteGuards,
   type PoolConfigManagerWrite,
@@ -107,7 +104,7 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
   protected async encode(
     chain: EVMChain,
     { recordType, assignments }: ApplyMultiTokenPoolTokenPolicyUpdatesParams,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
+    { address, version, blockTag, state, policyNames }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
     const iface = getMultiTokenPoolInterface(POOL_CONFIG_MANAGER_TYPE, version)
     const fn =
@@ -122,26 +119,17 @@ export class ApplyMultiTokenPoolTokenPolicyUpdates extends PoolConfigManagerWrit
       ]),
     ])
     const pcm = poolConfigManagerContract(chain, address, version)
-    const [configs, lists, { state }] = await Promise.all([
-      pcm.getTokenConfigBatch(tokens, { blockTag }),
-      pcm.getPolicyNames({ blockTag }),
-      readMultiTokenPoolRecordState(chain, address, version, { tokenAddresses: tokens, blockTag }),
-    ])
-    const names = new Set(
-      ((lists[LANE_RECORD_TYPES.indexOf(recordType)] ?? []) as string[]).map((w) =>
-        w.toLowerCase(),
-      ),
-    )
+    const names = policyNames[recordType]
     const context = { recordType }
     const current = await Promise.all(
       assignments.map(async (a, i) => {
         const at = `assignments[${i}]`
         const token = tokens[i]!
-        const raw = resultToObject(configs[i]!)
-        const profile = decodeTokenProfile(token, raw, address)
-        const old = decodeTokenPolicies(raw)[recordType]
+        const records = tokenRecordsOf(state, token)
+        const profile = records?.profile
+        const old = records?.policies[recordType] ?? null
         // the stores' own refusals, named before the eth_call would
-        if (!profile.isRegistered)
+        if (!profile?.isRegistered)
           throw new CCTParamsInvalidError(
             this.name,
             `${at}.tokenAddress`,

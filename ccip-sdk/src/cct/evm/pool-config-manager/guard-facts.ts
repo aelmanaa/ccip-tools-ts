@@ -76,6 +76,8 @@ export type ReadMultiTokenPoolGuardFactsInput = {
    * changes (`null`: none); others read the provider stored now.
    */
   providerOverrides?: ReadonlyMap<string, string | null>
+  /** The provider each token stores now, from the state already read (others are read). */
+  storedProviders?: ReadonlyMap<string, string | null>
 }
 
 /** A remote family the SDK reads the remote side of (attestations are refused for it). */
@@ -194,6 +196,7 @@ async function readProviderData({
   blockTag,
   requests,
   providerOverrides,
+  storedProviders,
 }: ReadMultiTokenPoolGuardFactsInput): Promise<ProvidedData> {
   const out: ProvidedData = {
     providers: new Map(),
@@ -203,7 +206,10 @@ async function readProviderData({
   }
   const tokens = [...new Set(requests.providerLanes.map((l) => getAddress(l.tokenAddress)))]
   if (!tokens.length) return out
-  const stored = tokens.filter((t) => !providerOverrides?.has(t))
+  const stored = tokens.filter((t) => !providerOverrides?.has(t) && !storedProviders?.has(t))
+  for (const t of tokens)
+    if (!providerOverrides?.has(t) && storedProviders?.has(t))
+      out.providers.set(t, storedProviders.get(t) ?? null)
   const configs = stored.length
     ? await poolConfigManagerContract(chain, poolConfigManager, version).getTokenConfigBatch(
         stored,

@@ -15,13 +15,11 @@ import {
   type PoolConfigManagerRole,
   POOL_CONFIG_MANAGER_TYPE,
   getMultiTokenPoolInterface,
-  poolConfigManagerContract,
 } from '../../multi-token-pool/contracts.ts'
 import { isNotCcipContract } from '../../query.ts'
 import { assertUnique, validateAddress, validateArray } from '../../validate.ts'
 import { type PolicyName, encodePolicyName } from '../contracts.ts'
 import { policyKey } from '../projection.ts'
-import { readMultiTokenPoolRecordState } from '../record-state.ts'
 import {
   type MultiTokenPoolWriteGuards,
   type PoolConfigManagerWrite,
@@ -29,7 +27,6 @@ import {
   type PoolConfigManagerWriteParams,
   PoolConfigManagerWriteOperation,
 } from '../write-operation.ts'
-import { policyNamesOf } from './record-writes.ts'
 
 /** A remote token address provider assignment. */
 export type MultiTokenPoolRemoteTokenAddressProviderUpdate = {
@@ -95,14 +92,9 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
   protected async encode(
     chain: EVMChain,
     { updates }: ApplyMultiTokenPoolRemoteTokenAddressProviderUpdatesParams,
-    { address, version, blockTag }: PoolConfigManagerWriteContext,
+    { version, blockTag, state, policyNames }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
-    const pcm = poolConfigManagerContract(chain, address, version)
-    const [{ state }, lists] = await Promise.all([
-      readMultiTokenPoolRecordState(chain, address, version, { blockTag }),
-      pcm.getPolicyNames({ blockTag }),
-    ])
-    const names = policyNamesOf(lists, 'connection')
+    const names = policyNames.connection
     const context = { recordType: 'connection' }
     for (const [i, u] of updates.entries()) {
       const at = `updates[${i}]`

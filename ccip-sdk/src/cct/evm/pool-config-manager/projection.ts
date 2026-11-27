@@ -31,7 +31,12 @@ import type { LaneRecordType, TokenTransferFeeConfig, TransferDirection } from '
 import { LANE_RECORD_TYPES } from '../../../evm/multi-token-pool.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import type { RateLimitConfig } from '../token-pool/rate-limit.ts'
-import { type MultiTokenPoolLaneKey, type PolicyName, encodePolicyName } from './contracts.ts'
+import {
+  type MultiTokenPoolLaneKey,
+  type MultiTokenPoolTokenProfileFields,
+  type PolicyName,
+  encodePolicyName,
+} from './contracts.ts'
 import type { GetMultiTokenPoolInlineConfigsResult } from './operations/get-multi-token-pool-inline-configs.ts'
 import type { MultiTokenPoolLaneConnection } from './operations/get-multi-token-pool-lane-connections.ts'
 import type { MultiTokenPoolRecordLevel } from './operations/get-multi-token-pool-lane-record-levels.ts'
@@ -72,6 +77,8 @@ export type MultiTokenPoolTokenRecords = {
   policies: Record<LaneRecordType, PolicyName | null>
   /** The token's inline records, as `getMultiTokenPoolInlineConfigs` reads them. */
   inline: Required<GetMultiTokenPoolInlineConfigsResult>
+  /** The token's stored profile, when the state was read (a projection-added token has none). */
+  profile?: MultiTokenPoolTokenProfileFields
 }
 
 /**
@@ -853,4 +860,26 @@ export function multiTokenPoolChangeChains(
     if (chain !== undefined && chain !== 0n) chains.add(chain)
   }
   return [...chains]
+}
+
+/** A token's records in a state (by checksummed address), or `undefined`. @internal */
+export function tokenRecordsOf(
+  state: Pick<MultiTokenPoolRecordState, 'tokens'>,
+  tokenAddress: string,
+): MultiTokenPoolTokenRecords | undefined {
+  const a = getAddress(tokenAddress)
+  return state.tokens.find((t) => getAddress(t.tokenAddress) === a)
+}
+
+/** A lane's inline record of one type in a state, or `undefined`. @internal */
+export function inlineRecordOf<T extends LaneRecordType>(
+  state: Pick<MultiTokenPoolRecordState, 'tokens'>,
+  type: T,
+  lane: MultiTokenPoolLaneKey,
+): MultiTokenPoolTokenRecords['inline'][T][number] | undefined {
+  return (
+    tokenRecordsOf(state, lane.tokenAddress)?.inline[type] as
+      | MultiTokenPoolTokenRecords['inline'][T]
+      | undefined
+  )?.find((r) => r.remoteChainSelector === lane.remoteChainSelector)
 }

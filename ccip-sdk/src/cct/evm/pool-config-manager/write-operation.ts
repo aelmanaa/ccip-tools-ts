@@ -35,6 +35,10 @@ import {
   validatePoolConfigManagerTarget,
 } from './contracts.ts'
 import { type MultiTokenPoolSimulatedFrom, runMultiTokenPoolGuards } from './guard-run.ts'
+import {
+  type MultiTokenPoolRecordStateRead,
+  readMultiTokenPoolRecordState,
+} from './record-state.ts'
 
 export type { MultiTokenPoolSimulatedFrom } from './guard-run.ts'
 export type { MultiTokenPoolGuardOptions } from './guards.ts'
@@ -93,8 +97,15 @@ export type MultiTokenPoolTransactionResult = TransactionResult &
     'projectionVerified' | 'simulatedFrom' | 'affectedLanes' | 'goingLive' | 'warnings' | 'snapshot'
   >
 
-/** A resolved PCM and the block a write is built at. @internal */
-export type PoolConfigManagerWriteContext = {
+/**
+ * A resolved PCM, the block a write is built at, and the PCM's stored records read once at that
+ * block (the op and the guard share the read).
+ * @internal
+ */
+export type PoolConfigManagerWriteContext = Pick<
+  MultiTokenPoolRecordStateRead,
+  'state' | 'staticConfig' | 'policyNames'
+> & {
   /** The PCM. */
   address: string
   /** Its version. */
@@ -138,6 +149,14 @@ export abstract class PoolConfigManagerWriteOperation<
     return false
   }
 
+  /**
+   * Whether the lane rules judge this write. `false` only for a pause, the emergency action: it is
+   * still gated, simulated and sealed. Defaults to `true`.
+   */
+  protected judgesLanes(_params: Parsed): boolean {
+    return true
+  }
+
   /** Context every refusal of this op carries (e.g. a merged op's kind). */
   protected errorContext(_params: Parsed): Record<string, unknown> | undefined {
     return undefined
@@ -159,10 +178,15 @@ export abstract class PoolConfigManagerWriteOperation<
     const blockTag = await chain.provider.getBlockNumber()
     if (params.sender !== undefined)
       await this.#preflightGate(chain, address, version, params, params.sender, blockTag)
+    // the stored records, read once: the op checks and encodes from them, the guard judges on them
+    const read = await readMultiTokenPoolRecordState(chain, address, version, { blockTag })
     const { data, expected } = await this.encode(chain, params, {
       address,
       version,
       blockTag,
+      state: read.state,
+      staticConfig: read.staticConfig,
+      policyNames: read.policyNames,
     })
     const context = this.errorContext(params)
     const result = await runMultiTokenPoolGuards({
@@ -172,11 +196,13 @@ export abstract class PoolConfigManagerWriteOperation<
       version,
       data,
       blockTag,
+      stateRead: read,
       ...(params.poolAddress !== undefined && { poolAddress: params.poolAddress }),
       ...(params.sender !== undefined && { sender: params.sender }),
       ...(expected && { expected }),
       ...(context && { errorContext: context }),
       ...(this.makesLive(params) && { makesLive: true }),
+      ...(!this.judgesLanes(params) && { judgeLanes: false }),
       ...(params.expectedSnapshot && { expectedSnapshot: params.expectedSnapshot }),
       ...(params.getChain && { getChain: params.getChain }),
       ...(params.remoteAttestations && { remoteAttestations: params.remoteAttestations }),

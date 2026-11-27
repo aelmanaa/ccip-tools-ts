@@ -8,10 +8,10 @@ import { describe, it } from 'node:test'
 
 import { encodeBytes32String, getAddress } from 'ethers'
 
+import type { LaneRecordType } from '../../../../chain.ts'
 import { LANE_RECORD_TYPES } from '../../../../evm/multi-token-pool.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { POOL, stackChain } from '../../multi-token-pool/stack.test.helpers.ts'
-import type { PoolConfigManagerReader } from '../contracts.ts'
 import type { MultiTokenPoolRecordState } from '../projection.ts'
 import { ApplyMultiTokenPoolConnectionPolicyConfigUpdates } from './apply-multi-token-pool-connection-policy-config-updates.ts'
 import { ApplyMultiTokenPoolInlineConnectionConfigUpdates } from './apply-multi-token-pool-inline-connection-config-updates.ts'
@@ -234,54 +234,46 @@ function state(): MultiTokenPoolRecordState {
   } as unknown as MultiTokenPoolRecordState
 }
 
-const pcm = (names: string[]) =>
-  ({
-    getPolicyNames: async () => [names.map((n) => encodeBytes32String(n)), [], [], [], [], []],
-  }) as unknown as PoolConfigManagerReader
+/** The record-write context a state check reads: the state, and the connection policy names. */
+const ctx = (state: MultiTokenPoolRecordState, connection: string[]) => {
+  const policyNames = {} as Record<LaneRecordType, ReadonlySet<string>>
+  for (const t of LANE_RECORD_TYPES) policyNames[t] = new Set<string>()
+  policyNames.connection = new Set(connection.map((n) => encodeBytes32String(n).toLowerCase()))
+  return { state, policyNames }
+}
 
 describe('record-write state checks (cct/evm pool-config-manager)', () => {
   const op = 'test'
   const refused = (param: string, pattern: RegExp) => (e: unknown) =>
     e instanceof CCTParamsInvalidError && e.context.param === param && pattern.test(e.message)
 
-  it('names the policy bookkeeping refusals: missing record, missing policy, in use, records left', async () => {
+  it('names the policy bookkeeping refusals: missing record, missing policy, in use, records left', () => {
     const s = state()
-    await assert.rejects(
-      checkPolicyRecordWrite(
-        op,
-        pcm(['p']),
-        s,
-        'connection',
-        { recordsToRemove: [{ policyName: 'p', remoteChainSelector: 1n }] },
-        1,
-      ),
+    assert.throws(
+      () =>
+        checkPolicyRecordWrite(op, ctx(s, ['p']), 'connection', {
+          recordsToRemove: [{ policyName: 'p', remoteChainSelector: 1n }],
+        }),
       refused('recordsToRemove[0]', /PolicyRecordNotFound/),
     )
-    await assert.rejects(
-      checkPolicyRecordWrite(op, pcm(['p']), s, 'connection', { policiesToRemove: ['q'] }, 1),
+    assert.throws(
+      () => checkPolicyRecordWrite(op, ctx(s, ['p']), 'connection', { policiesToRemove: ['q'] }),
       refused('policiesToRemove[0]', /PolicyNotFound/),
     )
-    await assert.rejects(
-      checkPolicyRecordWrite(op, pcm(['p']), s, 'connection', { policiesToRemove: ['p'] }, 1),
+    assert.throws(
+      () => checkPolicyRecordWrite(op, ctx(s, ['p']), 'connection', { policiesToRemove: ['p'] }),
       refused('policiesToRemove[0]', /PolicyInUse/),
     )
     // with no token on it, the records left still block the removal, unless removed in the same call
     s.tokens[0]!.policies.connection = null
-    await assert.rejects(
-      checkPolicyRecordWrite(op, pcm(['p']), s, 'connection', { policiesToRemove: ['p'] }, 1),
+    assert.throws(
+      () => checkPolicyRecordWrite(op, ctx(s, ['p']), 'connection', { policiesToRemove: ['p'] }),
       refused('policiesToRemove[0]', /PolicyHasRecords/),
     )
-    await checkPolicyRecordWrite(
-      op,
-      pcm(['p']),
-      s,
-      'connection',
-      {
-        recordsToRemove: [{ policyName: 'p', remoteChainSelector: FUJI }],
-        policiesToRemove: ['p'],
-      },
-      1,
-    )
+    checkPolicyRecordWrite(op, ctx(s, ['p']), 'connection', {
+      recordsToRemove: [{ policyName: 'p', remoteChainSelector: FUJI }],
+      policiesToRemove: ['p'],
+    })
   })
 
   it('names the inline bookkeeping refusals: missing record, unregistered token', () => {
