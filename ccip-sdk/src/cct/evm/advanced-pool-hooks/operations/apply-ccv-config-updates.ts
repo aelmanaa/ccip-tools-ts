@@ -119,7 +119,8 @@ export class ApplyCCVConfigUpdates extends EVMOperation<ApplyCCVConfigUpdatesPar
         redirectMultiTokenPool(
           err,
           'applyMultiTokenPoolInlineSecurityConfigUpdates',
-          'set: [{ tokenAddress, remoteChainSelector, securityConfig: { outboundCCVs, inboundCCVs, hook } }] per lane, since a multi-token pool keeps its CCVs in the PoolConfigManager, not in AdvancedPoolHooks; for a policy every token shares, applyMultiTokenPoolSecurityPolicyConfigUpdates',
+          "set: [{ tokenAddress, remoteChainSelector, securityConfig: { outboundCCVs, inboundCCVs, hook } }] per lane, since a multi-token pool keeps its CCVs in the PoolConfigManager, not in AdvancedPoolHooks. It has no threshold CCVs: thresholdOutboundCCVs and thresholdInboundCCVs have no counterpart. A set replaces the lane's whole record, the hook included (hook: null removes one). For a policy every token shares, applyMultiTokenPoolSecurityPolicyConfigUpdates",
+          { alsoHooks: true },
         ),
     )
     if (sender !== undefined) await assertAdvancedPoolHooksOwner(this.name, chain, hooks, sender)

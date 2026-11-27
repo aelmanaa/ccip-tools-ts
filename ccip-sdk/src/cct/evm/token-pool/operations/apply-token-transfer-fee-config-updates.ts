@@ -176,7 +176,7 @@ export class ApplyTokenTransferFeeConfigUpdates extends EVMOperation<
         redirectMultiTokenPool(
           err,
           'applyMultiTokenPoolInlineFeeConfigUpdates and applyMultiTokenPoolInlineDestOverheadConfigUpdates',
-          'two records, two transactions: the fees in set: [{ tokenAddress, remoteChainSelector, feeConfig }], the gas and bytes in set: [{ tokenAddress, remoteChainSelector, destOverheadConfig }]; a disable is a remove: [{ tokenAddress, remoteChainSelector }] on each',
+          "two records, two transactions: the fees in set: [{ tokenAddress, remoteChainSelector, feeConfig }], the gas and bytes in set: [{ tokenAddress, remoteChainSelector, destOverheadConfig }]. There is no disable: a lane must keep both records, and removing an inline record falls back to the token's fee or overhead policy",
         ),
     )
     const encode = resolveEncoder(this.encoders, version, this.name)
