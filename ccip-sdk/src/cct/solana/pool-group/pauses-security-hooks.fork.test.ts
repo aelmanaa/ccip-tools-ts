@@ -17,7 +17,7 @@
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
 
-import { BN, Wallet as AnchorWallet } from '@coral-xyz/anchor'
+import { Wallet as AnchorWallet } from '@coral-xyz/anchor'
 import { Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram } from '@solana/web3.js'
 
 import '../../../index.ts'
@@ -36,10 +36,6 @@ import { SolanaChain } from '../../../solana/index.ts'
 import { CCTParamsInvalidError } from '../../errors.ts'
 import { SolanaTokenManager } from '../index.ts'
 import { deriveTokenPoolConfigPda } from '../programs/token-pool.ts'
-import { poolGroupPdas } from './accounts.ts'
-import { isForkRouterArtifact, judgeAndLand } from './fork-make-live.test.helpers.ts'
-import { eventAccounts } from './operations/write-common.ts'
-import { createPoolGroupProgram } from './program.ts'
 
 const PROGRAM = '22P6h4QV5wswBX63KCncFGctC9dyVRMjykBBDdhwXjg7'
 const LINKED_GROUP = 'BDiSFAren1qkqK5BjT3JpFNbbTbawoC6YxVghrAwDGbt'
@@ -60,7 +56,6 @@ describe(
   () => {
     const fork: { surfpool?: SurfpoolInstance; connection?: SolanaChain['connection'] } = {}
     let cct: SolanaTokenManager
-    let forkChain: SolanaChain
     let getChain: ChainGetter
     const [owner, other] = [Keypair.generate(), Keypair.generate()]
     const wallet = (k = owner) => new AnchorWallet(k)
@@ -92,7 +87,6 @@ describe(
         apiClient: null,
       })
       cct = SolanaTokenManager.fromChain(chain)
-      forkChain = chain
       const sepolia = await EVMChain.fromUrl(await reachableRpcEndpoint('RPC_SEPOLIA'))
       getChain = async (selector) => {
         if (selector === SEPOLIA) return sepolia
@@ -435,47 +429,8 @@ describe(
         const outcome = await liftOrRefused(lane, () =>
           cct.setPoolGroupChainPause({ ...c, pausedOutbound: false, getChain, wallet: wallet() }),
         )
-        if (outcome === 'refused') {
-          // the BDiS lanes are registered and clean on Devnet; on the fork the Router cannot run,
-          // so the only refusals left must be its artifacts: judge the op's own instruction with
-          // the real check minus them, and land it (S4 review M6)
-          const { findings } = await cct.checkMultiTokenPoolLane({
-            ...lane,
-            poolAddress: PROGRAM,
-            getChain,
-          })
-          const real = findings.filter(
-            (f) => f.severity === 'error' && f.check !== 'LANE_PAUSED' && !isForkRouterArtifact(f),
-          )
-          assert.deepEqual(real, [], 'only fork artifacts refuse the lift')
-          const program = new PublicKey(PROGRAM)
-          const group = new PublicKey(LINKED_GROUP)
-          const ix = await createPoolGroupProgram(forkChain, program, owner.publicKey)
-            .methods.setGroupChainPause({
-              remoteChainSelector: new BN(SEPOLIA.toString()),
-              pausedOutbound: false,
-              pausedInbound: (await cct.getPoolGroupChain({ ...g, remoteChainSelector: SEPOLIA }))
-                .pausedInbound,
-            })
-            .accountsStrict({
-              group,
-              groupChainPolicy: poolGroupPdas.groupChain(program, group, SEPOLIA),
-              authority: owner.publicKey,
-              ...eventAccounts(program),
-            })
-            .instruction()
-          const { judgement } = await judgeAndLand({
-            chain: forkChain,
-            program,
-            group,
-            signer: owner,
-            instructions: [ix],
-            getChain,
-          })
-          // live after, from the post-state overlay: the paused pre-state would report LANE_PAUSED
-          assert.ok(judgement.goingLive.some((l) => l.tokenAddress === lane.tokenAddress))
-          assert.ok(!judgement.findings.some((f) => f.check === 'LANE_PAUSED'))
-        }
+        // the real lane check, unmodified: a refusal fails the test with its codes
+        assert.equal(outcome, 'landed', 'the SDK lift was refused by the lane check')
         assert.equal(
           (await cct.getPoolGroupChain({ ...g, remoteChainSelector: SEPOLIA })).pausedOutbound,
           false,
