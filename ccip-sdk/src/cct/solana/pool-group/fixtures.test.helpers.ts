@@ -219,6 +219,12 @@ export type GroupChainOpts = {
   outboundCapacity?: number
   /** A pending CCV set of the record's SECURITY. */
   pending?: { outbound: PublicKey[]; inbound: PublicKey[]; epoch: bigint; activatesAt: bigint }
+  /** The record's SECURITY hooks. */
+  hook?: {
+    allowlist?: PublicKey
+    blocklist?: PublicKey
+    engine?: { program: PublicKey; statics: PublicKey[]; onSend: boolean; onReceive: boolean }
+  }
 }
 
 export function groupChainData(opts: GroupChainOpts = {}): Buffer {
@@ -250,6 +256,22 @@ export function groupChainData(opts: GroupChainOpts = {}): Buffer {
       rate: bn(1),
     })
     policy.security.current.outbound = opts.ccvs ?? []
+    if (opts.hook)
+      Object.assign(policy.security, {
+        hook: {
+          allowlist: opts.hook.allowlist ?? null,
+          blocklist: opts.hook.blocklist ?? null,
+          policyEngine: opts.hook.engine
+            ? {
+                program: opts.hook.engine.program,
+                staticAccounts: opts.hook.engine.statics,
+                writableStatics: 0,
+                onSend: opts.hook.engine.onSend,
+                onReceive: opts.hook.engine.onReceive,
+              }
+            : null,
+        },
+      })
     policy.connection.poolDataFormat = opts.format ? { long: {} } : { legacy32: {} }
     policy.connection.remotePools = (opts.remotePools ?? [POLICY_POOL]).map((pool) => ({
       address: { address: hex(pool) },

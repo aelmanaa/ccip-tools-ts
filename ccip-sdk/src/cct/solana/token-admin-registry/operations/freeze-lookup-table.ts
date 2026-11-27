@@ -19,6 +19,11 @@ type FreezeLookupTableParams = {
   lookupTableAddress: string
   /** ALT authority. Defaults to payer for unsigned generation and wallet public key for execute. */
   authority?: string
+  /**
+   * Must be `true`: a frozen table can never be extended or closed again, so the caller confirms it
+   * (as EVM's permanent renounce does).
+   */
+  confirmPermanentFreeze: true
 }
 
 /** Parameters for unsigned Solana lookup table freezing. */
@@ -51,6 +56,14 @@ export class FreezeLookupTable extends SolanaOperation<
   protected override prepare(
     params: GenerateFreezeLookupTableParams,
   ): ParsedFreezeLookupTableParams {
+    // checked at runtime too: a JavaScript caller may omit it
+    const confirmed: unknown = params.confirmPermanentFreeze
+    if (confirmed !== true)
+      throw new CCTParamsInvalidError(
+        this.name,
+        'confirmPermanentFreeze',
+        'freezing is permanent (the table can never be extended or closed again): pass confirmPermanentFreeze: true',
+      )
     const payer = parsePublicKey(this.name, 'payer', params.payer)
     return {
       payer,

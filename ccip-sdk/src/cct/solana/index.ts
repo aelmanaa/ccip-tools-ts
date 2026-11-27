@@ -4767,8 +4767,9 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   /**
    * Builds the unsigned `set_group_chain_pause` transactions: sets one or both direction flags of a
    * chain record; an omitted direction keeps its flag.
-   * @remarks The snapshot protects a pause set by someone else meanwhile from being lifted by a
-   * stale proposal. Clearing a flag makes lanes live, so the op runs the lane check on every lane
+   * @remarks The instruction writes both directions: with `executor: 'squads-v4'` give both
+   * (an omitted one is refused), and run `checkPoolGroupSnapshot` before executing, which reports a
+   * flag set by someone else meanwhile. Clearing a flag makes lanes live, so the op runs the lane check on every lane
    * it makes live (needs `getChain`, no attestations) and refuses an error finding; `goingLive` and
    * `findings` are returned. Signer: owner or pauser to set; owner or unpauser to clear. Each
    * transaction lists `requiredSigners` and carries its compute estimate.
@@ -4797,8 +4798,9 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
   /**
    * Signs and sends `set_group_chain_pause` with `opts.wallet` as payer and default authority: sets
    * one or both direction flags of a chain record; an omitted direction keeps its flag.
-   * @remarks The snapshot protects a pause set by someone else meanwhile from being lifted by a
-   * stale proposal. Clearing a flag makes lanes live, so the op runs the lane check on every lane
+   * @remarks The instruction writes both directions: with `executor: 'squads-v4'` give both
+   * (an omitted one is refused), and run `checkPoolGroupSnapshot` before executing, which reports a
+   * flag set by someone else meanwhile. Clearing a flag makes lanes live, so the op runs the lane check on every lane
    * it makes live (needs `getChain`, no attestations) and refuses an error finding; `goingLive` and
    * `findings` are returned. Re-reads merged and snapshotted state right before sending.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
@@ -4892,7 +4894,9 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * Builds the unsigned `schedule_group_ccvs` transactions: schedules a CCV set on a SECURITY
    * target.
    * @remarks Non-empty lists keep `'default'` unless dropping is allowed (F2). With the
-   * `'squads-v4'` executor, `activatesAt` or `approvalWindowSeconds` is required. A replaced
+   * `'squads-v4'` executor, `activatesAt` or `approvalWindowSeconds` is required; the time is
+   * checked at execution, so a proposal executed after the window fails (`CcvActivationTooSoon`)
+   * and must be rebuilt. A replaced
    * pending set is reported in `followUps` (re-sync). Signer: owner or security admin. Each
    * transaction lists `requiredSigners` and carries its compute estimate.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
@@ -4919,7 +4923,9 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * Signs and sends `schedule_group_ccvs` with `opts.wallet` as payer and default authority:
    * schedules a CCV set on a SECURITY target.
    * @remarks Non-empty lists keep `'default'` unless dropping is allowed (F2). With the
-   * `'squads-v4'` executor, `activatesAt` or `approvalWindowSeconds` is required. A replaced
+   * `'squads-v4'` executor, `activatesAt` or `approvalWindowSeconds` is required; the time is
+   * checked at execution, so a proposal executed after the window fails (`CcvActivationTooSoon`)
+   * and must be rebuilt. A replaced
    * pending set is reported in `followUps` (re-sync). Re-reads merged and snapshotted state right
    * before sending.
    * @throws {@link CCTParamsInvalidError} if a param is invalid (before any RPC), `authority` does
@@ -5600,7 +5606,11 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * @throws {@link CCTParamsInvalidError} if the table is empty, frozen or not owned by `authority`
    * @example
    * ```ts
-   * const unsigned = await sol.generateUnsignedFreezeLookupTable({ lookupTableAddress, payer })
+   * const unsigned = await sol.generateUnsignedFreezeLookupTable({
+   *   lookupTableAddress,
+   *   payer,
+   *   confirmPermanentFreeze: true,
+   * })
    * ```
    */
   generateUnsignedFreezeLookupTable(
@@ -5618,7 +5628,11 @@ export class SolanaTokenManager extends TokenManager<typeof ChainFamily.Solana> 
    * @throws {@link CCTTxNotConfirmedError} if a transaction is not confirmed in time
    * @example
    * ```ts
-   * const { hash } = await sol.freezeLookupTable({ lookupTableAddress, wallet })
+   * const { hash } = await sol.freezeLookupTable({
+   *   lookupTableAddress,
+   *   wallet,
+   *   confirmPermanentFreeze: true,
+   * })
    * ```
    */
   freezeLookupTable(opts: ExecuteFreezeLookupTableParams): Promise<ExecuteFreezeLookupTableResult> {

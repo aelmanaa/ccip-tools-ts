@@ -341,22 +341,32 @@ export const laneItems = (
   })
 
 /**
- * The CCV-sync follow-ups of the lanes a judgement leaves failing closed, by chain.
+ * The CCV-sync follow-ups of the lanes a judgement leaves failing closed for want of the new CCV
+ * copy (`GroupCcvsNotSynced`), by chain; with `policyId`, the named policy's sync
+ * (`syncPoolGroupPolicyCCVs`), which alone syncs its lanes (security.rs:336-341).
  * @internal
  */
 export function ccvSyncFollowUps(
-  judgement: { failingClosed: PoolGroupLaneKey[] } | null,
+  judgement: {
+    failingClosed: (PoolGroupLaneKey & { code?: string })[]
+  } | null,
   reason: string,
+  policyId?: number,
 ): PoolGroupFollowUp[] {
   const bySelector = new Map<bigint, string[]>()
   for (const l of judgement?.failingClosed ?? [])
-    bySelector.set(l.remoteChainSelector, [
-      ...(bySelector.get(l.remoteChainSelector) ?? []),
-      l.tokenAddress,
-    ])
+    if (l.code === undefined || l.code === 'GroupCcvsNotSynced')
+      bySelector.set(l.remoteChainSelector, [
+        ...(bySelector.get(l.remoteChainSelector) ?? []),
+        l.tokenAddress,
+      ])
   return [...bySelector].map(([remoteChainSelector, tokenAddresses]) => ({
-    operation: 'syncPoolGroupCCVs',
+    operation: policyId === undefined ? 'syncPoolGroupCCVs' : 'syncPoolGroupPolicyCCVs',
     reason,
-    inputs: { remoteChainSelector, tokenAddresses },
+    inputs: {
+      ...(policyId !== undefined && { policyId }),
+      remoteChainSelector,
+      tokenAddresses,
+    },
   }))
 }

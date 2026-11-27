@@ -450,6 +450,8 @@ export type PoolGroupHookList = {
   enabled?: boolean
   /** Entries. */
   entryCount: number
+  /** Allowlists: the pool group it belongs to (blocklists are shared by every group of the program). */
+  poolGroupAddress?: string
 }
 
 /** Params of `getPoolGroupFeatures`. */

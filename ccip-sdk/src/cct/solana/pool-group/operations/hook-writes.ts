@@ -114,13 +114,36 @@ const single = (
   signerRoles: { [authority.toBase58()]: role },
 })
 
-/** A list op is not bound to one pool group, so its proposal is not re-checked. */
+/**
+ * A blocklist creation binds no pool group, so its proposal is not re-checked: rebuild it with
+ * `expectedSnapshot` and the same `blocklistId`.
+ */
 function notRecheckable(operation: string): never {
   throw new CCTParamsInvalidError(
     operation,
     'snapshot',
-    'a list write binds no pool group: its snapshot is checked by rebuilding with expectedSnapshot',
+    'a blocklist creation binds no pool group: check it by rebuilding with expectedSnapshot and the same blocklistId',
   )
+}
+
+/**
+ * The group a list write binds (its snapshot and re-check): an allowlist's pool group, or the list
+ * itself for a blocklist, which every group of the program shares (pass its address as
+ * `poolGroupAddress` to `checkPoolGroupSnapshot`). S4 review m8.
+ */
+const listGroup = (info: { poolGroupAddress?: string }, list: PublicKey) =>
+  info.poolGroupAddress ? new PublicKey(info.poolGroupAddress) : list
+
+/** A list op's re-check reads the list for the group it binds. */
+async function listProposalGroup(
+  operation: string,
+  chain: SolanaChain,
+  ix: TransactionInstruction,
+): Promise<PublicKey | undefined> {
+  const list = ix.keys[0]?.pubkey
+  if (!list) return undefined
+  const info = await readHookList(operation, chain, ix.programId, list, 'transactions')
+  return listGroup(info, list)
 }
 
 /** Parses an optional list id (base58), defaulting to a fresh random key. */
@@ -176,12 +199,24 @@ export class CreatePoolGroupAllowlist extends PoolGroupWriteOperation<
         'authority',
         `${authority.toBase58()} is neither the pool group owner nor its security admin, who sign create_allowlist`,
       )
-    if (extras[0])
+    const extra = { listAddress: allowlist.toBase58(), listId: listId.toBase58() }
+    if (extras[0]) {
+      // a create that landed unconfirmed: the same list (id, admin, enabled) is done (S4 review m4)
+      const list = decodeOwned('allowlist', extras[0], allowlist, ref.program)
+      if (list.admin.equals(parsed.admin) && list.enabled === parsed.enabled)
+        return {
+          group: ref.group,
+          items: [],
+          judge: null,
+          expected: { [`allowlist.${allowlist.toBase58()}.exists`]: true },
+          extra,
+        }
       throw new CCTParamsInvalidError(
         this.name,
         'listId',
-        `an allowlist exists at ${allowlist.toBase58()}`,
+        `an allowlist exists at ${allowlist.toBase58()} with another admin or enabled flag`,
       )
+    }
     const ix = await createPoolGroupProgram(chain, ref.program, parsed.payer)
       .methods.createAllowlist({ listId, enabled: parsed.enabled, admin: parsed.admin })
       .accountsStrict({
@@ -197,7 +232,7 @@ export class CreatePoolGroupAllowlist extends PoolGroupWriteOperation<
       items: [single(ix, signerRole(group.owner, authority), authority, allowlist)],
       judge: { scope: 'none' },
       expected: { [`allowlist.${allowlist.toBase58()}.exists`]: false },
-      extra: { listAddress: allowlist.toBase58(), listId: listId.toBase58() },
+      extra,
     }
   }
 
@@ -250,12 +285,23 @@ export class CreatePoolGroupBlocklist extends PoolGroupWriteOperation<
     const creator = parsed.authority
     const blocklist = poolGroupPdas.blocklist(parsed.program, creator, parsed.blocklistId)
     const [existing] = await getMultipleAccountsInfoPaged(chain.connection, [blocklist])
-    if (existing)
+    const extra = { listAddress: blocklist.toBase58(), listId: parsed.blocklistId.toBase58() }
+    if (existing) {
+      // a create that landed unconfirmed: the same list (id, admin) is done (S4 review m4)
+      if (decodeOwned('blocklist', existing, blocklist, parsed.program).admin.equals(parsed.admin))
+        return {
+          group: blocklist,
+          items: [],
+          judge: null,
+          expected: { [`blocklist.${blocklist.toBase58()}.exists`]: true },
+          extra,
+        }
       throw new CCTParamsInvalidError(
         this.name,
         'blocklistId',
-        `a blocklist exists at ${blocklist.toBase58()}`,
+        `a blocklist exists at ${blocklist.toBase58()} with another admin`,
       )
+    }
     const ix = await createPoolGroupProgram(chain, parsed.program, parsed.payer)
       .methods.createBlocklist({ blocklistId: parsed.blocklistId, admin: parsed.admin })
       .accountsStrict({
@@ -270,7 +316,7 @@ export class CreatePoolGroupBlocklist extends PoolGroupWriteOperation<
       items: [single(ix, 'payer', creator, blocklist)],
       judge: { scope: 'none' },
       expected: { [`blocklist.${blocklist.toBase58()}.exists`]: false },
-      extra: { listAddress: blocklist.toBase58(), listId: parsed.blocklistId.toBase58() },
+      extra,
     }
   }
 
@@ -381,7 +427,8 @@ export class ApplyPoolGroupListUpdates extends PoolGroupWriteOperation<
       [`list.${list.toBase58()}.admin`]: info.admin,
       [`list.${list.toBase58()}.entries`]: entries.map((e) => [e.kind, e.pda.toBase58()]),
     }
-    if (!entries.length) return { group: list, items: [], judge: null, expected, extra: {} }
+    const group = listGroup(info, list)
+    if (!entries.length) return { group, items: [], judge: null, expected, extra: {} }
     const client = createPoolGroupProgram(chain, program, parsed.payer)
     const build = (chunk: ListEntry[]) => {
       const a = chunk.filter((e) => e.kind === 'add')
@@ -407,12 +454,40 @@ export class ApplyPoolGroupListUpdates extends PoolGroupWriteOperation<
       signerRoles: { [authority.toBase58()]: 'list-admin' },
       describe: (e) => `the entry ${e.pda.toBase58()}`,
     })
-    return { group: list, items, judge: { scope: 'none' }, judgeEach: true, expected, extra: {} }
+    return { group, items, judge: { scope: 'none' }, judgeEach: true, expected, extra: {} }
   }
 
-  /** Not re-checked (no pool group). */
-  protected fromInstructions(): ParsedListUpdates {
-    return notRecheckable(this.name)
+  /** The list's group (read from the list). */
+  protected override proposalGroupOf(chain: SolanaChain, ix: TransactionInstruction) {
+    return listProposalGroup(this.name, chain, ix)
+  }
+
+  /** The adds and removes a proposal writes (allowlist keys as base58, blocklist bytes as hex). */
+  protected fromInstructions(
+    ref: ParsedPoolGroupRef,
+    instructions: readonly TransactionInstruction[],
+    guardOptions: PoolGroupGuardOptions,
+  ): ParsedListUpdates {
+    const ixs = decodeOne(this.name, instructions, ['applyListUpdates'], false)
+    const first = ixs[0]!
+    const spell = (v: unknown) => {
+      const bytes = Buffer.from(v instanceof Uint8Array ? v : [])
+      return bytes.length === 32 ? new PublicKey(bytes).toBase58() : `0x${bytes.toString('hex')}`
+    }
+    const list = (name: 'adds' | 'removes') =>
+      ixs.flatMap((d) => {
+        const v = field(d.data, 'params', name)
+        return Array.isArray(v) ? v.map(spell) : []
+      })
+    return {
+      payer: first.ix.keys[1]!.pubkey,
+      authority: first.ix.keys[1]!.pubkey,
+      program: ref.program,
+      guardOptions,
+      list: first.ix.keys[0]!.pubkey,
+      add: list('adds'),
+      remove: list('removes'),
+    }
   }
 }
 
@@ -457,11 +532,8 @@ export class TransferPoolGroupListAdmin extends PoolGroupWriteOperation<
     let group: PublicKey | null = null
     let role: 'list-admin' | 'pool-group-owner' = 'list-admin'
     if (info.admin !== authority.toBase58()) {
-      const [account] = await getMultipleAccountsInfoPaged(chain.connection, [list])
-      const owningGroup =
-        info.kind === 'allowlist' && account
-          ? decodeOwned('allowlist', account, list, program).group
-          : undefined
+      // the list was decoded once (S4 review m6)
+      const owningGroup = info.poolGroupAddress ? new PublicKey(info.poolGroupAddress) : undefined
       if (parsed.poolGroup && owningGroup && !parsed.poolGroup.equals(owningGroup))
         throw new CCTParamsInvalidError(
           this.name,
@@ -485,7 +557,7 @@ export class TransferPoolGroupListAdmin extends PoolGroupWriteOperation<
       .accountsStrict({ list, authority, group, ...eventAccounts(program) })
       .instruction()
     return {
-      group: list,
+      group: listGroup(info, list),
       items: [single(ix, role, authority)],
       judge: { scope: 'none' },
       expected: {
@@ -496,9 +568,29 @@ export class TransferPoolGroupListAdmin extends PoolGroupWriteOperation<
     }
   }
 
-  /** Not re-checked (no pool group). */
-  protected fromInstructions(): ParsedListAdmin {
-    return notRecheckable(this.name)
+  /** The list's group (read from the list). */
+  protected override proposalGroupOf(chain: SolanaChain, ix: TransactionInstruction) {
+    return listProposalGroup(this.name, chain, ix)
+  }
+
+  /** The admin a proposal proposes, and the group its owner signs for. */
+  protected fromInstructions(
+    ref: ParsedPoolGroupRef,
+    instructions: readonly TransactionInstruction[],
+    guardOptions: PoolGroupGuardOptions,
+  ): ParsedListAdmin {
+    const [one] = decodeOne(this.name, instructions, ['transferListAdmin'])
+    const authority = one!.ix.keys[1]!.pubkey
+    const poolGroup = one!.ix.keys[2]?.pubkey
+    return {
+      payer: authority,
+      authority,
+      program: ref.program,
+      guardOptions,
+      list: one!.ix.keys[0]!.pubkey,
+      proposedAdmin: keyField(this.name, one!.data, 'params', 'proposedAdmin'),
+      ...(poolGroup && !poolGroup.equals(ref.program) && { poolGroup }),
+    }
   }
 }
 
@@ -541,7 +633,7 @@ export class AcceptPoolGroupListAdmin extends PoolGroupWriteOperation<
       .accountsStrict({ list, authority, group: null, ...eventAccounts(program) })
       .instruction()
     return {
-      group: list,
+      group: listGroup(info, list),
       items: [single(ix, 'list-admin', authority)],
       judge: { scope: 'none' },
       expected: { [`list.${list.toBase58()}.proposedAdmin`]: info.proposedAdmin },
@@ -549,9 +641,26 @@ export class AcceptPoolGroupListAdmin extends PoolGroupWriteOperation<
     }
   }
 
-  /** Not re-checked (no pool group). */
-  protected fromInstructions(): ParsedListAdmin {
-    return notRecheckable(this.name)
+  /** The list's group (read from the list). */
+  protected override proposalGroupOf(chain: SolanaChain, ix: TransactionInstruction) {
+    return listProposalGroup(this.name, chain, ix)
+  }
+
+  /** The proposed admin who accepts. */
+  protected fromInstructions(
+    ref: ParsedPoolGroupRef,
+    instructions: readonly TransactionInstruction[],
+    guardOptions: PoolGroupGuardOptions,
+  ): ParsedListAdmin {
+    const [one] = decodeOne(this.name, instructions, ['acceptListAdmin'])
+    const authority = one!.ix.keys[1]!.pubkey
+    return {
+      payer: authority,
+      authority,
+      program: ref.program,
+      guardOptions,
+      list: one!.ix.keys[0]!.pubkey,
+    }
   }
 }
 

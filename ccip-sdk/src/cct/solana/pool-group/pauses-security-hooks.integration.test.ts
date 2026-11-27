@@ -109,6 +109,7 @@ describe(
     it('freezeLookupTable refuses a table that does not exist', async () => {
       await assert.rejects(
         cct.generateUnsignedFreezeLookupTable({
+          confirmPermanentFreeze: true,
           lookupTableAddress: Keypair.generate().publicKey.toBase58(),
           payer: owner,
         }),

@@ -23,7 +23,7 @@ import {
 import type { SolanaChain } from '../../../../solana/index.ts'
 import { deriveTokenPoolChainConfigV2Pda } from '../../../../solana/token-pool.ts'
 import { getMultipleAccountsInfoPaged } from '../../../../solana/utils.ts'
-import { CCTParamsInvalidError } from '../../../errors.ts'
+import { CCTParamsInvalidError, CCTStateChangedError } from '../../../errors.ts'
 import type { SolanaGenerateParams } from '../../operation.ts'
 import { deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { parsePublicKey } from '../../validate.ts'
@@ -92,6 +92,27 @@ function requirePauseGate(
     )
 }
 
+/**
+ * The instruction writes both direction flags, so an omitted direction is merged from chain state
+ * when the proposal is built. Under Squads the proposal executes later, and could rewrite a flag
+ * someone set meanwhile: both directions must be given explicitly there (the program cannot keep a
+ * flag it is not told; the snapshot check reports a moved flag before execution). S4 review M3.
+ * @throws {@link CCTParamsInvalidError} (param of the omitted direction) under `squads-v4`
+ */
+function requireBothUnderSquads(
+  operation: string,
+  budget: { executor?: string } | undefined,
+  outbound: boolean | undefined,
+  inbound: boolean | undefined,
+): void {
+  if (budget?.executor !== 'squads-v4' || (outbound !== undefined && inbound !== undefined)) return
+  throw new CCTParamsInvalidError(
+    operation,
+    outbound === undefined ? 'pausedOutbound' : 'pausedInbound',
+    'the instruction writes both directions, and a Squads proposal executes later: give both pausedOutbound and pausedInbound, so it never rewrites a flag set after it was built (run checkPoolGroupSnapshot before executing)',
+  )
+}
+
 /** Whether a write clears any flag (so it may make lanes live and is judged). */
 const clears = (current: readonly boolean[], requested: readonly boolean[]) =>
   current.some((c, i) => c && !requested[i])
@@ -149,14 +170,23 @@ export class SetPoolGroupPause extends PoolGroupWriteOperation<
     parsed: ParsedGroupPause,
   ): Promise<PoolGroupWritePlan<object>> {
     const { ref, authority, paused } = parsed
-    const { group } = await readPoolGroup(this.name, chain, ref)
-    const metas = chainRecordMetas(ref.program, ref.group, group.chainSelectors)
-    const { extras } = await readPoolGroup(
+    // one read: the chain list and the record flags come from the same slot (S4 review m7); a
+    // record of a chain the group lists is at its PDA
+    const { group: listed } = await readPoolGroup(this.name, chain, ref)
+    const guess = chainRecordMetas(ref.program, ref.group, listed.chainSelectors)
+    const { group, extras: read } = await readPoolGroup(
       this.name,
       chain,
       ref,
-      metas.map((m) => m.pubkey),
+      guess.map((m) => m.pubkey),
     )
+    const metas = chainRecordMetas(ref.program, ref.group, group.chainSelectors)
+    if (metas.some((m, i) => !guess[i]?.pubkey.equals(m.pubkey)) || metas.length !== guess.length)
+      throw new CCTStateChangedError(
+        this.name,
+        'the pool group chain list moved while it was read: run it again',
+      )
+    const extras = read
     const recordFlags = extras.map((info, i) => {
       if (!info)
         throw new CCTParamsInvalidError(
@@ -239,6 +269,7 @@ export class SetPoolGroupChainPause extends PoolGroupWriteOperation<
         'pausedOutbound',
         'give pausedOutbound, pausedInbound or both',
       )
+    requireBothUnderSquads(this.name, params.budget, pausedOutbound, pausedInbound)
     return {
       ...parseGroupWrite(this.name, params),
       selector: validateSelector(this.name, 'remoteChainSelector', params.remoteChainSelector),
@@ -385,6 +416,7 @@ export class SetPoolGroupLanePause extends PoolGroupWriteOperation<
         'remoteChainSelectors',
         'must be a non-empty array',
       )
+    requireBothUnderSquads(this.name, params.budget, pausedOutbound, pausedInbound)
     const selectors = params.remoteChainSelectors.map((c, i) =>
       validateSelector(this.name, `remoteChainSelectors[${i}]`, c),
     )

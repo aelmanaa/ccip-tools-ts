@@ -46,6 +46,7 @@ import { laneFamilyOf } from '../../remote-address.ts'
 import { deriveTokenPoolSignerPda } from '../programs/token-pool.ts'
 import { readTokenMintAuthority } from '../token-admin-registry/mint-authority.ts'
 import { resolvePoolProgramTypeAndVersion } from '../validate.ts'
+import { checkLaneHooks, sendLockDelta } from './lane-hooks.ts'
 import {
   isUnread,
   laneCcvSync,
@@ -58,7 +59,7 @@ import {
   readSolanaMultiTokenPoolLane,
 } from './multi-token-pool-lane.ts'
 import { isViewRefusal, orThrow } from './operations/common.ts'
-import type { PoolGroupPostState } from './operations/lane.ts'
+import { type PoolGroupPostState, readPoolGroupLaneStates } from './operations/lane.ts'
 import { SOLANA_MAX_ACCOUNT_LOCKS } from './packer.ts'
 import { getPoolGroupProgramFeatures } from './program.ts'
 import {
@@ -533,6 +534,7 @@ async function sendLocks(
   mint: PublicKey,
   selector: bigint,
   lockBudget: CheckMultiTokenPoolLaneParams['lockBudget'],
+  delta = 0,
 ): Promise<number | undefined> {
   const message = buildMessageForDest(
     {
@@ -558,7 +560,7 @@ async function sendLocks(
     ComputeBudgetProgram.programId.toBase58(),
     ...instruction.keys.map((k) => k.pubkey.toBase58()),
   ])
-  return keys.size + (lockBudget?.extraAccounts ?? 0)
+  return keys.size + (lockBudget?.extraAccounts ?? 0) + delta
 }
 
 /** Whether the pool program reads long pool data: pool groups present (the feature probe). */
@@ -667,6 +669,21 @@ export async function checkSolanaMultiTokenPoolLane(
         `the SECURITY record activates a new CCV set at ${sync.failsClosedAt} that the lane has not copied: transfers fail closed from then until it syncs`,
         'security',
       )
+
+    // the SECURITY hooks: the accounts they need, and what they refuse
+    const open = new Set(
+      DIRECTIONS.filter(
+        (d) => (d === 'outbound' ? lane.outboundStatus : lane.inboundStatus).status !== 'paused',
+      ),
+    )
+    await checkLaneHooks(
+      chain,
+      state,
+      open,
+      (d) => (expected.has(d) ? 'error' : 'warning'),
+      add,
+      !!post,
+    )
 
     // the long-data fee floor: the program sends long data only with an enabled fee record whose
     // destination bytes cover it (`require_dest_bytes_overhead`)
@@ -805,7 +822,26 @@ export async function checkSolanaMultiTokenPoolLane(
     if (!isUnread(router) && evmRemote && !outboundPaused) {
       const severity = expected.has('outbound') ? 'error' : 'warning'
       try {
-        const locks = await sendLocks(chain, router, key.mint, key.selector, params.lockBudget)
+        // the resolver runs on chain state: after a write, the pool-group accounts the write adds
+        // to (or removes from) a send are counted on top (S4 review M1)
+        const delta = post
+          ? sendLockDelta(
+              (
+                await readPoolGroupLaneStates(chain, key.program, [
+                  { mint: key.mint, selector: key.selector },
+                ])
+              )[0] ?? null,
+              state,
+            )
+          : 0
+        const locks = await sendLocks(
+          chain,
+          router,
+          key.mint,
+          key.selector,
+          params.lockBudget,
+          delta,
+        )
         if (locks === undefined)
           add(
             'ACCOUNT_LOCKS_EXCEEDED',

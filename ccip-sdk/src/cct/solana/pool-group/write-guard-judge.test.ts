@@ -474,3 +474,205 @@ describe('judgePoolGroupWrite', () => {
     assert.deepEqual(r.affectedLanes, [])
   })
 })
+
+describe('judgePoolGroupWrite: S4 review fixes', () => {
+  const live = () => linked({ sources: [0, 0, 0, 1] }, groupChainData())
+  const engine = {
+    program: Keypair.generate().publicKey,
+    statics: [Keypair.generate().publicKey, Keypair.generate().publicKey],
+    onSend: true,
+    onReceive: false,
+  }
+
+  it('M1: a hook change on a live lane runs the lane check on the post-state', async () => {
+    const after = new Map([[GCP, groupChainData({ hook: { engine } })]])
+    const c = checker(['ACCOUNT_LOCKS_EXCEEDED'])
+    await assert.rejects(judge(chainFor(live(), after), c), refusedWith('ACCOUNT_LOCKS_EXCEEDED'))
+    assert.deepEqual(
+      c.calls.map((x) => x.post),
+      [true, false],
+    )
+  })
+
+  it('M1: the send footprint counts the records and the hook accounts a send resolves', async () => {
+    const { readPoolGroupLaneStates } = await import('./operations/lane.ts')
+    const { laneSendFootprint, sendLockDelta } = await import('./lane-hooks.ts')
+    const read = async (gcp: Buffer) => {
+      const [s] = await readPoolGroupLaneStates(
+        chainWith(linked({ sources: [0, 0, 0, 1] }, gcp)),
+        PROGRAM,
+        [{ mint: MINT, selector: SEPOLIA }],
+      )
+      assert.ok(s && 'chainConfig' in s)
+      return s
+    }
+    const plain = await read(groupChainData())
+    assert.deepEqual([...laneSendFootprint(plain)], [GCP.toBase58()])
+    const hooked = await read(
+      groupChainData({
+        hook: {
+          allowlist: Keypair.generate().publicKey,
+          blocklist: Keypair.generate().publicKey,
+          engine,
+        },
+      }),
+    )
+    // allowlist entry 1, blocklist entries 2, engine program, hook authority and 2 statics 4
+    assert.equal(sendLockDelta(plain, hooked), 7)
+    assert.equal(sendLockDelta(hooked, plain), -7)
+    // a receive-only engine adds nothing to a send
+    const receiveOnly = await read(
+      groupChainData({ hook: { engine: { ...engine, onSend: false, onReceive: true } } }),
+    )
+    assert.equal(sendLockDelta(plain, receiveOnly), 0)
+  })
+
+  it('M2: an unreadable lane is refused at unreadableSeverity error, whatever failsClosedSeverity', async () => {
+    const broken = Buffer.concat([policyChainData(2, 0).subarray(0, 8), Buffer.alloc(3)])
+    const before = linked({ sources: [0, 2, 0, 0] }, groupChainData(), broken)
+    const after = new Map([[GCP, groupChainData({ groupPaused: true })]])
+    await assert.rejects(
+      judge(chainFor(before, after), {
+        failsClosedSeverity: 'warning',
+        unreadableSeverity: 'error',
+      }),
+      refusedWith('LANE_UNREADABLE'),
+    )
+  })
+
+  it('M4: bestEffort reports a lane listing the RPC refuses instead of refusing the write', async () => {
+    const before = live()
+    const after = new Map([[GCP, groupChainData({ groupPaused: true })]])
+    const gpaRefused = chainFor(before, after)
+    Object.assign(gpaRefused.connection, {
+      getProgramAccounts: async () => {
+        throw new Error('410 Gone: getProgramAccounts is disabled')
+      },
+    })
+    await assert.rejects(judge(gpaRefused))
+    const r = await judge(gpaRefused, { bestEffort: true })
+    assert.match(r.unlisted ?? '', /getProgramAccounts/)
+    assert.deepEqual(r.affectedLanes, [])
+  })
+})
+
+describe('PoolGroupWriteOperation partition (S4 review M5)', () => {
+  it('a lane the judge refuses is left out and reported; the write builds without it', async () => {
+    const { PoolGroupWriteOperation, parseWriteBase } = await import('./write-operation.ts')
+    type Parsed = ReturnType<typeof parseWriteBase>
+    const before = linked({ sources: [0, 0, 0, 0] }, groupChainData({ groupPaused: true }))
+    const after = new Map([[GCP, groupChainData()]])
+    const failing = checker(['NO_REMOTE_POOL'])
+    class Crank extends PoolGroupWriteOperation<{ payer: string }, Parsed> {
+      readonly name = 'crank'
+      protected override prepare(p: { payer: string }): Parsed {
+        return parseWriteBase(this.name, PROGRAM, p)
+      }
+      protected plan(_chain: unknown, parsed: Parsed) {
+        const out = !!parsed.excludedLanes?.some((l) => l.tokenAddress === MINT.toBase58())
+        return Promise.resolve({
+          group: GROUP,
+          items: out ? [] : [{ tokenAddresses: [MINT.toBase58()], instructions: [writeOf()] }],
+          judge: { checkLane: failing.checkLane },
+          expected: {},
+          extra: {},
+          partition: {
+            operation: 'crank',
+            inputs: (left: { tokenAddress: string }[]) => ({
+              tokenAddresses: left.map((l) => l.tokenAddress),
+            }),
+          },
+        })
+      }
+      protected fromInstructions(): Parsed {
+        throw new Error('not used')
+      }
+    }
+    const r = await new Crank().generate(chainFor(before, after), { payer: PAYER.toBase58() })
+    assert.deepEqual(r.transactions, [])
+    assert.deepEqual(
+      r.findings.map((f) => [f.check, f.severity]),
+      [['NO_REMOTE_POOL', 'warning']],
+    )
+    assert.deepEqual(r.followUps, [
+      {
+        operation: 'crank',
+        reason:
+          '1 lane(s) were left out because the lane check refused them: fix the findings, then run it again for them',
+        inputs: { tokenAddresses: [MINT.toBase58()] },
+      },
+    ])
+  })
+})
+
+describe('S4 review: hook rules (M1) and Squads pauses (M3)', () => {
+  it("M1: a hook list that is not the program's is refused; an empty enabled allowlist warns", async () => {
+    const { readPoolGroupLaneStates } = await import('./operations/lane.ts')
+    const { checkLaneHooks } = await import('./lane-hooks.ts')
+    const allowlist = Keypair.generate().publicKey
+    const blocklist = Keypair.generate().publicKey
+    const accounts = linked(
+      { sources: [0, 0, 0, 1] },
+      groupChainData({ hook: { allowlist, blocklist } }),
+    )
+    accounts.set(allowlist.toBase58(), {
+      owner: PROGRAM,
+      data: account(
+        'Allowlist',
+        encodeType('Allowlist', (v) =>
+          Object.assign(v, { version: 1, group: GROUP, enabled: true }),
+        ),
+      ),
+    })
+    const chain = chainWith(accounts)
+    const [state] = await readPoolGroupLaneStates(chain, PROGRAM, [
+      { mint: MINT, selector: SEPOLIA },
+    ])
+    assert.ok(state && 'chainConfig' in state)
+    const found: [string, string, string][] = []
+    await checkLaneHooks(
+      chain,
+      state,
+      new Set(['outbound', 'inbound'] as const),
+      () => 'error',
+      (check, severity, reason) => found.push([check, severity, reason]),
+      true,
+    )
+    assert.deepEqual(
+      found.map(([c, s, r]) => [c, s, /blocklist/.test(r) ? 'blocklist' : 'allowlist']),
+      [
+        ['HOOK_CALLER_MISSING', 'warning', 'allowlist'],
+        ['HOOK_CALLER_MISSING', 'error', 'blocklist'],
+        ['HOOK_CALLER_MISSING', 'warning', 'blocklist'],
+      ],
+    )
+  })
+
+  it('M3: a one-direction pause under Squads is refused before any RPC', async () => {
+    const { POOL_GROUP_PAUSE_OPERATIONS } = await import('./operations/pauses.ts')
+    const chain = chainWith(new Map())
+    const base = {
+      poolProgramAddress: PROGRAM.toBase58(),
+      poolGroupAddress: GROUP.toBase58(),
+      payer: PAYER.toBase58(),
+      budget: { executor: 'squads-v4' as const },
+    }
+    await assert.rejects(
+      POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupChainPause.generate(chain, {
+        ...base,
+        remoteChainSelector: SEPOLIA,
+        pausedOutbound: true,
+      }),
+      (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'pausedInbound',
+    )
+    await assert.rejects(
+      POOL_GROUP_PAUSE_OPERATIONS.setPoolGroupLanePause.generate(chain, {
+        ...base,
+        tokenAddress: MINT.toBase58(),
+        remoteChainSelectors: [SEPOLIA],
+        pausedInbound: true,
+      }),
+      (e: unknown) => e instanceof CCTParamsInvalidError && e.context.param === 'pausedOutbound',
+    )
+  })
+})

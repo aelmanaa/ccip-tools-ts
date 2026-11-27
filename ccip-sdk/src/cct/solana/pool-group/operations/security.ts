@@ -25,6 +25,7 @@ import type { SolanaChain } from '../../../../solana/index.ts'
 import { deriveTokenPoolChainConfigV2Pda } from '../../../../solana/token-pool.ts'
 import { getMultipleAccountsInfoPaged } from '../../../../solana/utils.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
+import type { MultiTokenPoolLaneFinding } from '../../../multi-token-pool.ts'
 import type { SolanaGenerateParams } from '../../operation.ts'
 import { deriveTokenPoolConfigPda } from '../../programs/token-pool.ts'
 import { parsePublicKey, validateInteger } from '../../validate.ts'
@@ -247,7 +248,7 @@ function requireDefaultsKept(
       throw new CCTParamsInvalidError(
         operation,
         dir,
-        "a non-empty CCV list must keep 'default' (the lane defaults) unless dropping them is allowed (GroupCcvsMustIncludeDefaults): add 'default', or allow it first with setPoolGroupAllowDroppingDefaultCCVs",
+        "a non-empty CCV list must keep 'default' (the lane defaults) unless dropping them is allowed (DefaultCcvsRequired): add 'default', or allow it first with setPoolGroupAllowDroppingDefaultCCVs",
       )
   }
 }
@@ -275,11 +276,33 @@ const single = (ix: TransactionInstruction, owner: PublicKey, authority: PublicK
 })
 
 /** The follow-ups of a CCV change: sync the lanes it leaves failing closed. */
-const syncFollowUps = (judgement: PoolGroupJudgement | null) =>
+const syncFollowUps = (target: Target) => (judgement: PoolGroupJudgement | null) =>
   ccvSyncFollowUps(
     judgement,
-    "these lanes have not copied the new CCV set: they fail closed from its activation until synced (syncPoolGroupCCVs, or syncPoolGroupPolicyCCVs for a named policy's lanes)",
+    'these lanes have not copied the new CCV set: they fail closed from its activation until synced',
+    target.policyId,
   )
+
+/**
+ * The syncs an activation needs when its lanes could not be listed: every lane of each chain the
+ * target reaches (the sync lists them itself, or takes `tokenAddresses`).
+ */
+function activateUnlistedFollowUps(
+  target: Target,
+  t: ReadTarget,
+  unlisted: string,
+): PoolGroupFollowUp[] {
+  const selectors =
+    target.selector !== undefined ? [target.selector] : t.group.chainSelectors.map(toBigInt)
+  return selectors.map((remoteChainSelector) => ({
+    operation: target.policyId === undefined ? 'syncPoolGroupCCVs' : 'syncPoolGroupPolicyCCVs',
+    reason: `the lanes were not listed (${unlisted}): every lane on the target fails closed until synced`,
+    inputs: {
+      ...(target.policyId !== undefined && { policyId: target.policyId }),
+      remoteChainSelector,
+    },
+  }))
+}
 
 /** The kept values of a SECURITY write. @internal */
 export const securityExpected = (target: Target, t: ReadTarget) => ({
@@ -374,20 +397,28 @@ export class SchedulePoolGroupCCVs extends PoolGroupWriteOperation<
       pending && toBigInt(pending.activatesAt) > t.now
         ? [
             {
-              operation: 'syncPoolGroupCCVs',
+              operation:
+                target.policyId === undefined ? 'syncPoolGroupCCVs' : 'syncPoolGroupPolicyCCVs',
               reason: `the schedule replaces the pending set of epoch ${toBigInt(pending.epoch)} (activating at ${toBigInt(pending.activatesAt)}): lanes that copied it must re-sync`,
-              inputs: { target },
+              inputs: {
+                ...(target.policyId !== undefined && { policyId: target.policyId }),
+                ...(target.selector !== undefined && { remoteChainSelector: target.selector }),
+              },
             },
           ]
         : []
     return {
       group: ref.group,
       items: [single(ix, t.group.owner, authority)],
-      // lanes that have not copied the new set fail closed from its activation: reported, synced
-      judge: { failsClosedSeverity: 'warning' },
+      // lanes that have not copied the new set fail closed from its activation: reported, synced;
+      // a lane that cannot be read is refused (M2)
+      judge: { failsClosedSeverity: 'warning', unreadableSeverity: 'error' },
       expected: { ...securityExpected(target, t), 'group.minCcvActivationDelay': earliest - t.now },
       extra: { activatesAt },
-      followUps: (judgement): PoolGroupFollowUp[] => [...replaced, ...syncFollowUps(judgement)],
+      followUps: (judgement): PoolGroupFollowUp[] => [
+        ...replaced,
+        ...syncFollowUps(target)(judgement),
+      ],
     }
   }
 
@@ -460,10 +491,28 @@ export class ActivatePoolGroupCCVsNow extends PoolGroupWriteOperation<
     return {
       group: ref.group,
       items: [single(ix, t.group.owner, authority)],
-      judge: { failsClosedSeverity: 'warning' },
+      // the emergency swap only closes lanes (every copy goes out of epoch): it never waits on lane
+      // listings or reads, which are reported instead (S4 review M4)
+      judge: {
+        failsClosedSeverity: 'warning',
+        unreadableSeverity: 'warning',
+        goingLiveSeverity: 'warning',
+        bestEffort: true,
+      },
       expected: securityExpected(target, t),
       extra: {},
-      followUps: syncFollowUps,
+      followUps: (judgement): PoolGroupFollowUp[] => [
+        ...syncFollowUps(target)(judgement),
+        ...(judgement?.unlisted ? activateUnlistedFollowUps(target, t, judgement.unlisted) : []),
+        {
+          operation: 'checkMultiTokenPoolLane',
+          reason:
+            'the new set applies at once: messages in flight were verified under the old set and may fail to execute until the CCVs of the new set attest them',
+          inputs: {
+            ...(target.selector !== undefined && { remoteChainSelector: target.selector }),
+          },
+        },
+      ],
     }
   }
 
@@ -596,14 +645,15 @@ export class ResetPoolGroupPolicySecurity extends PoolGroupWriteOperation<
     return {
       group: ref.group,
       items: [single(ix, t.group.owner, authority)],
-      judge: { failsClosedSeverity: 'warning' },
+      // reset re-opens lanes held closed: one that cannot be read is refused, never opened (M2)
+      judge: { failsClosedSeverity: 'warning', unreadableSeverity: 'error' },
       expected: {
         ...securityExpected({ policyId }, t),
         'group.securityGeneration': t.group.securityGeneration,
         [`policy.${policyId}.records`]: t.metas.slice(1).map((m) => m.pubkey.toBase58()),
       },
       extra: {},
-      followUps: syncFollowUps,
+      followUps: syncFollowUps({ policyId }),
     }
   }
 
@@ -722,9 +772,13 @@ abstract class SyncCCVs<P extends SyncPoolGroupCCVsParams> extends PoolGroupWrit
         )
     const states = await readPoolGroupLaneStates(chain, ref.program, requests)
     const lanes: { mint: PublicKey; synced: boolean }[] = []
+    const excluded = new Set((parsed.excludedLanes ?? []).map((l) => l.tokenAddress))
+    // a listed lane that cannot be read is reported, never skipped silently (S4 review M5)
+    const findings: MultiTokenPoolLaneFinding[] = []
     requests.forEach(({ mint }, i) => {
       const s = states[i]
       const where = `the lane of ${mint.toBase58()} toward ${selector}`
+      if (excluded.has(mint.toBase58())) return
       if (!s || isUnread(s)) {
         if (mints)
           throw new CCTParamsInvalidError(
@@ -732,6 +786,14 @@ abstract class SyncCCVs<P extends SyncPoolGroupCCVsParams> extends PoolGroupWrit
             'tokenAddresses',
             `${where} cannot be read${s ? ` (${s.reason})` : ': it does not exist'}`,
           )
+        if (s)
+          findings.push({
+            check: 'LANE_UNREADABLE',
+            severity: 'warning',
+            tokenAddress: mint.toBase58(),
+            remoteChainSelector: selector,
+            reason: `${where} cannot be read (${s.reason}), so it is not synced: check it with getPoolGroupLane`,
+          })
         return
       }
       const source =
@@ -755,7 +817,8 @@ abstract class SyncCCVs<P extends SyncPoolGroupCCVsParams> extends PoolGroupWrit
     const expected = {
       [`lanes.${selector}.ccvSync`]: lanes.map((l) => [l.mint.toBase58(), l.synced]),
     }
-    if (!lanes.length) return { group: ref.group, items: [], judge: null, expected, extra: {} }
+    if (!lanes.length)
+      return { group: ref.group, items: [], judge: null, expected, extra: {}, findings }
     const stateAddresses = lanes.map((l) => deriveTokenPoolConfigPda(ref.program, l.mint))
     const stateInfos = await getMultipleAccountsInfoPaged(chain.connection, stateAddresses)
     const entries = lanes.map((l, i) => {
@@ -823,6 +886,16 @@ abstract class SyncCCVs<P extends SyncPoolGroupCCVsParams> extends PoolGroupWrit
       judgeEach: true,
       expected,
       extra: {},
+      findings,
+      // each lane syncs alone: one the lane check refuses is left out, the others are built (M5)
+      partition: {
+        operation: this.name,
+        inputs: (left) => ({
+          remoteChainSelector: selector,
+          ...(parsed.policyId !== undefined && { policyId: parsed.policyId }),
+          tokenAddresses: left.map((l) => l.tokenAddress),
+        }),
+      },
     }
   }
 
