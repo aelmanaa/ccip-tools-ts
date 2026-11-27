@@ -36,6 +36,7 @@ import {
   validateOneOf,
   validateUint8,
 } from '../../validate.ts'
+import type { DecodedMultiTokenPoolWrite } from '../calldata.ts'
 import { type MultiTokenPoolTokenProfileFields, assertProviderHasCode } from '../contracts.ts'
 import {
   type MultiTokenPoolRecordState,
@@ -478,15 +479,31 @@ export class ApplyMultiTokenPoolTokenProfileUpdates extends PoolConfigManagerWri
         next.additionalPoolDataProvider ?? ZeroAddress,
       ]),
     ])
-    // the values the write replaces: each touched token's stored profile
-    // an unregistered token seals as such: a registration before the send moves the snapshot
-    const expected = Object.fromEntries(
-      tokens.map((t) => [
-        `profiles.${t}`,
-        stored.get(t) ?? { tokenAddress: t, isRegistered: false },
-      ]),
+    return { data }
+  }
+
+  /**
+   * Each token the calldata removes or sets, its stored profile; an unregistered token seals as
+   * such, so a registration before the send moves the snapshot.
+   */
+  protected sealedFrom(
+    _chain: EVMChain,
+    { profiles }: DecodedMultiTokenPoolWrite,
+    { state }: PoolConfigManagerWriteContext,
+  ): Record<string, unknown> {
+    const tokens = new Set([
+      ...(profiles?.remove ?? []),
+      ...(profiles?.set ?? []).map((p) => p.tokenAddress),
+    ])
+    return Object.fromEntries(
+      [...tokens].map((t) => {
+        const profile = tokenRecordsOf(state, t)?.profile
+        return [
+          `profiles.${t}`,
+          profile?.isRegistered ? profile : { tokenAddress: t, isRegistered: false },
+        ]
+      }),
     )
-    return { data, expected }
   }
 
   /** The store's flavor and address rules, refused before the eth_call names them. */

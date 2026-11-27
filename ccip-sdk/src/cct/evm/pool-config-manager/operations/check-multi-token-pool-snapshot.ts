@@ -17,6 +17,7 @@ import {
   parseMultiTokenPoolSnapshot,
   serializeMultiTokenPoolSnapshot,
 } from '../../../multi-token-pool.ts'
+import { latestBlock } from '../../mined-block.ts'
 import { EVMQuery } from '../../query.ts'
 import { validateNonZeroAddress } from '../../validate.ts'
 import { resolvePoolConfigManagerTarget } from '../contracts.ts'
@@ -27,6 +28,37 @@ import {
   snapshotChanges,
 } from '../guard-run.ts'
 import { type MultiTokenPoolGuardOptions, validateMultiTokenPoolGuardOptions } from '../guards.ts'
+import type { PoolConfigManagerWriteOperation } from '../write-operation.ts'
+import { ApplyMultiTokenPoolConnectionPolicyConfigUpdates } from './apply-multi-token-pool-connection-policy-config-updates.ts'
+import { ApplyMultiTokenPoolDestOverheadPolicyConfigUpdates } from './apply-multi-token-pool-dest-overhead-policy-config-updates.ts'
+import { ApplyMultiTokenPoolFeePolicyConfigUpdates } from './apply-multi-token-pool-fee-policy-config-updates.ts'
+import { ApplyMultiTokenPoolInlineConnectionConfigUpdates } from './apply-multi-token-pool-inline-connection-config-updates.ts'
+import { ApplyMultiTokenPoolInlineDestOverheadConfigUpdates } from './apply-multi-token-pool-inline-dest-overhead-config-updates.ts'
+import { ApplyMultiTokenPoolInlineFeeConfigUpdates } from './apply-multi-token-pool-inline-fee-config-updates.ts'
+import { ApplyMultiTokenPoolInlineRateLimitBucketUpdates } from './apply-multi-token-pool-inline-rate-limit-bucket-updates.ts'
+import { ApplyMultiTokenPoolInlineRateLimitConfigUpdates } from './apply-multi-token-pool-inline-rate-limit-config-updates.ts'
+import { ApplyMultiTokenPoolInlineRemotePoolConfigUpdates } from './apply-multi-token-pool-inline-remote-pool-config-updates.ts'
+import { ApplyMultiTokenPoolInlineSecurityConfigUpdates } from './apply-multi-token-pool-inline-security-config-updates.ts'
+import { ApplyMultiTokenPoolRateLimitPolicyBucketUpdates } from './apply-multi-token-pool-rate-limit-policy-bucket-updates.ts'
+import { ApplyMultiTokenPoolRateLimitPolicyConfigUpdates } from './apply-multi-token-pool-rate-limit-policy-config-updates.ts'
+import { ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates } from './apply-multi-token-pool-remote-pool-policy-config-updates.ts'
+import { ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates } from './apply-multi-token-pool-remote-token-address-provider-updates.ts'
+import { ApplyMultiTokenPoolSecurityPolicyConfigUpdates } from './apply-multi-token-pool-security-policy-config-updates.ts'
+import { ApplyMultiTokenPoolSubsetTokenUpdates } from './apply-multi-token-pool-subset-token-updates.ts'
+import { ApplyMultiTokenPoolTokenPolicyUpdates } from './apply-multi-token-pool-token-policy-updates.ts'
+import { ApplyMultiTokenPoolTokenProfileUpdates } from './apply-multi-token-pool-token-profile-updates.ts'
+import {
+  PauseMultiTokenPoolChains,
+  PauseMultiTokenPoolGlobally,
+  PauseMultiTokenPoolTokens,
+  UnpauseMultiTokenPoolChains,
+  UnpauseMultiTokenPoolGlobally,
+  UnpauseMultiTokenPoolTokens,
+} from './pause-multi-token-pool.ts'
+import {
+  LiftMultiTokenPoolLaneStops,
+  StopMultiTokenPoolLanes,
+} from './stop-multi-token-pool-lanes.ts'
 
 /**
  * Parameters for `checkMultiTokenPoolSnapshot`: re-reads the state, and re-runs the full post-state
@@ -40,6 +72,47 @@ export type CheckMultiTokenPoolSnapshotParams = MultiTokenPoolRemoteCheckOptions
   /** The account that will execute (the Safe or timelock). */
   sender: string
 }
+
+/**
+ * Every PCM record write, by op name. What each sealed (the values its calldata replaces) is read
+ * again through the op's own `sealedFrom`, on the proposal's calldata and a fresh read: the check
+ * never takes a sealed value as the current one. A unit test keeps this list equal to the op map's
+ * record-changing PCM ops.
+ * @internal
+ */
+export const RECORD_WRITE_OPS: ReadonlyMap<
+  string,
+  PoolConfigManagerWriteOperation<never>
+> = new Map(
+  [
+    new ApplyMultiTokenPoolConnectionPolicyConfigUpdates(),
+    new ApplyMultiTokenPoolDestOverheadPolicyConfigUpdates(),
+    new ApplyMultiTokenPoolFeePolicyConfigUpdates(),
+    new ApplyMultiTokenPoolInlineConnectionConfigUpdates(),
+    new ApplyMultiTokenPoolInlineDestOverheadConfigUpdates(),
+    new ApplyMultiTokenPoolInlineFeeConfigUpdates(),
+    new ApplyMultiTokenPoolInlineRateLimitBucketUpdates(),
+    new ApplyMultiTokenPoolInlineRateLimitConfigUpdates(),
+    new ApplyMultiTokenPoolInlineRemotePoolConfigUpdates(),
+    new ApplyMultiTokenPoolInlineSecurityConfigUpdates(),
+    new ApplyMultiTokenPoolRateLimitPolicyBucketUpdates(),
+    new ApplyMultiTokenPoolRateLimitPolicyConfigUpdates(),
+    new ApplyMultiTokenPoolRemotePoolPolicyConfigUpdates(),
+    new ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates(),
+    new ApplyMultiTokenPoolSecurityPolicyConfigUpdates(),
+    new ApplyMultiTokenPoolSubsetTokenUpdates(),
+    new ApplyMultiTokenPoolTokenPolicyUpdates(),
+    new ApplyMultiTokenPoolTokenProfileUpdates(),
+    new PauseMultiTokenPoolGlobally(),
+    new UnpauseMultiTokenPoolGlobally(),
+    new PauseMultiTokenPoolTokens(),
+    new UnpauseMultiTokenPoolTokens(),
+    new PauseMultiTokenPoolChains(),
+    new UnpauseMultiTokenPoolChains(),
+    new StopMultiTokenPoolLanes(),
+    new LiftMultiTokenPoolLaneStops(),
+  ].map((op) => [op.name, op as unknown as PoolConfigManagerWriteOperation<never>]),
+)
 
 /**
  * Re-checks a pending multi-token pool proposal.
@@ -109,6 +182,21 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
         `snapshot.expected.${GUARD_POOL_PATH}`,
         'is not an address',
       )
+    const op = RECORD_WRITE_OPS.get(snapshot.operation)
+    if (!op)
+      throw new CCTParamsInvalidError(
+        this.name,
+        'snapshot.operation',
+        `${snapshot.operation} is not a multi-token pool write this check can re-read`,
+      )
+    // what the proposal replaces, read now through the op itself: never the sealed values
+    const blockTag = await latestBlock(chain)
+    const expected = await op.freshSealed(chain, {
+      data: tx.data as string,
+      address,
+      version,
+      blockTag,
+    })
     const result = await runMultiTokenPoolGuards({
       ...options,
       chain,
@@ -116,14 +204,11 @@ export class CheckMultiTokenPoolSnapshot extends EVMQuery<
       errorOperation: this.name,
       poolConfigManager: address,
       version,
+      blockTag,
       ...(typeof pool === 'string' && { poolAddress: pool }),
       data: tx.data as string,
       sender,
-      expected: Object.fromEntries(
-        Object.entries(snapshot.expected).filter(
-          ([path]) => path !== GUARD_OPTIONS_PATH && path !== GUARD_POOL_PATH,
-        ),
-      ),
+      expected,
       ...(getChain && { getChain }),
       ...(remoteAttestations && { remoteAttestations }),
       reportFindings: true,

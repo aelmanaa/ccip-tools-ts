@@ -30,6 +30,7 @@ import {
   tokenRolesGate,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateOneOf } from '../../validate.ts'
+import type { DecodedMultiTokenPoolWrite } from '../calldata.ts'
 import { type MultiTokenPoolLaneKey, toAbiLaneKey, validateLaneKeys } from '../contracts.ts'
 import { encodeRateLimits } from '../decode.ts'
 import {
@@ -48,6 +49,7 @@ import {
   type PoolConfigManagerWriteParams,
   PoolConfigManagerWriteOperation,
 } from '../write-operation.ts'
+import { inlineLanesOf, inlineRecordsSealed } from './record-writes.ts'
 
 /**
  * Parameters of `stopMultiTokenPoolLanes`: the lanes to stop, and the direction. A stop is the
@@ -189,7 +191,7 @@ export class StopMultiTokenPoolLanes extends LaneStopWriteOperation<StopMultiTok
   protected async encode(
     _chain: EVMChain,
     { lanes, direction }: StopMultiTokenPoolLanesParams,
-    { address, version, state }: PoolConfigManagerWriteContext,
+    { version, state }: PoolConfigManagerWriteContext,
   ): Promise<PoolConfigManagerWrite> {
     const resolved = resolveMultiTokenPoolLanes(state, lanes)
     const set = lanes.map((lane, i) => {
@@ -209,20 +211,28 @@ export class StopMultiTokenPoolLanes extends LaneStopWriteOperation<StopMultiTok
           `lanes[${i}]`,
           `is already stopped ${direction}: nothing to do (lift it with liftMultiTokenPoolLaneStops)`,
         )
-      return { lane, rateLimits: stoppedRateLimits(rateLimits, direction), before: rateLimits }
+      return { lane, rateLimits: stoppedRateLimits(rateLimits, direction) }
     })
-    // the record each stop replaces (absent: `null`) and the buckets it copied: what a lift restores;
-    // the PCM binds the snapshot to this pool's records (another pool may name the same token)
-    const expected = {
+    return { data: this.calldata(version, [], set) }
+  }
+
+  /**
+   * The record each stopped lane's set replaces (absent: `null`) and the buckets it copied: what a
+   * lift restores; the PCM binds the snapshot to this pool's records (another pool may name the same
+   * token).
+   */
+  protected sealedFrom(
+    _chain: EVMChain,
+    decoded: DecodedMultiTokenPoolWrite,
+    { address, state }: PoolConfigManagerWriteContext,
+  ): Record<string, unknown> {
+    const lanes = inlineLanesOf(decoded, 'rateLimit')
+    const resolved = resolveMultiTokenPoolLanes(state, lanes)
+    return {
       [STOP_PCM_PATH]: getAddress(address),
-      ...Object.fromEntries(
-        set.flatMap(({ lane, before }) => [
-          [inlinePath(lane), inlineRecordOf(state, 'rateLimit', lane) ?? null],
-          [resolvedPath(lane), before],
-        ]),
-      ),
+      ...inlineRecordsSealed(state, 'rateLimit', lanes),
+      ...Object.fromEntries(lanes.map((lane, i) => [resolvedPath(lane), resolved[i]!.rateLimits])),
     }
-    return { data: this.calldata(version, [], set), expected }
   }
 }
 
@@ -354,10 +364,15 @@ export class LiftMultiTokenPoolLaneStops extends LaneStopWriteOperation<LiftMult
           `${lane.tokenAddress} has no rate limit policy to fall back to, so the lift needs the buckets: give rateLimits, or restore (the stop's snapshot)`,
         )
     })
-    // the values the write replaces: each lane's stopped record
-    const expected = Object.fromEntries(
-      lanes.map((lane) => [inlinePath(lane), inlineRecordOf(state, 'rateLimit', lane) ?? null]),
-    )
-    return { data: this.calldata(version, remove, set), expected }
+    return { data: this.calldata(version, remove, set) }
+  }
+
+  /** Each lifted lane's stopped record, as stored: the inline record the calldata removes or sets. */
+  protected sealedFrom(
+    _chain: EVMChain,
+    decoded: DecodedMultiTokenPoolWrite,
+    { state }: PoolConfigManagerWriteContext,
+  ): Record<string, unknown> {
+    return inlineRecordsSealed(state, 'rateLimit', inlineLanesOf(decoded, 'rateLimit'))
   }
 }

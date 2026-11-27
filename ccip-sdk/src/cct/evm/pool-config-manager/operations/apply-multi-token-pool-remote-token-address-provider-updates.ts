@@ -17,6 +17,7 @@ import {
   policyRolesGate,
 } from '../../multi-token-pool/contracts.ts'
 import { assertUnique, validateAddress, validateArray } from '../../validate.ts'
+import type { DecodedMultiTokenPoolWrite } from '../calldata.ts'
 import { type PolicyName, assertProviderHasCode, encodePolicyName } from '../contracts.ts'
 import { policyKey } from '../projection.ts'
 import {
@@ -135,16 +136,24 @@ export class ApplyMultiTokenPoolRemoteTokenAddressProviderUpdates extends PoolCo
         ]),
       ],
     )
-    // the values the write replaces: each policy's provider as it was
-    const expected = Object.fromEntries(
-      updates.map((u) => {
-        const word = policyKey(u.policyName, 'policyName')
+    return { data }
+  }
+
+  /** Each policy's provider the calldata sets, as it was. */
+  protected sealedFrom(
+    _chain: EVMChain,
+    { changes }: DecodedMultiTokenPoolWrite,
+    { state }: PoolConfigManagerWriteContext,
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      changes.flatMap((c) => {
+        if (c.kind !== 'setRemoteTokenAddressProvider') return []
+        const word = policyKey(c.policyName, 'policyName')
         const current = state.policies.remoteTokenAddressProviders.find(
           (p) => policyKey(p.policyName, 'policyName') === word,
         )
-        return [`providers.${word}`, current?.provider ?? null]
+        return [[`providers.${word}`, current?.provider ?? null]]
       }),
     )
-    return { data, expected }
   }
 }
