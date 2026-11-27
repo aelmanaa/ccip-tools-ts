@@ -83,6 +83,11 @@ export type SolanaLaneRemoteBack = {
   sends: 'legacy' | 'long'
   /** Its outbound bucket toward this chain. */
   outbound: RateLimiterState
+  /**
+   * A standard pool's fast-finality outbound bucket toward this chain, when core's token-pool read
+   * returns one (2.0 pools); absent otherwise (a multi-token pool's lane view holds its own).
+   */
+  fastOutbound?: { state: RateLimiterState }
   /** Whether a hook resolves on the remote lane (adds to the destination gas floor). */
   hasHooks: boolean
 }
@@ -261,6 +266,9 @@ export async function readEvmRemote(
         allowLegacyFromServing: true,
         sends: 'legacy',
         outbound: found.outboundRateLimiterState,
+        ...('fastOutboundRateLimiterState' in found && {
+          fastOutbound: { state: found.fastOutboundRateLimiterState },
+        }),
         hasHooks: false,
       }
   }

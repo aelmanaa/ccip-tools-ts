@@ -545,11 +545,29 @@ describe('removal goldens', () => {
     assert.deepEqual(remoteStopOf(known({ registryPool: null })), { stopped: true })
     // a standard pool: no chain config toward us, or a 0/0 limiter, is stopped; else it sends
     assert.deepEqual(remoteStopOf(known({})), { stopped: true })
-    assert.deepEqual(remoteStopOf(known({ back: { outbound: bucket(0n, 0n) } })), { stopped: true })
+    // a 2.0 standard pool: 0/0 on both buckets is stopped; a 0/0 default with FTF enabled still sends
+    assert.deepEqual(
+      remoteStopOf(
+        known({ back: { outbound: bucket(0n, 0n), fastOutbound: { state: bucket(0n, 0n) } } }),
+      ),
+      { stopped: true },
+    )
+    const ftf = remoteStopOf(
+      known({ back: { outbound: bucket(0n, 0n), fastOutbound: { state: bucket(10n, 1n) } } }),
+    )
+    assert.ok('stopped' in ftf && !ftf.stopped, 'FTF enabled: not stopped')
+    // no FTF bucket in the read: stopped by 0/0 only below 2.0; else unread (attestable)
+    assert.deepEqual(
+      remoteStopOf(known({ back: { outbound: bucket(0n, 0n) } }), undefined, 'pre-2.0'),
+      {
+        stopped: true,
+      },
+    )
+    assert.ok('unread' in remoteStopOf(known({ back: { outbound: bucket(0n, 0n) } })))
     // a disabled limiter (null) lets everything through: it sends
-    const open = remoteStopOf(known({ back: { outbound: null } }))
+    const open = remoteStopOf(known({ back: { outbound: null } }), undefined, 'pre-2.0')
     assert.ok('stopped' in open && !open.stopped)
-    const sends = remoteStopOf(known({ back: { outbound: bucket(10n, 1n) } }))
+    const sends = remoteStopOf(known({ back: { outbound: bucket(10n, 1n) } }), undefined, 'pre-2.0')
     assert.ok(
       'stopped' in sends && !sends.stopped,
       'a standard pool with a live limiter is read as sending, not attestable',

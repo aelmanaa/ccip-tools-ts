@@ -13,6 +13,7 @@
 
 import { PublicKey } from '@solana/web3.js'
 
+import type { RateLimiterState } from '../../../../chain.ts'
 import { ChainFamily } from '../../../../networks.ts'
 import { CCTParamsInvalidError } from '../../../errors.ts'
 import { stableChunks } from '../../../multi-token-pool-plan-engine.ts'
@@ -20,9 +21,12 @@ import {
   type MultiTokenPoolLane,
   type MultiTokenPoolLaneKey,
   type MultiTokenPoolPlanBlock,
+  type MultiTokenPoolRateLimits,
   LONG_POOL_DATA_BYTES,
+  isLaneStopped,
   longPoolDataBytes,
 } from '../../../multi-token-pool.ts'
+import type { RateLimitConfig } from '../../../rate-limit.ts'
 import { decodeRemoteAddress, laneFamilyOf } from '../../../remote-address.ts'
 import { readTokenPoolChainConfigV2 } from '../../token-pool/operations/chain-config-v2.ts'
 import { EditChainConfigV2 } from '../../token-pool/operations/edit-chain-config-v2.ts'
@@ -247,26 +251,65 @@ export async function readRemoteStop(
     ...base,
     getMultiTokenPoolLane: async (r, p) => (view = await base.getMultiTokenPoolLane(r, p)),
   })
-  return remoteStopOf(side, view)
+  // a standard pool with no FTF bucket in core's read: none only below 2.0 (no FTF there)
+  let ftfVersion: 'pre-2.0' | 'unread' | undefined
+  if (
+    side.status === 'known' &&
+    side.registryPool !== null &&
+    !side.readsLongData &&
+    side.back &&
+    !side.back.fastOutbound
+  ) {
+    const version = await remote
+      .typeAndVersion(side.registryPool)
+      .then(([, v]) => v)
+      .catch(() => undefined)
+    ftfVersion = version !== undefined && Number(version.split('.')[0]) < 2 ? 'pre-2.0' : 'unread'
+  }
+  return remoteStopOf(side, view, ftfVersion)
 }
+
+/** A core rate limiter state as a bucket config (`null`: disabled). */
+const bucketOf = (state: RateLimiterState): RateLimitConfig =>
+  state ? { enabled: true, capacity: state.capacity, rate: state.rate } : { enabled: false }
 
 /**
  * The remote stop a read of the remote side shows (pure): see {@link readRemoteStop}.
  * @param view - The registry's multi-token pool lane, when `readEvmRemote` read one.
+ * @param ftfVersion - For a standard pool whose read shows no FTF bucket: `'pre-2.0'` (none
+ *   exists), else unread.
  * @internal
  */
-export function remoteStopOf(side: SolanaLaneRemoteSide, view?: MultiTokenPoolLane): RemoteStop {
+export function remoteStopOf(
+  side: SolanaLaneRemoteSide,
+  view?: MultiTokenPoolLane,
+  ftfVersion?: 'pre-2.0' | 'unread',
+): RemoteStop {
   if (side.status !== 'known') return { unread: side.reason, attestable: true }
   if (side.registryPool === null) return { stopped: true }
   // a standard pool, read through core's token-pool reads (S6 re-check R-minor 4): no chain config
   // toward this chain, or an enabled 0/0 outbound limiter (A17 stop), sends nothing here
   if (!side.readsLongData) {
-    const out = side.back?.outbound
     if (!side.back) return { stopped: true }
-    if (out && out.capacity === 0n && out.rate === 0n) return { stopped: true }
+    // a 2.0 pool sends fast-finality transfers through its FTF bucket when enabled, even with the
+    // default bucket at 0/0 (TokenPool.sol:427-434, :805-815): the shared rule judges both
+    const fast = side.back.fastOutbound
+    if (!fast && ftfVersion !== 'pre-2.0')
+      return {
+        unread: `the remote registry's standard pool ${side.registryPool} shows no fast-finality outbound bucket, so its stop is not read`,
+        attestable: true,
+      }
+    const off: RateLimitConfig = { enabled: false }
+    const limits: MultiTokenPoolRateLimits = {
+      outbound: bucketOf(side.back.outbound),
+      inbound: off,
+      fastFinalityOutbound: fast ? bucketOf(fast.state) : off,
+      fastFinalityInbound: off,
+    }
+    if (isLaneStopped(limits, 'outbound')) return { stopped: true }
     return {
       stopped: false,
-      reason: `the remote registry's standard pool ${side.registryPool} has a chain config toward this chain with an outbound limit that is not stopped`,
+      reason: `the remote registry's standard pool ${side.registryPool} has a chain config toward this chain whose outbound buckets (default and fast finality) are not both stopped`,
     }
   }
   if (!view)
